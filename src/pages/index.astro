@@ -301,42 +301,43 @@ const localBusinessJsonLd = {
 
                 <div class="reviews-strip" aria-label="Client reviews" role="list">
                     {homepageReviews.map((review: Review) => (
-                        <a
-                            href={`/reviews#review-${review.id}`}
-                            class="review-card-link"
-                            role="listitem"
-                        >
-                            <article class="card card--review-tile">
-                                <header class="review-card-header">
-                                    <h3 class="review-name">{review.clientNamePublic}</h3>
-                                    <p class="review-meta">
-                                        {labelProjectType(review.projectType)}
-                                        {review.location && <> · {review.location}</>}
-                                    </p>
-                                    <div
-                                        class="review-stars-row"
-                                        aria-label={`${review.rating} out of 5 stars`}
-                                    >
-                                        {Array.from({ length: 5 }).map((_, i) => (
-                                            <span class={i < review.rating ? "star filled" : "star"}>★</span>
-                                        ))}
-                                    </div>
-                                </header>
-                                    <p class="review-text">
-                                        {truncate(review.text)}
-                                    </p>
-
-                                    {review.photoUrl && (
-                                        <div class="review-photo-wrap">
-                                            <img
-                                                src={review.photoUrl}
-                                                alt={`${review.clientNamePublic}'s ${labelProjectType(review.projectType)} project${review.location ? ` in ${review.location}` : ""}`}
-                                                loading="lazy"
-                                            />
+                        <div role="listitem">
+                            <a
+                                href={`/reviews#review-${review.id}`}
+                                class="review-card-link"
+                            >
+                                <article class="card card--review-tile">
+                                    <header class="review-card-header">
+                                        <h3 class="review-name">{review.clientNamePublic}</h3>
+                                        <p class="review-meta">
+                                            {labelProjectType(review.projectType)}
+                                            {review.location && <> · {review.location}</>}
+                                        </p>
+                                        <div
+                                            class="review-stars-row"
+                                            aria-label={`${review.rating} out of 5 stars`}
+                                        >
+                                            {Array.from({ length: 5 }).map((_, i) => (
+                                                <span class={i < review.rating ? "star filled" : "star"}>★</span>
+                                            ))}
                                         </div>
-                                    )}
-                            </article>
+                                    </header>
+                                        <p class="review-text">
+                                            {truncate(review.text)}
+                                        </p>
+
+                                        {review.photoUrl && (
+                                            <div class="review-photo-wrap">
+                                                <img
+                                                    src={review.photoUrl}
+                                                    alt={`${review.clientNamePublic}'s ${labelProjectType(review.projectType)} project${review.location ? ` in ${review.location}` : ""}`}
+                                                    loading="lazy"
+                                                />
+                                            </div>
+                                        )}
+                                </article>
                         </a>
+                        </div>
                     ))}
                 </div>
 
