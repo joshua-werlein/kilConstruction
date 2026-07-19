@@ -49,7 +49,7 @@ async function workerFetchJsonWithRetry(binding: any, url: string, tries = 2): P
                     "Cache-Control": "no-store",
                     Pragma: "no-cache",
                 },
-                // @ts-expect-error: Cloudflare supports this in Workers
+                // Cloudflare supports this in Workers
                 cf: { cacheTtl: 0, cacheEverything: false },
             });
             const res = await binding.fetch(req);

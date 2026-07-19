@@ -113,7 +113,7 @@ main { flex: 1 0 auto; }
 .footer .fb svg {display:block;width: 2.1em;height: 2.1em;fill: currentColor;}
 .footer a { color: inherit; text-decoration: underline; text-underline-offset: 3px; font-size: 0.85rem; }
 .footer-admin { margin-left: auto; text-align: right; }
-.footer-admin a { font-size: 0.75rem; opacity: 0.45; text-decoration: none; transition: opacity 0.2s ease, text-decoration 0.2s ease; }
+.footer-admin a { font-size: 0.75rem; opacity: 0.55; text-decoration: none; transition: opacity 0.2s ease, text-decoration 0.2s ease; }
 .footer-admin a:hover, .footer-admin a:focus-visible {opacity: 0.9; text-decoration: none; }
 .footer-apparel a {font-size: 0.85rem;color: #fff;opacity: 0.8;text-decoration: none;transition: opacity 0.2s ease;}
 .footer-apparel a:hover,
