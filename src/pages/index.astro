@@ -90,11 +90,11 @@ try {
     ]);
 
     if (summaryRes && summaryRes.ok) {
-        reviewsSummary = await summaryRes.json();
+        reviewsSummary = await summaryRes.json() as ReviewsSummary;
     }
 
     if (listRes && listRes.ok) {
-        const data = await listRes.json();
+        const data = await listRes.json() as { reviews?: Review[] };
         homepageReviews = Array.isArray(data.reviews) ? data.reviews : [];
     }
 } catch (e) {
