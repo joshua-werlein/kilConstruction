@@ -25,6 +25,9 @@ let loadError: string | null = null;
 let projectName = slug.replace(/-/g, ' ').replace(/\b\w/g, s => s.toUpperCase());
 let projectDesc: string | undefined;
 
+let found = false;
+let listOk = false;
+
 async function workerFetchJsonWithRetry(binding: any, url: string, tries = 2): Promise<Response | null> {
     let last: Response | null = null;
     for (let i = 0; i < tries; i++) {
@@ -35,8 +38,7 @@ async function workerFetchJsonWithRetry(binding: any, url: string, tries = 2): P
                     Accept: "application/json",
                     "Cache-Control": "no-store",
                     Pragma: "no-cache",
-                },
-                // @ts-expect-error: Cloudflare supports this in Workers
+                },                
                 cf: { cacheTtl: 0, cacheEverything: false },
             });
             const res = await binding.fetch(req);
@@ -68,22 +70,30 @@ try {
         items.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
         if (j1.project?.name) projectName = j1.project.name;
         if (j1.project?.description) projectDesc = j1.project.description;
+        if (j1.project?.name || items.length > 0) found = true;
     }
 
-    if (!projectDesc) {
+ 
+     if (!projectDesc) {
         const apiList = new URL(API);
         apiList.searchParams.set('list', 'projects');
         const r2 = await workerFetchJsonWithRetry(GALLERY_WORKER, apiList.toString());
         if (r2 && r2.ok && r2.headers.get('content-type')?.includes('application/json')) {
+            listOk = true;
             const j2 = (await r2.json()) as { projects?: { slug: string; name?: string; description?: string }[] };
             const m = j2.projects?.find(p => p.slug === slug);
-            if (m?.name) projectName = m.name;
-            if (m?.description) projectDesc = m.description;
+            if (m) {
+                found = true;
+                if (m.name) projectName = m.name;
+                if (m.description) projectDesc = m.description;
+            }
         }
     }
 } catch (e: any) {
     loadError = e?.message ?? 'Network error';
 }
+
+if (!found && !loadError && listOk) { return new Response(null, { status: 404 }); }
 
 const cropName = (s: string) =>
     s
