@@ -13,7 +13,7 @@
     "astro": "^5.15.8"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260718.1",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "wrangler": "^4.49.0"
   }
 }
