@@ -8,18 +8,21 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
-// Bindings expected (add in Settings → Variables):
+// Bindings expected:
 //  - RESEND_API_KEY  (Secret)
 //  - FROM_EMAIL      (Text, a verified Resend sender, e.g. "KilCon <contact@kilcon.work>")
 //  - TO_EMAIL        (Text, contractor inbox)
 //  - TURNSTILE_SECRET (Text, optional)
-//  - RATE_LIMIT_KV   (KV Namespace binding)
-/* global RESEND_API_KEY, FROM_EMAIL, TO_EMAIL, TURNSTILE_SECRET, RATE_LIMIT_KV */
+//  - WRITE_LIMITER   (Rate limit binding — namespace 1002, shared with
+//                      kilcon-gallery-worker's /api/reviews/submit limiter)
 
-addEventListener("fetch", (event) => event.respondWith(router(event)));
+export default {
+  async fetch(request, env) {
+    return router(request, env);
+  },
+};
 
-async function router(event) {
-  const request = event.request;
+async function router(request, env) {
   const url = new URL(request.url);
 
   if (request.method === "OPTIONS" && url.pathname === "/api/contact") {
@@ -39,7 +42,7 @@ async function router(event) {
   }
 
   if (url.pathname === "/api/contact" && request.method === "POST") {
-    return handleContact(request);
+    return handleContact(request, env);
   }
 
   return new Response("Not found", { status: 404 });
@@ -57,33 +60,14 @@ const ALLOWED_ORIGINS = [
   "http://localhost:4321",
 ];
 
-// ====== KV-backed rate limiting =========================================
+// ====== Rate limiting (native binding) ==================================
 
-async function rateLimit(request, key, { windowMs, max }) {
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  const maxEffective = ip === "unknown" ? Math.min(max, 2) : max;
-  const kvKey = `rl:${ip}:${key}`;
-  const now = Date.now();
-
+async function checkRateLimit(limiter, key) {
   try {
-    const raw = await RATE_LIMIT_KV.get(kvKey);
-    let entry = raw ? JSON.parse(raw) : null;
-
-    if (!entry || now > entry.expires) {
-      entry = { count: 1, expires: now + windowMs };
-      await RATE_LIMIT_KV.put(kvKey, JSON.stringify(entry), {
-        expirationTtl: Math.ceil(windowMs / 1000),
-      });
-      return true;
-    }
-
-    entry.count++;
-    await RATE_LIMIT_KV.put(kvKey, JSON.stringify(entry), {
-      expirationTtl: Math.ceil((entry.expires - now) / 1000),
-    });
-    return entry.count <= maxEffective;
+    const { success } = await limiter.limit({ key });
+    return success;
   } catch (e) {
-    console.error("[rateLimit] KV error:", e);
+    console.error("[rateLimit] binding error:", e);
     return true; // fail open
   }
 }
@@ -102,7 +86,7 @@ function textResponse(body, status = 200) {
 }
 
 // --- Contact handler ---
-async function handleContact(request) {
+async function handleContact(request, env) {
   if (!request || !request.headers) {
     return textResponse("Bad request", 400);
   }
@@ -128,11 +112,9 @@ async function handleContact(request) {
     const company = (form.get("company") || "").toString().trim();
     if (company) { return redirectBack(request, ""); }
 
-    // KV-backed rate limiting
-    const allowed = await rateLimit(request, "contact", {
-      windowMs: 10 * 60_000,
-      max: 10,
-    });
+    // Rate limiting (native binding)
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    const allowed = await checkRateLimit(env.WRITE_LIMITER, `contact:${ip}`);
     if (!allowed) {
       return redirectBack(request, "?err=rate");
     }
@@ -161,14 +143,14 @@ async function handleContact(request) {
         return redirectBack(request, "?err=captcha");
       }
 
-      if (typeof TURNSTILE_SECRET === "string" && TURNSTILE_SECRET) {
+      if (typeof env.TURNSTILE_SECRET === "string" && env.TURNSTILE_SECRET) {
         let verify;
         try {
           const vr = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-              secret: TURNSTILE_SECRET,
+              secret: env.TURNSTILE_SECRET,
               response: cfToken,
               remoteip: request.headers.get("CF-Connecting-IP") || undefined,
             }),
@@ -202,9 +184,9 @@ async function handleContact(request) {
     `;
 
     if (
-      typeof RESEND_API_KEY !== "string" || !RESEND_API_KEY ||
-      typeof FROM_EMAIL !== "string"     || !FROM_EMAIL ||
-      typeof TO_EMAIL !== "string"       || !TO_EMAIL
+      typeof env.RESEND_API_KEY !== "string" || !env.RESEND_API_KEY ||
+      typeof env.FROM_EMAIL !== "string"     || !env.FROM_EMAIL ||
+      typeof env.TO_EMAIL !== "string"       || !env.TO_EMAIL
     ) {
       console.error("Contact worker misconfigured: missing email env");
       return redirectBack(request, "?err=server");
@@ -215,12 +197,12 @@ async function handleContact(request) {
       r = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${RESEND_API_KEY}`,
+          Authorization: `Bearer ${env.RESEND_API_KEY}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: FROM_EMAIL,
-          to: [TO_EMAIL],
+          from: env.FROM_EMAIL,
+          to: [env.TO_EMAIL],
           subject,
           html,
           reply_to: email,

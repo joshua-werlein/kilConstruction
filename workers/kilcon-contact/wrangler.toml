@@ -3,6 +3,7 @@ main = "src/index.js"
 compatibility_date = "2025-11-06"
 compatibility_flags = []
 workers_dev = true
+preview_urls = false
 
 [observability]
 enabled = true
@@ -18,9 +19,13 @@ TO_EMAIL   = "kil.con.contact@gmail.com"
 #   RESEND_API_KEY
 #   TURNSTILE_SECRET
 
-[[kv_namespaces]]
-binding = "RATE_LIMIT_KV"
-id = "afaa894d32874d059420518cf1bfce9a"
+[[ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 3
+  period = 60
 
 [[routes]]
 pattern = "kilcon.work/api/contact*"

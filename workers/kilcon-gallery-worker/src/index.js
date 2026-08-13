@@ -8,29 +8,12 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
-async function rateLimit(env, ip, key, { windowMs, max }) {
-  const kvKey = `rl:${ip}:${key}`;
-  const now = Date.now();
-
+async function checkRateLimit(limiter, key) {
   try {
-    const raw = await env.RATE_LIMIT_KV.get(kvKey);
-    let entry = raw ? JSON.parse(raw) : null;
-
-    if (!entry || now > entry.expires) {
-      entry = { count: 1, expires: now + windowMs };
-      await env.RATE_LIMIT_KV.put(kvKey, JSON.stringify(entry), {
-        expirationTtl: Math.ceil(windowMs / 1000),
-      });
-      return true;
-    }
-
-    entry.count++;
-    await env.RATE_LIMIT_KV.put(kvKey, JSON.stringify(entry), {
-      expirationTtl: Math.ceil((entry.expires - now) / 1000),
-    });
-    return entry.count <= max;
+    const { success } = await limiter.limit({ key });
+    return success;
   } catch (e) {
-    console.error("[rateLimit] KV error:", e);
+    console.error("[rateLimit] binding error:", e);
     return true; // fail open
   }
 }
@@ -316,7 +299,7 @@ export default {
 
       if (pathname === "/api/reviews/summary" && request.method === "GET") {
         const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-        if (!await rateLimit(env, ip, "reviews-summary", { windowMs: 10_000, max: 60 })) {
+        if (!await checkRateLimit(env.READ_LIMITER, `reviews-summary:${ip}`)) {
             return json({ error: "Too many requests" }, 429, request);
         }
         return await handleReviewsSummary(request, env);
@@ -324,7 +307,7 @@ export default {
 
       if (pathname === "/api/reviews" && request.method === "GET") {
         const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-        if (!await rateLimit(env, ip, "reviews-list", { windowMs: 10_000, max: 60 })) {
+        if (!await checkRateLimit(env.READ_LIMITER, `reviews-list:${ip}`)) {
             return json({ error: "Too many requests" }, 429, request);
         }
         return await handleReviewsPublicList(request, env);
@@ -332,7 +315,7 @@ export default {
 
       if (pathname === "/api/reviews/submit" && request.method === "POST") {
         const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-        if (!await rateLimit(env, ip, "review-submit", { windowMs: 10 * 60_000, max: 10 })) {
+        if (!await checkRateLimit(env.WRITE_LIMITER, `review-submit:${ip}`)) {
             return json({ error: "Too many submissions" }, 429, request);
         }
         return await handleReviewsSubmit(request, env);

@@ -3,6 +3,7 @@ main = "src/index.js"
 compatibility_date = "2025-11-13"
 compatibility_flags = []
 workers_dev = true
+preview_urls = false
 
 [observability]
 enabled = true
@@ -23,9 +24,21 @@ SESSION_VERSION = "3"
 binding = "GALLERY_BUCKET"
 bucket_name = "kilcon-gallery"
 
-[[kv_namespaces]]
-binding = "RATE_LIMIT_KV"
-id = "afaa894d32874d059420518cf1bfce9a"
+[[ratelimits]]
+name = "READ_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 10
+
+[[ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 3
+  period = 60
 
 [[routes]]
 pattern = "kilcon.work/api/reviews*"
