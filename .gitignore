@@ -27,6 +27,7 @@ pnpm-debug.log*
 # IDE settings
 .idea/
 .vscode/
+.claude/
 
 # Local Cloudflare Wrangler (state, caches, etc.)
 .wrangler/
