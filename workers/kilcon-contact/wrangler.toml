@@ -1,0 +1,35 @@
+name = "kilcon-contact"
+main = "src/index.js"
+compatibility_date = "2025-11-06"
+compatibility_flags = []
+workers_dev = true
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+FROM_EMAIL = "KilCon <contact@kilcon.work>"
+TO_EMAIL   = "kil.con.contact@gmail.com"
+
+# Secrets already set live via the Cloudflare dashboard / `wrangler secret put`.
+# Do NOT add these under [vars] — doing so and deploying would silently
+# overwrite the live secret with a plaintext value:
+#   RESEND_API_KEY
+#   TURNSTILE_SECRET
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "afaa894d32874d059420518cf1bfce9a"
+
+[[routes]]
+pattern = "kilcon.work/api/contact*"
+zone_name = "kilcon.work"
+
+[[routes]]
+pattern = "www.kilcon.work/api/contact*"
+zone_name = "kilcon.work"
+
+[dev]
+port = 8787
+local_protocol = "http"

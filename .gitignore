@@ -17,6 +17,10 @@ pnpm-debug.log*
 .env
 .env.production
 
+# Wrangler local secrets (never commit real values)
+.dev.vars
+.dev.vars.*
+
 # macOS-specific files
 .DS_Store
 
@@ -31,7 +35,7 @@ pnpm-debug.log*
 .wrangler/**/*.sqlite
 
 # Wrangler configs (kept local only)
-wrangler.toml
-wrangler.contact.toml
+/wrangler.toml
+/wrangler.contact.toml
 
 nul
