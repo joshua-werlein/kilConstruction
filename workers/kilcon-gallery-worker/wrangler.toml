@@ -1,5 +1,7 @@
 name = "kilcon-gallery-worker"
 main = "src/index.js"
+# Kil.con.contact account (owns kilcon-gallery + kilcon-db); avoids deploying to the wrong account
+account_id = "8481dbc471ac3a4aa14cc26ea366f956"
 compatibility_date = "2025-11-13"
 compatibility_flags = []
 workers_dev = true
@@ -14,15 +16,41 @@ BUCKET_BASE_URL = "https://images.kilcon.work"
 THUMB_BASE_URL  = "https://images.kilcon.work"
 SESSION_VERSION = "3"
 
+# Facebook Page sync (see docs/facebook-webhook.md)
+FB_PAGE_ID       = ""        # numeric Page ID; events for other Pages are ignored
+FB_GRAPH_VERSION = "v26.0"
+FB_AUTO_IMPORT   = "false"   # "true" lets webhook events import + publish photos
+# Master switch: "false" makes every /api/gallery-api/facebook/* route 404 and
+# keeps public galleries from touching D1. Leave "false" for the security release.
+FB_INTEGRATION_ENABLED = "false"
+
 # Secrets already set live via the Cloudflare dashboard / `wrangler secret put`.
 # Do NOT add these under [vars] — doing so and deploying would silently
 # overwrite the live secret with a plaintext value:
 #   ADMIN_SECRET
 #   TURNSTILE_SECRET
+#   FB_APP_SECRET          Meta App Secret (verifies X-Hub-Signature-256)
+#   FB_VERIFY_TOKEN        random string also entered in Meta webhook config
+#   FB_PAGE_ACCESS_TOKEN   long-lived Page access token
 
 [[r2_buckets]]
 binding = "GALLERY_BUCKET"
 bucket_name = "kilcon-gallery"
+
+# Private (no public access, no custom domain): review photos and Facebook
+# master copies. Create once with: npx wrangler r2 bucket create kilcon-private
+[[r2_buckets]]
+binding = "PRIVATE_BUCKET"
+bucket_name = "kilcon-private"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kilcon-db"
+database_id = "095cfe7f-d0af-49e8-b92a-942fa093bfe6"
+
+# Facebook sync retry sweeper. Re-enable together with FB_INTEGRATION_ENABLED:
+# [triggers]
+# crons = ["*/15 * * * *"]
 
 [[ratelimits]]
 name = "READ_LIMITER"
@@ -46,4 +74,9 @@ zone_name = "kilcon.work"
 
 [[routes]]
 pattern = "kilcon.work/api/gallery-api*"
+zone_name = "kilcon.work"
+
+# Blocks direct access to review attachments on the public R2 custom domain.
+[[routes]]
+pattern = "images.kilcon.work/Reviews/*"
 zone_name = "kilcon.work"

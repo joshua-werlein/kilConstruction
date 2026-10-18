@@ -8,6 +8,36 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
+import {
+  handleFacebookWebhook,
+  handleFacebookScheduled,
+  runFacebookBackfill,
+  handleFacebookAdmin,
+  listFacebookProjects,
+  getFacebookProject,
+  getLinkedFacebookItems,
+} from "./facebook.js";
+import {
+  REVIEWS_PHOTO_PREFIX,
+  REVIEW_ID_RE,
+  photoContentType,
+  sniffImageType,
+  getReview,
+  putReview,
+  listReviews,
+  deleteReview,
+  savePhoto,
+  photoResponse,
+  reviewPhotoKey,
+  runReviewMigration,
+} from "./reviewPrivacy.js";
+
+// Facebook sync ships disabled. Until FB_INTEGRATION_ENABLED = "true", every
+// Facebook route 404s, public galleries never query D1, and cron is a no-op.
+function fbEnabled(env) {
+  return env.FB_INTEGRATION_ENABLED === "true";
+}
+
 async function checkRateLimit(limiter, key) {
   try {
     const { success } = await limiter.limit({ key });
@@ -142,8 +172,10 @@ function json(obj, status = 200, request) {
 }
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|avif)$/i;
-const REVIEWS_DATA_PREFIX = "Reviews/data/";
-const REVIEWS_PHOTO_PREFIX = "Reviews/photos/";
+const MAX_REVIEW_PHOTO_BYTES = 15 * 1024 * 1024;
+const PUBLIC_REVIEW_PHOTO_BASE = "https://kilcon.work/api/reviews/photo";
+// Public R2 custom domain; the images.kilcon.work/Reviews/* route lands here.
+const PUBLIC_IMAGE_HOST = "images.kilcon.work";
 
 function slugifyName(name) {
   return (name || "")
@@ -275,6 +307,12 @@ export default {
       const pathname = url.pathname;
       const params = url.searchParams;
 
+      // Review attachments are never served straight from the public bucket;
+      // approved photos go through /api/reviews/photo instead.
+      if (url.hostname === PUBLIC_IMAGE_HOST) {
+        return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
+      }
+
       // --- Handle OPTIONS (CORS preflight) ---
       if (request.method === "OPTIONS") {
         const origin = request.headers.get("Origin") || "";
@@ -313,6 +351,21 @@ export default {
         return await handleReviewsPublicList(request, env);
       }
 
+      if (pathname === "/api/reviews/photo" && request.method === "GET") {
+        const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+        if (!await checkRateLimit(env.READ_LIMITER, `review-photo:${ip}`)) {
+            return json({ error: "Too many requests" }, 429, request);
+        }
+        return await handleReviewPhoto(request, env, url);
+      }
+
+      if (pathname === "/api/reviews/admin/migrate" && request.method === "POST") {
+        const authResp = await requireAdmin(request, env);
+        if (authResp) return authResp;
+        const { status, body } = await runReviewMigration(request, env);
+        return json(body, status, request);
+      }
+
       if (pathname === "/api/reviews/submit" && request.method === "POST") {
         const ip = request.headers.get("CF-Connecting-IP") || "unknown";
         if (!await checkRateLimit(env.WRITE_LIMITER, `review-submit:${ip}`)) {
@@ -336,6 +389,32 @@ export default {
 
       if (pathname === "/api/reviews/admin/delete" && request.method === "POST") {
         return await handleReviewsAdminDelete(request, env);
+      }
+
+      // ---------- FACEBOOK PAGE WEBHOOK (public, signature-verified) ----
+
+      if (pathname.startsWith("/api/gallery-api/facebook/") && !fbEnabled(env)) {
+        return json({ error: "Not found" }, 404, request);
+      }
+
+      if (pathname === "/api/gallery-api/facebook/webhook") {
+        return await handleFacebookWebhook(request, env, ctx);
+      }
+
+      if (pathname === "/api/gallery-api/facebook/backfill" && request.method === "POST") {
+        const authResp = await requireAdmin(request, env);
+        if (authResp) return authResp;
+        const { status, body } = await runFacebookBackfill(request, env);
+        return json(body, status, request);
+      }
+
+      if (pathname.startsWith("/api/gallery-api/facebook/admin/")) {
+        const authResp = await requireAdmin(request, env);
+        if (authResp) return authResp;
+        const sub = pathname.slice("/api/gallery-api/facebook/admin/".length);
+        const result = await handleFacebookAdmin(request, env, sub, galleryUrls(env));
+        if (result.response) return result.response;
+        return json(result.body, result.status, request);
       }
 
        // ---------- ADMIN ROUTES (all require admin_auth cookie) ----------
@@ -423,6 +502,15 @@ export default {
       return json({ error: "Internal error" }, 500, request);
     }
   },
+
+  async scheduled(controller, env, ctx) {
+    if (!fbEnabled(env)) return;
+    ctx.waitUntil(
+      handleFacebookScheduled(env).catch((err) =>
+        console.error("[facebook] scheduled error:", err?.message || err)
+      )
+    );
+  },
 };
  
 // ---------- LIST PROJECTS ----------
@@ -463,6 +551,13 @@ async function listProjects(env, request, { listAll = false, onlyPrefix = null, 
         const project = await buildProjectFromPrefix(env, prefix1);
         if (project) projects.push(project);
       }
+    }
+
+    // Facebook-imported projects join the public category lists (not the
+    // admin ?all=1 view, which manages R2 folders only).
+    if (!listAll && fbEnabled(env)) {
+      const category = listParam || "projects";
+      projects.push(...(await listFacebookProjects(env, category, galleryUrls(env))));
     }
 
     const payloadKey =
@@ -552,8 +647,10 @@ async function findPrefixByCategoryAndSlug(env, categoryKey, slug) {
   const wanted = String(slug || "").toLowerCase();
 
   // Map the category (e.g. "furniture") to an actual R2 prefix (e.g. "Furniture/")
-  let topPrefix = CATEGORY_PREFIX[String(categoryKey || "").toLowerCase()] || categoryKey;
-  if (!topPrefix) return null;
+  // Only known public categories; never fall back to an arbitrary R2 root.
+  const categoryName = String(categoryKey || "").toLowerCase();
+  if (!Object.hasOwn(CATEGORY_PREFIX, categoryName)) return null;
+  let topPrefix = CATEGORY_PREFIX[categoryName];
 
   if (!topPrefix.endsWith("/")) {
     topPrefix = topPrefix + "/";
@@ -593,7 +690,11 @@ async function findPrefixBySlug(env, slug) {
 
   // Top level
   const root = await env.GALLERY_BUCKET.list({ prefix: "", delimiter: "/" });
-  let level1 = root.delimitedPrefixes || [];
+  // Only public gallery roots: Reviews/, Facebook/ and any other storage
+  // prefixes must never be addressable through ?project=<slug>.
+  let level1 = (root.delimitedPrefixes || []).filter((p) =>
+    ALLOWED_ROOTS.includes(p.replace(/\/$/, ""))
+  );
 
   for (const prefix1 of level1) {
     const list1 = await env.GALLERY_BUCKET.list({
@@ -648,7 +749,12 @@ async function getProject(projectKey, env, request) {
       prefix = await findPrefixBySlug(env, normalizedKey);
     }
 
+    // Defense in depth: whatever resolved the prefix, it must be a public root.
+    if (prefix && !ALLOWED_ROOTS.includes(prefix.split("/")[0])) prefix = null;
+
     if (!prefix) {
+      const fb = fbEnabled(env) ? await getFacebookProject(env, normalizedKey, galleryUrls(env)) : null;
+      if (fb) return json(fb, 200, request);
       return json({ project: null, items: [] }, 404, request);
     }
 
@@ -669,6 +775,9 @@ async function getProject(projectKey, env, request) {
         thumb,
       });
     }
+
+    // Facebook photos merged into this gallery (caption match or admin move)
+    if (fbEnabled(env)) items.push(...(await getLinkedFacebookItems(env, prefix, galleryUrls(env))));
 
     items.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
 
@@ -998,6 +1107,13 @@ async function handleRenamePrefix(request, env) {
 }
 
 // ---------- HELPERS ----------
+function galleryUrls(env) {
+  return {
+    publicUrl: (key) => publicUrl(key, env),
+    thumbUrl: (full) => buildThumbUrl(full, env),
+  };
+}
+
 function publicUrl(key, env) {
   const base = env.BUCKET_BASE_URL; // e.g. "https://pub-xxxx.r2.dev"
   return `${base}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
@@ -1006,32 +1122,10 @@ function publicUrl(key, env) {
 // ================== REVIEWS IMPLEMENTATION =============================
 
 async function listAllReviews(env) {
-  const bucket = env.GALLERY_BUCKET;
-  if (!bucket) throw new Error("[reviews] Missing GALLERY_BUCKET binding");
-
-  const out = [];
-  let cursor = undefined;
-
-  do {
-    const res = await bucket.list({ prefix: REVIEWS_DATA_PREFIX, cursor });
-    for (const obj of res.objects || []) {
-      try {
-        const stored = await bucket.get(obj.key);
-        if (!stored) continue;
-        const text = await stored.text();
-        const rec = JSON.parse(text);
-        out.push(rec);
-      } catch (e) {
-        console.warn("[reviews] failed to parse record", obj.key, e);
-      }
-    }
-    cursor = res.truncated ? res.cursor : undefined;
-  } while (cursor);
-
-  return out;
+  return await listReviews(env);
 }
 
-function reviewsToPublic(rec) {
+function reviewsToPublic(rec, env) {
   return {
     id: rec.id,
     createdAt: rec.createdAt,
@@ -1040,7 +1134,7 @@ function reviewsToPublic(rec) {
     clientNamePublic: rec.clientNamePublic,
     projectType: rec.projectType,
     location: rec.location || null,
-    photoUrl: rec.photoUrl || null,
+    photoUrl: reviewPhotoUrl(rec, env),
     adminReply: rec.adminReply || null,
     adminReplyAt: rec.adminReplyAt || null,
     featured: !!rec.featured,
@@ -1070,11 +1164,37 @@ function clampRating(raw) {
   return r;
 }
 
-function buildReviewPhotoUrl(key, env) {
-  if (!key) return null;
-  const base = env.BUCKET_BASE_URL;
-  if (!base) return null;
-  return `${base}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+// Review photos are served only through /api/reviews/photo, which checks
+// approval; the stored photoUrl (public bucket URL) is never handed out.
+// Review photos are served only through /api/reviews/photo, which checks
+// approval; the stored photoUrl (public bucket URL) is never handed out.
+function reviewPhotoUrl(rec, env) {
+  if (!reviewPhotoKey(rec, env)) return null;
+  return `${PUBLIC_REVIEW_PHOTO_BASE}?id=${encodeURIComponent(rec.id)}`;
+}
+
+
+
+// GET /api/reviews/photo?id=r_...  approved reviews publicly, any review for admins
+// GET /api/reviews/photo?id=r_...  approved reviews publicly, any review for admins
+async function handleReviewPhoto(request, env, url) {
+  const id = url.searchParams.get("id") || "";
+  const notFound = () => json({ error: "Not found" }, 404, request);
+  if (!REVIEW_ID_RE.test(id)) return notFound();
+
+  const rec = await getReview(env, id);
+  const key = rec ? reviewPhotoKey(rec, env) : null;
+  if (!key) return notFound();
+
+  const approved = rec.status === "approved";
+  if (!approved) {
+    // Same 404 for non-admins so the response doesn't reveal a private review.
+    const authResp = await requireAdmin(request, env);
+    if (authResp) return notFound();
+  }
+
+  const resp = await photoResponse(env, key, { publicCache: approved });
+  return resp || notFound();
 }
 
 // ---- public: summary ----
@@ -1166,7 +1286,7 @@ async function handleReviewsPublicList(request, env) {
       total: filtered.length,
       page,
       pageSize,
-      reviews: slice.map(reviewsToPublic),
+      reviews: slice.map((r) => reviewsToPublic(r, env)),
     }, 200, request);
   } catch (e) {
     console.error("[reviews] list error:", e);
@@ -1177,9 +1297,14 @@ async function handleReviewsPublicList(request, env) {
 // ---- public: submit ----
 async function handleReviewsSubmit(request, env) {
   try {
-    const bucket = env.GALLERY_BUCKET;
-    if (!bucket) {
-      console.error("[reviews] Missing GALLERY_BUCKET");
+    // Review records and photos are private; refuse rather than fall back
+    // to the world-readable gallery bucket.
+    if (!env.PRIVATE_BUCKET) {
+      console.error("[reviews] Missing PRIVATE_BUCKET binding; refusing submission");
+      const accept = request.headers.get("Accept") || "";
+      if (accept.includes("text/html")) {
+        return redirectReviews(request, "?err=server");
+      }
       return json({ error: "Something went wrong. Please try again later." }, 500, request);
     }
 
@@ -1260,11 +1385,15 @@ async function handleReviewsSubmit(request, env) {
       const safeName =
         (photo.name || "photo.jpg").replace(/[^a-zA-Z0-9._-]+/g, "_") || "photo.jpg";
       
-        // Enforce allowed image extensions + MIME
-      const extOk = IMAGE_EXT.test(safeName);
-      const typeOk = !!photo.type && photo.type.startsWith("image/");
+        // Enforce allowed image extensions, and check the bytes really are that
+      // format (the client-supplied MIME type is never trusted or stored).
+      const expectedType = photoContentType(safeName);
+      const photoBytes = expectedType && photo.size <= MAX_REVIEW_PHOTO_BYTES
+        ? await photo.arrayBuffer()
+        : null;
+      const typeOk = !!photoBytes && sniffImageType(photoBytes) === expectedType;
 
-      if (!extOk || !typeOk) {
+      if (!typeOk) {
         const accept = request.headers.get("Accept") || "";
         if (accept.includes("text/html")) {
           return redirectReviews(request, "?err=photo");
@@ -1273,10 +1402,7 @@ async function handleReviewsSubmit(request, env) {
       }
 
       photoKey = `${REVIEWS_PHOTO_PREFIX}${id}/${safeName}`;
-      
-      await bucket.put(photoKey, await photo.arrayBuffer(), {
-        httpMetadata: { contentType: photo.type || "image/jpeg" },
-      });
+      await savePhoto(env, photoKey, photoBytes);
     }
 
     const rec = {
@@ -1291,16 +1417,13 @@ async function handleReviewsSubmit(request, env) {
       projectType,
       location: location || null,
       photoKey,
-      photoUrl: buildReviewPhotoUrl(photoKey, env),
+      photoUrl: null,
       allowMarketing,
       adminReply: null,
       adminReplyAt: null,
     };
 
-    const dataKey = `${REVIEWS_DATA_PREFIX}${id}.json`;
-    await bucket.put(dataKey, JSON.stringify(rec), {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-    });
+    await putReview(env, rec);
 
      // Decide response based on client
      const accept = request.headers.get("Accept") || "";
@@ -1334,7 +1457,7 @@ function redirectReviews(request, suffix) {
   if (ref) {
     try {
       const u = new URL(ref);
-      origin = u.origin;
+      if (ALLOWED_ORIGINS.includes(u.origin)) origin = u.origin;
     } catch {
       // keep default origin
     }
@@ -1367,7 +1490,11 @@ async function handleReviewsAdminList(request, env) {
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
 
-    return json({ reviews: filtered }, 200, request);
+    return json(
+      { reviews: filtered.map((r) => ({ ...r, photoUrl: reviewPhotoUrl(r, env) })) },
+      200,
+      request
+    );
   } catch (e) {
     console.error("[reviews] admin list error:", e);
     return json({ error: "Failed to load reviews" }, 500, request);
@@ -1380,27 +1507,23 @@ async function handleReviewsAdminStatus(request, env) {
   if (auth) return auth;
 
   try {
-    const bucket = env.GALLERY_BUCKET;
     const body = await request.json().catch(() => ({}));
     const id = String(body.id || "");
     const status = String(body.status || "");
     const featured = !!body.featured;
 
-    if (!id || !["pending", "approved", "hidden"].includes(status)) {
+    if (!REVIEW_ID_RE.test(id) || !["pending", "approved", "hidden"].includes(status)) {
       return json({ error: "Invalid input" }, 400, request);
     }
 
-    const dataKey = `${REVIEWS_DATA_PREFIX}${id}.json`;
-    const obj = await bucket.get(dataKey);
-    if (!obj) return json({ error: "Not found" }, 404, request);
+    const rec = await getReview(env, id);
+    if (!rec) return json({ error: "Not found" }, 404, request);
 
-    const rec = JSON.parse(await obj.text());
     rec.status = status;
     rec.featured = featured;
 
-    await bucket.put(dataKey, JSON.stringify(rec), {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-    });
+    // Saved to the private bucket; a legacy public copy is superseded.
+    await putReview(env, rec);
 
     return json({ ok: true }, 200, request);
   } catch (e) {
@@ -1415,24 +1538,19 @@ async function handleReviewsAdminReply(request, env) {
   if (auth) return auth;
 
   try {
-    const bucket = env.GALLERY_BUCKET;
     const body = await request.json().catch(() => ({}));
     const id = String(body.id || "");
     const replyText = String(body.replyText || "").trim();
 
-    if (!id) return json({ error: "Invalid input" }, 400, request);
+    if (!REVIEW_ID_RE.test(id)) return json({ error: "Invalid input" }, 400, request);
 
-    const dataKey = `${REVIEWS_DATA_PREFIX}${id}.json`;
-    const obj = await bucket.get(dataKey);
-    if (!obj) return json({ error: "Not found" }, 404, request);
+    const rec = await getReview(env, id);
+    if (!rec) return json({ error: "Not found" }, 404, request);
 
-    const rec = JSON.parse(await obj.text());
     rec.adminReply = replyText || null;
     rec.adminReplyAt = replyText ? new Date().toISOString() : null;
 
-    await bucket.put(dataKey, JSON.stringify(rec), {
-      httpMetadata: { contentType: "application/json; charset=utf-8" },
-    });
+    await putReview(env, rec);
 
     return json({ ok: true }, 200, request);
   } catch (e) {
@@ -1447,31 +1565,12 @@ async function handleReviewsAdminDelete(request, env) {
   if (auth) return auth;
 
   try {
-    const bucket = env.GALLERY_BUCKET;
     const body = await request.json().catch(() => ({}));
     const id = String(body.id || "");
-    if (!id) return json({ error: "Invalid input" }, 400, request);
+    if (!REVIEW_ID_RE.test(id)) return json({ error: "Invalid input" }, 400, request);
 
-    const dataKey = `${REVIEWS_DATA_PREFIX}${id}.json`;
-    await bucket.delete(dataKey);
-
-    const prefix = `${REVIEWS_PHOTO_PREFIX}${id}/`;
-    let cursor = undefined;
-    const toDelete = [];
-
-    do {
-      const res = await bucket.list({ prefix, cursor });
-      for (const obj of res.objects || []) {
-        toDelete.push(obj.key);
-      }
-      cursor = res.truncated ? res.cursor : undefined;
-    } while (cursor);
-
-    if (toDelete.length) {
-      await bucket.delete(toDelete);
-    }
-
-    return json({ ok: true, deletedPhotos: toDelete.length }, 200, request);
+    const deletedPhotos = await deleteReview(env, id);
+    return json({ ok: true, deletedPhotos }, 200, request);
   } catch (e) {
     console.error("[reviews] admin delete error:", e);
     return json({ error: "Failed to delete review" }, 500, request);
