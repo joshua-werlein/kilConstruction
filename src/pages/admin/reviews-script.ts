@@ -44,7 +44,7 @@ export default function initAdminReviewsPage() {
                     return;
                 }
 
-                const data = await res.json();
+                const data = (await res.json()) as { reviews?: unknown };
                 const reviews = Array.isArray(data.reviews) ? data.reviews : [];
                 renderReviews(reviews);
                 setStatus(

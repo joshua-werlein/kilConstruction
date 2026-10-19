@@ -1175,3 +1175,61 @@ ul.results-list ul.children-list > li.child-item > input.select-checkbox {
         padding-inline: 8px !important;
     }
 }
+
+/* ===== FACEBOOK SYNC PAGE ===== */
+.fb-section { margin-bottom: 1.25rem; }
+.fb-heading { font-size: 1.1rem; margin: 0 0 0.5rem; }
+.fb-subheading { font-size: 0.95rem; margin: 0.9rem 0 0.4rem; }
+.fb-section [hidden], .fb-bulk[hidden] { display: none !important; }
+
+.fb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.6rem; margin: 0; }
+.fb-stats > div { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 0.5rem 0.7rem; }
+.fb-stats dt { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; }
+.fb-stats dd { margin: 0.15rem 0 0; font-size: 0.88rem; }
+
+.fb-failures { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; }
+.fb-failure { background: #fff; border: 1px solid #fecaca; border-radius: 10px; padding: 0.45rem 0.7rem; font-size: 0.85rem; overflow-wrap: anywhere; }
+.fb-failure code { font-size: 0.8rem; }
+.fb-failure-error { color: #b91c1c; font-size: 0.82rem; margin-top: 0.2rem; }
+
+.fb-badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600; background: #e5e7eb; color: #374151; vertical-align: middle; }
+.fb-badge--on { background: #dcfce7; color: #15803d; }
+.fb-badge--off { background: #fee2e2; color: #b91c1c; }
+.fb-badge--fb { background: #dbeafe; color: #1d4ed8; }
+.fb-link { display: block; font-size: 0.82rem; margin-top: 0.2rem; overflow-wrap: anywhere; }
+.fb-select { width: auto; max-width: 100%; }
+
+.fb-table { width: 100%; border-collapse: separate; border-spacing: 0 0.5rem; font-size: 0.86rem; }
+.fb-table th { text-align: left; font-size: 0.75rem; color: #6b7280; padding: 0 0.6rem; }
+.fb-table td { background: #fff; padding: 0.5rem 0.6rem; vertical-align: top; overflow-wrap: anywhere; }
+.fb-table td:first-child { border-radius: 10px 0 0 10px; }
+.fb-table td:last-child { border-radius: 0 10px 10px 0; }
+.fb-table tr.fb-row--active td { background: #fef9c3; }
+.fb-table small { display: block; }
+.fb-actions { white-space: nowrap; }
+.fb-rename { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-bottom: 0.25rem; }
+.fb-rename .admin-input { flex: 1 1 160px; }
+
+.fb-bulk { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.75rem; }
+.fb-bulk .admin-button-sm { margin: 0; }
+.fb-inline-label { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.85rem; }
+
+.fb-photo-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.75rem; }
+.fb-photo { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; font-size: 0.82rem; }
+.fb-photo--hidden .fb-thumb { opacity: 0.45; }
+.fb-photo-select { position: relative; display: block; cursor: pointer; }
+.fb-photo-select .select-checkbox { position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; margin: 0; z-index: 1; }
+.fb-thumb { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #f3f4f6; }
+.fb-thumb--missing { display: flex; align-items: center; justify-content: center; color: #9ca3af; }
+.fb-photo-meta { padding: 0.4rem 0.5rem 0.5rem; display: grid; gap: 0.2rem; }
+.fb-caption { color: #374151; overflow-wrap: anywhere; }
+
+@media (max-width: 768px) {
+    .fb-table thead { display: none; }
+    .fb-table, .fb-table tbody, .fb-table tr, .fb-table td { display: block; width: 100%; box-sizing: border-box; }
+    .fb-table tr { margin-bottom: 0.75rem; border-radius: 10px; overflow: hidden; border: 1px solid #e5e7eb; }
+    .fb-table td, .fb-table td:first-child, .fb-table td:last-child { border-radius: 0; }
+    .fb-table td::before { content: attr(data-label); display: block; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; color: #6b7280; }
+    .fb-actions { white-space: normal; }
+    .fb-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

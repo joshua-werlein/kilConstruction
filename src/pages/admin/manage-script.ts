@@ -77,7 +77,7 @@ export default function initManagePage() {
                     return;
                 }
 
-                const data = await res.json();
+                const data = (await res.json()) as { projects?: typeof allProjects };
                 allProjects = (data.projects || []);
 
                 statusEl.textContent = `Loaded ${allProjects.length} folders.`;

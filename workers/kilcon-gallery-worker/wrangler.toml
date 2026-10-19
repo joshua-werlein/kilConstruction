@@ -17,12 +17,17 @@ THUMB_BASE_URL  = "https://images.kilcon.work"
 SESSION_VERSION = "3"
 
 # Facebook Page sync (see docs/facebook-webhook.md)
-FB_PAGE_ID       = ""        # numeric Page ID; events for other Pages are ignored
+FB_PAGE_ID       = "305397115992497" # numeric Page ID; events for other Pages are ignored
+FB_APP_ID        = "1427044999395408" # Meta App ID (public, not a secret); used by the admin health check
 FB_GRAPH_VERSION = "v26.0"
 FB_AUTO_IMPORT   = "false"   # "true" lets webhook events import + publish photos
+# Days a photo confirmed deleted/unpublished on Facebook stays recoverable
+# (hidden, private master kept) before permanent deletion. OWNER DECISION.
+FB_REMOVED_RETENTION_DAYS = "30"
 # Master switch: "false" makes every /api/gallery-api/facebook/* route 404 and
-# keeps public galleries from touching D1. Leave "false" for the security release.
-FB_INTEGRATION_ENABLED = "false"
+# keeps public galleries from touching D1. "true" (stage L2) opens the webhook
+# and admin routes; nothing is imported while FB_AUTO_IMPORT is "false".
+FB_INTEGRATION_ENABLED = "true"
 
 # Secrets already set live via the Cloudflare dashboard / `wrangler secret put`.
 # Do NOT add these under [vars] — doing so and deploying would silently
@@ -47,10 +52,16 @@ bucket_name = "kilcon-private"
 binding = "DB"
 database_name = "kilcon-db"
 database_id = "095cfe7f-d0af-49e8-b92a-942fa093bfe6"
+# Shared repo-root migrations; `wrangler d1 migrations apply kilcon-db --remote`
+# applies only the ones not yet recorded in d1_migrations.
+migrations_dir = "../../migrations"
 
-# Facebook sync retry sweeper. Re-enable together with FB_INTEGRATION_ENABLED:
-# [triggers]
-# crons = ["*/15 * * * *"]
+# Hourly sweeper. It never polls Facebook for new posts (webhooks do that).
+# Always: due retention deletes + inbox pruning (D1/R2 only).
+# FB_INTEGRATION_ENABLED="true": also processes remove/hide events.
+# Both switches "true": also retries failed/stranded imports.
+[triggers]
+crons = ["17 * * * *"]
 
 [[ratelimits]]
 name = "READ_LIMITER"

@@ -1,0 +1,104 @@
+---
+import BaseLayout from "../layout/MainLayout.astro";
+import "../styles/legal.css";
+
+// Final revision 2026-10-18: approved by the site owner; business-practice
+// claims owner-confirmed 2026-10-19 (docs/facebook-launch-resume.md).
+// Keep LAST_UPDATED = date of the last text change; bump it if edited again.
+const LAST_UPDATED = "October 18, 2026";
+
+const title = "Data Deletion | KIL Construction";
+const description =
+    "How to ask KIL Construction to delete your information, a review, or a project photo from kilcon.work.";
+---
+
+<BaseLayout {title} {description}>
+    <article class="legal">
+        <h1>Data Deletion Instructions</h1>
+        <p class="muted">Last updated: {LAST_UPDATED}</p>
+
+        <p>
+            You can ask us to delete information we hold about you, or to remove content
+            from kilcon.work. This page explains how, and what we can and cannot delete.
+        </p>
+
+        <h2>How to Request Deletion</h2>
+        <ol>
+            <li>
+                Email <strong><a href="mailto:kil.con.contact@gmail.com?subject=Data%20deletion%20request">kil.con.contact@gmail.com</a></strong>
+                with the subject <strong>"Data deletion request"</strong>.
+            </li>
+            <li>
+                Tell us what you want deleted. For example:
+                <ul>
+                    <li>A link to the project photo or gallery page</li>
+                    <li>The name and approximate date of your review</li>
+                    <li>The email address you used for a message or order</li>
+                </ul>
+            </li>
+            <li>
+                We may ask you to confirm the request from the same email address you
+                used with us, so we do not remove anything at the request of the wrong
+                person.
+            </li>
+            <li>We will reply by email when the deletion is complete.</li>
+        </ol>
+        <!-- OWNER DECISION: optional response time commitment (e.g., "within 30 days"). -->
+
+        <h2>What We Delete</h2>
+        <ul>
+            <li>
+                <strong>Project photos from our Facebook Page</strong> — once your request
+                is verified, we permanently delete the photo, its caption, and its Facebook
+                link from the website and from our storage. The 30-day recovery period
+                described in our Privacy Policy does not apply to deletion requests. We keep only the photo's and post's Facebook IDs, without the
+                image or any text, so the photo is not copied to the website again.
+            </li>
+            <li>
+                <strong>Reviews</strong> — we delete your review and any photo you
+                uploaded with it.
+            </li>
+            <li>
+                <strong>Contact messages</strong> — we delete your message and contact
+                details from our email inbox.
+            </li>
+            <li>
+                <strong>Apparel orders</strong> — we remove your contact details from our
+                order records, except anything we must keep for legal or accounting
+                purposes.
+            </li>
+        </ul>
+
+        <h2>What We Cannot Delete</h2>
+        <ul>
+            <li>
+                <strong>Content on Facebook.</strong> Removing a photo from this website
+                does not remove it from Facebook. Posts, comments, and messages on Facebook
+                are controlled through Facebook, including Facebook's own reporting and
+                privacy tools.
+            </li>
+            <li>
+                <strong>Records held by our service providers.</strong> Stripe keeps its
+                own payment records, and our email delivery and hosting providers keep
+                delivery and security logs, under their own policies.
+            </li>
+            <li>
+                <strong>Automatic backups and logs.</strong> Deleted information may
+                remain in automatic backups and logs for a limited time until they expire.
+            </li>
+        </ul>
+
+        <h2>Facebook</h2>
+        <p>
+            This website does not use Facebook Login and does not receive information
+            about visitors' Facebook accounts. The only Facebook content we store is
+            what KIL Construction publishes on its own Facebook Page, as described in
+            our <a href="/privacy">Privacy Policy</a>.
+        </p>
+
+        <h2>Questions</h2>
+        <p>
+            Email <a href="mailto:kil.con.contact@gmail.com">kil.con.contact@gmail.com</a>.
+        </p>
+    </article>
+</BaseLayout>

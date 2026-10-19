@@ -68,6 +68,7 @@ export const GET: APIRoute = async ({ site }) => {
         "/contact",
         "/privacy",
         "/terms",
+        "/data-deletion",
     ].map(normalizePath);
 
     // Dynamic slugs (best-effort; empty if API doesn't support)

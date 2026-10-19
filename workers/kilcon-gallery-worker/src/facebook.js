@@ -70,6 +70,18 @@ const GENERIC_WORDS = new Set([
 
 const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 
+// Content confirmed deleted/unpublished on Facebook is hidden at once and
+// permanently deleted after FB_REMOVED_RETENTION_DAYS (1-30; the privacy
+// policy promises at most 30) unless the post comes back on Facebook first.
+const DEFAULT_REMOVED_RETENTION_DAYS = 30;
+const MAX_REMOVED_RETENTION_DAYS = 30;
+// Purge work per invocation: each photo is ~10 R2/D1 operations, which keeps
+// a run well under the Workers per-invocation limits. The rest waits an hour.
+const PURGE_BATCH = 50;
+// Processed inbox rows are dropped after this long (Meta retries for 36 h).
+const EVENT_RETENTION_DAYS = 30;
+const REMOVABLE_ITEMS = ["photo", "status", "post"];
+
 // --- small helpers --------------------------------------------------------
 
 const encoder = new TextEncoder();
@@ -195,6 +207,12 @@ function configuredPageId(env) {
   return cleanId(env.FB_PAGE_ID);
 }
 
+export function removedRetentionDays(env) {
+  const n = Math.floor(Number(env.FB_REMOVED_RETENTION_DAYS));
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_REMOVED_RETENTION_DAYS;
+  return Math.min(n, MAX_REMOVED_RETENTION_DAYS);
+}
+
 export function autoImportEnabled(env) {
   return env.FB_AUTO_IMPORT === "true";
 }
@@ -313,15 +331,34 @@ async function handleNotification(request, env, ctx) {
   await setState(env.DB, "last_event_received_at", new Date().toISOString());
   console.log("[facebook] webhook received", { changes: events.length, inserted });
 
-  if (inserted > 0 && autoImportEnabled(env) && ctx?.waitUntil) {
+  const auto = autoImportEnabled(env);
+  const removals = events.some((e) => e.verb === "remove" || e.verb === "hide");
+  if (inserted > 0 && (auto || removals) && ctx?.waitUntil) {
     ctx.waitUntil(
-      processPendingEvents(env, { limit: WAITUNTIL_BATCH }).catch((e) =>
+      processPendingEvents(env, { limit: WAITUNTIL_BATCH, removalsOnly: !auto }).catch((e) =>
         console.error("[facebook] background processing error:", redact(e?.message || e, env))
       )
     );
   }
 
   return text("EVENT_RECEIVED", 200);
+}
+
+// Feed items that can carry Page photos. Everything else (comments,
+// reactions, shares, ...) is dropped before it is stored.
+const FEED_ITEMS = ["photo", "status", "post", "album", "photo-album"];
+
+// Only the fields processing needs: no message text, names or links, so the
+// inbox never holds visitors' (or anyone's) personal content.
+function minimalPayload(value) {
+  const out = {};
+  for (const k of ["item", "verb", "post_id", "photo_id", "published", "created_time"]) {
+    if (value[k] !== undefined && (typeof value[k] !== "object" || value[k] === null)) out[k] = value[k];
+  }
+  const fromId = cleanId(value?.from?.id);
+  if (fromId) out.from = { id: fromId };
+  if (Array.isArray(value.photo_ids)) out.photo_ids = value.photo_ids.map(cleanId).filter(Boolean).slice(0, 100);
+  return out;
 }
 
 export async function extractFeedEvents(body, env) {
@@ -339,15 +376,22 @@ export async function extractFeedEvents(body, env) {
       if (change?.field !== "feed") continue;
       const value = change.value && typeof change.value === "object" ? change.value : null;
       if (!value) continue;
+      if (!FEED_ITEMS.includes(value.item)) continue;
+      // Visitor posts arrive on the same feed; they are never stored.
+      const fromId = cleanId(value?.from?.id);
+      if (fromId && fromId !== pageId) continue;
 
-      const payload = stableStringify(value);
-      if (payload.length > MAX_PAYLOAD_CHARS) {
+      // Dedupe on the full change (two different edits must both be kept);
+      // store only the minimal fields.
+      const full = stableStringify(value);
+      const payload = stableStringify(minimalPayload(value));
+      if (full.length > MAX_PAYLOAD_CHARS) {
         console.warn("[facebook] dropping oversized change payload");
         continue;
       }
 
       out.push({
-        dedupeKey: await sha256Hex(`${pageId}|feed|${payload}`),
+        dedupeKey: await sha256Hex(`${pageId}|feed|${full}`),
         pageId,
         field: "feed",
         item: cleanShort(value.item),
@@ -378,7 +422,9 @@ async function recordEvents(db, events) {
 
 // --- event processing ---------------------------------------------------
 
-export async function processPendingEvents(env, { limit = CRON_BATCH } = {}) {
+// removalsOnly: with FB_AUTO_IMPORT off, remove/hide events are still acted
+// on (they only ever take content down); imports wait for the switch.
+export async function processPendingEvents(env, { limit = CRON_BATCH, removalsOnly = false } = {}) {
   const db = env.DB;
   if (!db) throw new Error("Missing DB binding");
 
@@ -387,6 +433,7 @@ export async function processPendingEvents(env, { limit = CRON_BATCH } = {}) {
       `SELECT id, page_id, item, verb, post_id, photo_id, payload, attempts
          FROM facebook_webhook_events
         WHERE status IN ('pending','retry') AND attempts < ?
+          ${removalsOnly ? "AND verb IN ('remove','hide')" : ""}
         ORDER BY id
         LIMIT ?`
     )
@@ -468,24 +515,7 @@ async function processEvent(env, row, budget) {
   const fromId = cleanId(value?.from?.id);
   if (fromId && fromId !== pageId) return { status: "ignored", note: "not posted by page" };
 
-  if (row.verb === "remove" || row.verb === "hide") {
-    // Record it, but never remove anything from the website.
-    await env.DB.batch([
-      env.DB
-        .prepare(
-          `UPDATE facebook_photos SET removed_on_facebook_at = ${NOW_SQL}, updated_at = ${NOW_SQL}
-            WHERE fb_photo_id = ?`
-        )
-        .bind(row.photo_id || ""),
-      env.DB
-        .prepare(
-          `UPDATE facebook_posts SET removed_on_facebook_at = ${NOW_SQL}, updated_at = ${NOW_SQL}
-            WHERE fb_post_id = ?`
-        )
-        .bind(row.post_id || ""),
-    ]);
-    return { status: "ignored", note: `${row.verb} recorded; website untouched` };
-  }
+  if (row.verb === "remove" || row.verb === "hide") return await handleRemoval(env, row, budget);
 
   if (row.verb !== "add" && row.verb !== "edited") {
     return { status: "ignored", note: `verb ${row.verb || "none"}` };
@@ -510,13 +540,138 @@ async function processEvent(env, row, budget) {
     hintPhotoIds,
     source: "webhook",
     budget,
-    photoEvent: row.item === "photo",
+    // Edits must re-read the post so caption changes are picked up.
+    photoEvent: row.item === "photo" && row.verb === "add",
   });
   if (r.ignored) return { status: "ignored", note: r.ignored };
   return {
     status: "done",
     note: `imported ${r.imported}, skipped ${r.skipped}; project ${r.project?.slug || "-"} (${r.project?.reason || "-"})`,
   };
+}
+
+// --- removals on Facebook ----------------------------------------------
+//
+// A Page-authored remove/hide of a post or photo is acted on only once Graph
+// confirms the content is gone (code 100 / subcode 33) or unpublished/hidden.
+// Any other error throws, so the event retries (up to MAX_ATTEMPTS) and a
+// transient failure never hides anything. Comments, reactions and visitor
+// content never count. Confirmed removals hide the photos (public copy
+// deleted, master kept) and schedule permanent deletion.
+
+async function handleRemoval(env, row, budget) {
+  if (!REMOVABLE_ITEMS.includes(row.item)) {
+    return { status: "ignored", note: `${row.item || "none"} ${row.verb}` };
+  }
+  const db = env.DB;
+  const byPhoto = row.item === "photo" && !!row.photo_id;
+  const { results = [] } = await (byPhoto
+    ? db.prepare(`SELECT fb_photo_id FROM facebook_photos WHERE fb_photo_id = ? AND master_key IS NOT NULL`).bind(row.photo_id)
+    : db.prepare(`SELECT fb_photo_id FROM facebook_photos WHERE fb_post_id = ? AND master_key IS NOT NULL`).bind(row.post_id || "")
+  ).all();
+  if (!results.length) return { status: "ignored", note: `${row.verb}: nothing imported` };
+
+  const gone = await confirmUnavailable(env, byPhoto ? row.photo_id : row.post_id, byPhoto ? "photo" : "post", budget);
+  if (!gone) return { status: "ignored", note: `${row.verb} not confirmed; still on Facebook` };
+
+  const days = removedRetentionDays(env);
+  for (const r of results) {
+    await db
+      .prepare(
+        `UPDATE facebook_photos
+            SET hidden_reason = CASE WHEN hidden = 1 THEN COALESCE(hidden_reason, 'admin') ELSE 'removed_on_facebook' END,
+                hidden = 1,
+                removed_on_facebook_at = COALESCE(removed_on_facebook_at, ${NOW_SQL}),
+                purge_after = COALESCE(purge_after, strftime('%Y-%m-%dT%H:%M:%fZ','now','+${days} days')),
+                updated_at = ${NOW_SQL}
+          WHERE fb_photo_id = ?`
+      )
+      .bind(r.fb_photo_id)
+      .run();
+    await reconcilePhoto(env, r.fb_photo_id);
+  }
+  if (row.post_id && !byPhoto) {
+    await db
+      .prepare(`UPDATE facebook_posts SET removed_on_facebook_at = ${NOW_SQL}, updated_at = ${NOW_SQL} WHERE fb_post_id = ?`)
+      .bind(row.post_id)
+      .run();
+  }
+  return { status: "done", note: `hid ${results.length} photo(s) removed on Facebook; deleting in ${days} days` };
+}
+
+async function confirmUnavailable(env, id, kind, budget) {
+  if (!cleanId(id)) return false;
+  try {
+    const obj = await graphGet(env, id, { fields: kind === "post" ? "id,is_published,is_hidden" : "id" }, budget);
+    return kind === "post" && (obj?.is_published === false || obj?.is_hidden === true);
+  } catch (e) {
+    // 100/33: "object does not exist, cannot be loaded due to missing permissions".
+    if (e?.graphCode === 100 && e?.graphSubcode === 33) return true;
+    throw e;
+  }
+}
+
+// Content that comes back on Facebook (republished, or still attached to a
+// post we can read) is shown again if only the removal hid it.
+async function restoreReturned(env, photoIds) {
+  for (const id of photoIds) {
+    const r = await env.DB
+      .prepare(
+        `UPDATE facebook_photos
+            SET hidden = CASE WHEN hidden_reason = 'removed_on_facebook' THEN 0 ELSE hidden END,
+                hidden_reason = CASE WHEN hidden_reason = 'removed_on_facebook' THEN NULL ELSE hidden_reason END,
+                removed_on_facebook_at = NULL, purge_after = NULL, updated_at = ${NOW_SQL}
+          WHERE fb_photo_id = ? AND removed_on_facebook_at IS NOT NULL AND master_key IS NOT NULL`
+      )
+      .bind(id)
+      .run();
+    if (r?.meta?.changes) await reconcilePhoto(env, id);
+  }
+}
+
+// Permanent deletion once the retention period has passed (hourly cron).
+// Idempotent: overlapping runs select the same rows and deletes are no-ops.
+// `now` is injectable so tests can run the 30-day clock.
+export async function purgeExpiredRemovals(env, { now = new Date() } = {}) {
+  const { results = [] } = await env.DB
+    .prepare(
+      `SELECT fb_photo_id, fb_post_id FROM facebook_photos
+        WHERE purge_after IS NOT NULL AND purge_after <= ? AND master_key IS NOT NULL
+        ORDER BY purge_after
+        LIMIT ?`
+    )
+    .bind(now.toISOString(), PURGE_BATCH)
+    .all();
+  if (!results.length) return 0;
+  const { purged, failed } = await purgePhotos(env, results, [], "deleted after removal on Facebook");
+  console.log("[facebook] retention purge", { purged, failed });
+  return purged;
+}
+
+// Data minimisation for the inbox: processed rows are not needed once Meta's
+// retry window has passed.
+async function pruneProcessedEvents(env, { now = new Date() } = {}) {
+  const cutoff = new Date(now.getTime() - EVENT_RETENTION_DAYS * 86400000).toISOString();
+  await env.DB
+    .prepare(`DELETE FROM facebook_webhook_events WHERE status IN ('done','ignored') AND updated_at < ?`)
+    .bind(cutoff)
+    .run();
+}
+
+// Retention work only: D1 + R2, never Facebook. Runs on every cron tick,
+// including while the integration or imports are switched off, so the
+// privacy policy's deletion promises keep holding.
+export async function runRetention(env, { now = new Date() } = {}) {
+  if (!env.DB || !env.PRIVATE_BUCKET || !env.GALLERY_BUCKET) return 0;
+  try {
+    const purged = await purgeExpiredRemovals(env, { now });
+    await pruneProcessedEvents(env, { now });
+    return purged;
+  } catch (e) {
+    // Tables missing (migration not applied) or a transient error: next hour.
+    console.error("[facebook] retention run failed; will retry", redact(e?.message || e, env));
+    return 0;
+  }
 }
 
 // --- ingest one Facebook post (webhook + backfill share this) -----------
@@ -563,6 +718,11 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
 
   const photoIds = [...new Set([...hintPhotoIds, ...attachmentPhotoIds(post)])];
   if (!photoIds.length) return { ignored: "no photos" };
+
+  if (!dryRun && post) {
+    await refreshPostText(db, post);
+    await restoreReturned(env, photoIds);
+  }
 
   // Skip photos we already have (any status but failed); admin decisions on
   // them are never revisited by sync.
@@ -642,6 +802,40 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
     else skipped++;
   }
   return { imported, skipped, project, photos: photoIds.length };
+}
+
+// An edited caption replaces the stored post text, and the caption of every
+// photo that was showing the old post text. Photos with their own Facebook
+// caption keep it. Grouping and admin decisions are not revisited.
+async function refreshPostText(db, post) {
+  const postId = cleanId(post?.id);
+  if (!postId || typeof post.message !== "string") return false;
+  const old = await db.prepare(`SELECT message FROM facebook_posts WHERE fb_post_id = ?`).bind(postId).first();
+  if (!old) return false;
+
+  const message = post.message.slice(0, 5000);
+  if ((old.message || "") === message) return false;
+  // Text deleted on request stays deleted, even if the post is edited later.
+  const live = await db
+    .prepare(`SELECT COUNT(*) AS n FROM facebook_photos WHERE fb_post_id = ? AND master_key IS NOT NULL`)
+    .bind(postId)
+    .first();
+  if (!live?.n) return false;
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE facebook_photos SET caption = ?, updated_at = ${NOW_SQL}
+          WHERE fb_post_id = ? AND caption IS ? AND master_key IS NOT NULL`
+      )
+      .bind(message || null, postId, old.message || null),
+    db
+      .prepare(
+        `UPDATE facebook_posts SET message = ?, permalink = COALESCE(?, permalink), updated_at = ${NOW_SQL}
+          WHERE fb_post_id = ?`
+      )
+      .bind(message, typeof post.permalink_url === "string" ? post.permalink_url : null, postId),
+  ]);
+  return true;
 }
 
 // --- project grouping ---------------------------------------------------
@@ -1195,13 +1389,17 @@ export async function getLinkedFacebookItems(env, prefix, urls) {
 
 // --- Graph API ----------------------------------------------------------
 
-async function graphGet(env, path, params = {}, budget = null) {
+function graphGet(env, path, params = {}, budget = null) {
+  return graphRequest(env, "GET", path, params, budget);
+}
+
+async function graphRequest(env, method, path, params = {}, budget = null) {
   const token = env.FB_PAGE_ACCESS_TOKEN;
   if (!token) throw new Error("FB_PAGE_ACCESS_TOKEN is not configured");
 
   const version = env.FB_GRAPH_VERSION;
   if (!GRAPH_VERSION_RE.test(version || "")) throw new Error("FB_GRAPH_VERSION is invalid");
-  if (!/^[0-9_]{1,64}(\/(photos|posts))?$/.test(path)) throw new Error("Invalid Graph path");
+  if (!/^(me|[0-9_]{1,64}(\/(photos|posts|subscribed_apps))?)$/.test(path)) throw new Error("Invalid Graph path");
 
   budget?.take();
 
@@ -1215,11 +1413,15 @@ async function graphGet(env, path, params = {}, budget = null) {
   }
 
   // Token goes in a header so it never appears in URLs or logs.
-  const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
+  const resp = await fetch(url.toString(), { method, headers: { Authorization: `Bearer ${token}` } });
   const data = await resp.json().catch(() => null);
   if (!resp.ok || data?.error) {
     const code = data?.error?.code ?? "?";
-    throw new Error(`Graph API error ${resp.status}/${code}: ${redact(data?.error?.message || "", env)}`);
+    const err = new Error(`Graph API error ${resp.status}/${code}: ${redact(data?.error?.message || "", env)}`);
+    err.graphStatus = resp.status;
+    err.graphCode = data?.error?.code ?? null;
+    err.graphSubcode = data?.error?.error_subcode ?? null;
+    throw err;
   }
   return data;
 }
@@ -1259,10 +1461,20 @@ export async function runFacebookBackfill(request, env) {
     const posts = (page?.data || []).filter((p) => cleanId(p?.id));
     const next = page?.paging?.next ? page?.paging?.cursors?.after || null : null;
 
-    const result = { dryRun, posts: [], imported: 0, skipped: 0, failed: [], next, complete: true };
+    const result = {
+      dryRun, scanned: posts.length, withoutPhotos: 0, oldestCreatedTime: null,
+      posts: [], imported: 0, skipped: 0, failed: [], next, complete: true,
+    };
+    for (const post of posts) {
+      const t = toIso(post.created_time);
+      if (t && (!result.oldestCreatedTime || t < result.oldestCreatedTime)) result.oldestCreatedTime = t;
+    }
 
     for (const post of posts) {
-      if (!attachmentPhotoIds(post).length) continue;
+      if (!attachmentPhotoIds(post).length) {
+        result.withoutPhotos++;
+        continue;
+      }
       try {
         const r = await ingestPost(env, { postId: post.id, post, source: "backfill", budget, dryRun });
         result.imported += r.imported || 0;
@@ -1354,9 +1566,12 @@ export async function handleFacebookAdmin(request, env, sub, urls) {
     if (sub === "overview" && request.method === "GET") return await adminOverview(env);
     if (sub === "photos" && request.method === "GET") return await adminPhotos(env, request, urls);
     if (sub === "photo-file" && request.method === "GET") return await adminPhotoFile(env, request);
+    if (sub === "health" && request.method === "GET") return await adminHealth(env);
     if (request.method !== "POST") return jsonResult({ error: "Not found" }, 404);
 
     const body = await request.json().catch(() => ({}));
+    if (sub === "subscribe") return await adminSubscribe(env, body);
+    if (sub === "purge") return await adminPurge(env, body);
     if (sub === "project-update") return await adminProjectUpdate(env, body);
     if (sub === "project-create") return await adminProjectCreate(env, body);
     if (sub === "photo-update") return await adminPhotoUpdate(env, body);
@@ -1375,8 +1590,10 @@ async function adminOverview(env) {
     db.prepare(`SELECT status, COUNT(*) AS n FROM facebook_webhook_events GROUP BY status`).all(),
     db
       .prepare(
-        `SELECT SUM(status = 'imported') AS imported, SUM(status = 'failed') AS failed,
-                SUM(hidden = 1) AS hidden FROM facebook_photos`
+        `SELECT SUM(status = 'imported' AND master_key IS NOT NULL) AS imported, SUM(status = 'failed') AS failed,
+                SUM(hidden = 1 AND master_key IS NOT NULL) AS hidden,
+                SUM(status = 'imported' AND master_key IS NULL) AS deleted,
+                SUM(purge_after IS NOT NULL AND master_key IS NOT NULL) AS scheduled FROM facebook_photos`
       )
       .first(),
     db
@@ -1417,7 +1634,10 @@ async function adminOverview(env) {
         imported: photos?.imported || 0,
         failed: photos?.failed || 0,
         hidden: photos?.hidden || 0,
+        deleted: photos?.deleted || 0,
+        scheduledForDeletion: photos?.scheduled || 0,
       },
+      removedRetentionDays: removedRetentionDays(env),
       recentFailures: (failures.results || []).map((r) => ({
         kind: r.kind,
         ref: r.ref,
@@ -1458,8 +1678,11 @@ async function adminPhotos(env, request, urls) {
       createdTime: r.fb_created_time,
       permalink: r.permalink,
       removedOnFacebook: !!r.removed_on_facebook_at,
+      deleted: isPurged(r),
+      hiddenReason: isPurged(r) ? null : r.hidden_reason || null,
+      deleteAfter: isPurged(r) ? null : r.purge_after || null,
       error: r.last_error,
-      previewUrl: `/api/gallery-api/facebook/admin/photo-file?id=${encodeURIComponent(r.fb_photo_id)}`,
+      previewUrl: isPurged(r) ? null : `/api/gallery-api/facebook/admin/photo-file?id=${encodeURIComponent(r.fb_photo_id)}`,
       publicUrl: r.public_key ? urls.publicUrl(r.public_key) : null,
     })),
   });
@@ -1545,9 +1768,16 @@ async function adminPhotoUpdate(env, body) {
 
   const sets = [];
   const binds = [];
+  let where = "fb_photo_id = ?";
   if (body.hidden !== undefined) {
-    sets.push("hidden = ?");
-    binds.push(body.hidden ? 1 : 0);
+    // Content removed on Facebook can't be restored here: it is shown again
+    // only if the post comes back on Facebook, and is deleted when its
+    // recovery period ends. Restore skips those photos (and deleted ones).
+    if (body.hidden) sets.push("hidden = 1", "hidden_reason = COALESCE(hidden_reason, 'admin')");
+    else {
+      sets.push("hidden = 0", "hidden_reason = NULL");
+      where += " AND removed_on_facebook_at IS NULL AND master_key IS NOT NULL";
+    }
   }
   if (body.projectId !== undefined) {
     const target = await loadProject(env.DB, Number(body.projectId));
@@ -1561,7 +1791,7 @@ async function adminPhotoUpdate(env, body) {
   let updated = 0;
   for (const id of ids) {
     const r = await env.DB
-      .prepare(`UPDATE facebook_photos SET ${sets.join(", ")}, updated_at = ${NOW_SQL} WHERE fb_photo_id = ?`)
+      .prepare(`UPDATE facebook_photos SET ${sets.join(", ")}, updated_at = ${NOW_SQL} WHERE ${where}`)
       .bind(...binds, id)
       .run();
     if (r?.meta?.changes) {
@@ -1569,7 +1799,187 @@ async function adminPhotoUpdate(env, body) {
       await reconcilePhoto(env, id);
     }
   }
-  return jsonResult({ ok: true, updated });
+  return jsonResult({ ok: true, updated, skipped: ids.length - updated });
+}
+
+// Configuration and token check for the admin page. Reports whether each
+// secret is set, never its value.
+async function adminHealth(env) {
+  const pageId = configuredPageId(env);
+  const appId = cleanId(env.FB_APP_ID);
+  const out = {
+    integrationEnabled: env.FB_INTEGRATION_ENABLED === "true",
+    autoImport: autoImportEnabled(env),
+    graphVersion: env.FB_GRAPH_VERSION || null,
+    pageIdConfigured: !!pageId,
+    appIdConfigured: !!appId,
+    secrets: {
+      appSecret: !!env.FB_APP_SECRET,
+      verifyToken: !!env.FB_VERIFY_TOKEN,
+      pageAccessToken: !!env.FB_PAGE_ACCESS_TOKEN,
+    },
+    token: "untested",
+    page: null,
+    subscription: null,
+    feedSubscribed: null,
+    errors: [],
+  };
+  if (!env.FB_PAGE_ACCESS_TOKEN) return jsonResult(out);
+
+  // With a Page token, /me is the Page itself: this proves which Page the
+  // token belongs to, and that FB_PAGE_ID names the same Page.
+  try {
+    const p = await graphGet(env, "me", { fields: "id,name" });
+    out.page = { id: cleanId(p?.id), name: typeof p?.name === "string" ? p.name.slice(0, 200) : null };
+    if (!pageId) out.token = "page-id-missing";
+    else out.token = out.page.id === pageId ? "ok" : "wrong-page";
+  } catch (e) {
+    out.token = "error";
+    out.errors.push(redact(e?.message || e, env));
+    return jsonResult(out);
+  }
+  if (out.token !== "ok") return jsonResult(out);
+
+  try {
+    const s = await graphGet(env, `${pageId}/subscribed_apps`);
+    out.subscription = (s?.data || []).slice(0, 20).map((a) => ({
+      id: cleanId(a?.id),
+      name: typeof a?.name === "string" ? a.name.slice(0, 200) : null,
+      fields: Array.isArray(a?.subscribed_fields)
+        ? a.subscribed_fields.filter((f) => typeof f === "string").slice(0, 50)
+        : [],
+    }));
+    const ours = appId ? out.subscription.filter((a) => a.id === appId) : out.subscription;
+    out.feedSubscribed = ours.some((a) => a.fields.includes("feed"));
+  } catch (e) {
+    out.errors.push(redact(e?.message || e, env));
+  }
+  return jsonResult(out);
+}
+
+// Page-level webhook registration (POST /{page-id}/subscribed_apps). Uses the
+// stored Page token, so the token never has to leave Cloudflare.
+async function adminSubscribe(env, body) {
+  if (body?.confirm !== "SUBSCRIBE FEED") {
+    return jsonResult({ error: 'Confirmation required: {"confirm":"SUBSCRIBE FEED"}' }, 400);
+  }
+  const pageId = configuredPageId(env);
+  if (!pageId) return jsonResult({ error: "FB_PAGE_ID is not configured" }, 500);
+  try {
+    const r = await graphRequest(env, "POST", `${pageId}/subscribed_apps`, { subscribed_fields: "feed" });
+    console.log("[facebook] page subscription updated", { success: r?.success === true });
+    return jsonResult({ ok: r?.success === true });
+  } catch (e) {
+    return jsonResult({ error: redact(e?.message || e, env) }, 502);
+  }
+}
+
+// Permanent removal, e.g. for a data-deletion request. Deletes the public copy
+// and the private master, clears captions, links and webhook payloads, and
+// keeps a contentless tombstone row (imported, no master) so later webhooks
+// and backfills skip the photo instead of re-importing it. Only keys under
+// Facebook/ are touched, so manual galleries and reviews are never affected.
+const PURGE_CONFIRMATION = "PERMANENTLY DELETE";
+const NOT_PURGED_SQL = `NOT (status = 'imported' AND master_key IS NULL)`;
+
+export function isPurged(row) {
+  return row?.status === "imported" && !row?.master_key;
+}
+
+async function adminPurge(env, body) {
+  if (body?.confirm !== PURGE_CONFIRMATION) {
+    return jsonResult({ error: `Confirmation required: {"confirm":"${PURGE_CONFIRMATION}"}` }, 400);
+  }
+  const db = env.DB;
+  let stmt;
+  if (Array.isArray(body?.photoIds)) {
+    const ids = [...new Set(body.photoIds.map(cleanId).filter(Boolean))];
+    if (!ids.length || ids.length > PURGE_BATCH) return jsonResult({ error: `photoIds required (max ${PURGE_BATCH})` }, 400);
+    stmt = db
+      .prepare(`SELECT fb_photo_id, fb_post_id FROM facebook_photos WHERE fb_photo_id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids);
+  } else if (body?.postId !== undefined) {
+    const postId = cleanId(body.postId);
+    if (!postId) return jsonResult({ error: "Invalid postId" }, 400);
+    stmt = db.prepare(`SELECT fb_photo_id, fb_post_id FROM facebook_photos WHERE fb_post_id = ?`).bind(postId);
+  } else if (body?.projectId !== undefined) {
+    const projectId = Number(body.projectId);
+    if (!Number.isInteger(projectId) || projectId < 1) return jsonResult({ error: "Invalid projectId" }, 400);
+    stmt = db
+      .prepare(`SELECT fb_photo_id, fb_post_id FROM facebook_photos WHERE project_id = ? AND ${NOT_PURGED_SQL} LIMIT ?`)
+      .bind(projectId, PURGE_BATCH);
+  } else if (body?.all === true) {
+    stmt = db
+      .prepare(`SELECT fb_photo_id, fb_post_id FROM facebook_photos WHERE ${NOT_PURGED_SQL} LIMIT ?`)
+      .bind(PURGE_BATCH);
+  } else {
+    return jsonResult({ error: "Choose photoIds, postId, projectId or all" }, 400);
+  }
+
+  const { results = [] } = await stmt.all();
+  const { purged, failed, posts } = await purgePhotos(env, results, body?.postId !== undefined ? [cleanId(body.postId)] : []);
+  const left = await db.prepare(`SELECT COUNT(*) AS n FROM facebook_photos WHERE ${NOT_PURGED_SQL}`).first();
+  console.log("[facebook] purge", { purged, posts });
+  return jsonResult({ ok: failed === 0, purged, failed, posts, remainingFacebookPhotos: left?.n || 0 });
+}
+
+async function purgePhotos(env, results, extraPostIds = [], reason = "deleted on request") {
+  const db = env.DB;
+  const posts = new Set(extraPostIds.filter(Boolean));
+  let purged = 0;
+  let failed = 0;
+  for (const r of results) {
+    const id = cleanId(r.fb_photo_id);
+    if (!id) continue;
+    // One failing photo must not stop the rest; it is retried next run
+    // (its row still has a master_key, so it is selected again).
+    try {
+    // Every possible key for this photo, so a master stranded by a failed
+    // import is removed too. Public objects are deleted only if this module
+    // wrote them.
+    for (const ext of Object.values(EXT_BY_TYPE)) {
+      const key = `${FACEBOOK_PREFIX}${id}.${ext}`;
+      const pub = await env.GALLERY_BUCKET.head(key);
+      if (pub && pub.customMetadata?.source === "facebook") await env.GALLERY_BUCKET.delete(key);
+      await env.PRIVATE_BUCKET.delete(key);
+    }
+    await db
+      .prepare(
+        `UPDATE facebook_photos
+            SET status = 'imported', hidden = 1, project_locked = 1, master_key = NULL, public_key = NULL,
+                content_type = NULL, bytes = NULL, width = NULL, height = NULL, caption = NULL,
+                fb_created_time = NULL, permalink = NULL, album_id = NULL, album_name = NULL,
+                hidden_reason = 'deleted', purge_after = NULL,
+                last_error = ?, updated_at = ${NOW_SQL}
+          WHERE fb_photo_id = ?`
+      )
+      .bind(reason, id)
+      .run();
+    if (r.fb_post_id) posts.add(r.fb_post_id);
+    purged++;
+    } catch (e) {
+      failed++;
+      console.error("[facebook] purge failed for one photo; will retry", redact(e?.message || e, env));
+    }
+  }
+
+  const ids = results.map((r) => r.fb_photo_id);
+  for (const postId of posts) {
+    await db.batch([
+      db
+        .prepare(`UPDATE facebook_posts SET message = NULL, permalink = NULL, updated_at = ${NOW_SQL} WHERE fb_post_id = ?`)
+        .bind(postId),
+      db.prepare(`UPDATE facebook_webhook_events SET payload = '{}', updated_at = ${NOW_SQL} WHERE post_id = ?`).bind(postId),
+    ]);
+  }
+  for (const id of ids) {
+    await db
+      .prepare(`UPDATE facebook_webhook_events SET payload = '{}', updated_at = ${NOW_SQL} WHERE photo_id = ?`)
+      .bind(id)
+      .run();
+  }
+
+  return { purged, failed, posts: posts.size };
 }
 
 // Re-queue failed events and retry a few failed photos right away.
@@ -1608,8 +2018,15 @@ async function adminRetry(env) {
 
 // --- cron sweeper ---------------------------------------------------------
 
-export async function handleFacebookScheduled(env) {
-  if (!autoImportEnabled(env) || !env.DB) return null;
+export async function handleFacebookScheduled(env, { now = new Date() } = {}) {
+  if (!env.DB) return null;
+  await runRetention(env, { now });
+  if (!autoImportEnabled(env)) {
+    // Removals still take content down while imports are paused.
+    const summary = await processPendingEvents(env, { limit: CRON_BATCH, removalsOnly: true });
+    if (summary.processed) console.log("[facebook] cron processed removals", summary);
+    return null;
+  }
 
   // Recover rows stranded by an evicted isolate.
   await env.DB.batch([

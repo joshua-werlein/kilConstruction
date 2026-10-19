@@ -2,6 +2,11 @@
 import BaseLayout from "../layout/MainLayout.astro";
 import "../styles/legal.css";
 
+// Final revision 2026-10-18: approved by the site owner; business-practice
+// claims owner-confirmed 2026-10-19 (docs/facebook-launch-resume.md).
+// Keep LAST_UPDATED = date of the last text change; bump it if edited again.
+const LAST_UPDATED = "October 18, 2026";
+
 const title = "Terms of Use | KIL Construction";
 const description =
     "Terms of Use for kilcon.work outlining conditions for accessing and using the website.";
@@ -10,7 +15,7 @@ const description =
 <BaseLayout {title} {description}>
     <article class="legal">
         <h1>Terms of Use</h1>
-        <p class="muted">Last updated: December 26, 2025</p>
+        <p class="muted">Last updated: {LAST_UPDATED}</p>
 
         <p>
             By accessing or using kilcon.work, you agree to these Terms of Use.
@@ -41,6 +46,21 @@ const description =
             If you submit information through site forms, you grant permission for us
             to review and respond to your submission and confirm that the information
             provided is lawful and accurate.
+        </p>
+
+        <h2>Reviews and Photos You Submit</h2>
+        <p>
+            If you submit a review, it may be displayed on the site once approved, as
+            described in our <a href="/privacy">Privacy Policy</a>. By uploading a photo,
+            you confirm that you have the right to share it. You can ask us to remove
+            your review at any time.
+        </p>
+
+        <h2>Privacy</h2>
+        <p>
+            Our <a href="/privacy">Privacy Policy</a> explains how we handle information,
+            including project photos we publish from our Facebook Page. To ask us to
+            delete information or content, see <a href="/data-deletion">Data Deletion</a>.
         </p>
 
         <h2>Limitation of Liability</h2>

@@ -2,6 +2,11 @@
 import BaseLayout from "../layout/MainLayout.astro";
 import "../styles/legal.css";
 
+// Final revision 2026-10-18: approved by the site owner; business-practice
+// claims owner-confirmed 2026-10-19 (docs/facebook-launch-resume.md).
+// Keep LAST_UPDATED = date of the last text change; bump it if edited again.
+const LAST_UPDATED = "October 18, 2026";
+
 const title = "Privacy Policy | KIL Construction";
 const description =
     "Privacy Policy for kilcon.work explaining what data is collected, how it is used, and how it is protected.";
@@ -10,68 +15,169 @@ const description =
 <BaseLayout {title} {description}>
     <article class="legal">
         <h1>Privacy Policy</h1>
-        <p class="muted">Last updated: December 26, 2025</p>
+        <p class="muted">Last updated: {LAST_UPDATED}</p>
 
         <p>
-            This Privacy Policy explains how kilcon.work collects, uses, and protects
-            information when you use this website.
+            This Privacy Policy explains how KIL Construction ("we", "us") collects, uses,
+            and protects information through kilcon.work, including project photos we
+            publish from our own Facebook Page.
         </p>
 
         <h2>Information We Collect</h2>
 
-        <h3>Information You Provide</h3>
+        <h3>Contact form</h3>
+        <p>When you send us a message, we collect:</p>
+        <ul>
+            <li>Name and email address</li>
+            <li>Phone number and address (optional)</li>
+            <li>Your message or project details</li>
+        </ul>
         <p>
-            We collect information you voluntarily submit through forms on the site,
-            which may include:
+            Your message is sent to our business email inbox. It is not saved in the
+            website's own database.
+        </p>
+
+        <h3>Customer reviews</h3>
+        <p>When you submit a review, we collect:</p>
+        <ul>
+            <li>Your name, project type, and location (optional)</li>
+            <li>Your rating and review text</li>
+            <li>A photo, if you choose to upload one</li>
+            <li>Whether you allow us to show your full name and to use your review in marketing</li>
+        </ul>
+        <p>
+            Reviews are checked before they appear on the site. An approved review shows
+            your rating, review text, project type, location (if you gave one), photo (if
+            you uploaded one), the date, and any reply from us. Your name is shown as your
+            first name and last initial unless you choose to show your full name. Review
+            records and photos are kept in private storage; a review photo is shown only
+            with its approved review.
+        </p>
+
+        <h3>Apparel orders</h3>
+        <p>
+            Checkout and payment are handled by Stripe on Stripe's own site, under
+            Stripe's privacy policy. We receive and store your name, email address, phone
+            number, and the items you ordered so we can fulfill your order. We do not
+            receive or store your card details.
+        </p>
+
+        <h3>Cookies and technical data</h3>
+        <p>
+            This site sets <strong>essential cookies only</strong>, for administrator
+            sign-in. It does not use cookies for advertising, marketing, or analytics.
+            Our forms are protected from spam by Cloudflare Turnstile, which checks
+            browser and device signals. Limited technical data, such as IP address,
+            browser type, and request details, is processed by our hosting provider for
+            security, performance, and reliability.
+        </p>
+
+        <h2>Project Photos from Our Facebook Page</h2>
+        <p>
+            Our project galleries may include construction photos that KIL Construction
+            has posted on its own
+            <a href="https://www.facebook.com/profile.php?id=61559555097375" target="_blank" rel="noopener noreferrer">Facebook Page</a>.
+            For those photos, we use Meta's Pages API to copy, from posts published by
+            our Page:
         </p>
         <ul>
-            <li>Name</li>
-            <li>Email address</li>
-            <li>Phone number (optional)</li>
-            <li>Address (optional)</li>
-            <li>Message or inquiry details</li>
+            <li>The photos</li>
+            <li>The post text (caption) and date</li>
+            <li>The Facebook post and photo IDs and the link to the original post</li>
         </ul>
-
-        <h3>Cookies</h3>
         <p>
-            This site uses <strong>essential cookies only</strong> for administrative
-            authentication and secure session management. No cookies are used for
-            advertising, marketing, or analytics.
+            We do not store information about people who view, like, comment on, or post
+            to our Facebook Page. Notifications Facebook sends us about other people's
+            activity are discarded, and posts by others are never imported. This website
+            does not offer Facebook Login and does not receive information about your
+            Facebook account.
         </p>
-
-        <h3>Automatically Processed Data</h3>
         <p>
-            Limited technical data may be processed as part of normal site operation,
-            including IP address, browser or device type, and request metadata. This
-            data is used only for security, performance, and reliability.
+            Imported photos and captions are stored with Cloudflare (file storage and
+            database) and are used only to show our own work on this website. The access
+            key that lets our website read our Page is stored securely on our server and
+            is never shown to visitors.
+        </p>
+        <p>
+            If a post on our Facebook Page is deleted, hidden, or unpublished, and
+            Facebook confirms that it is no longer available, its photos are removed from
+            public display on this website. We keep a private copy for up to 30 days, so
+            the photos can return if the post is restored on Facebook; after that, the
+            photos and their captions are permanently deleted. A temporary error from
+            Facebook is never treated as a removal. Photos we upload to the website
+            ourselves are not affected.
+        </p>
+        <p>
+            If a photo shows you or your property and you ask us to remove it, then once
+            we have verified your request we delete the photo permanently, without the
+            30-day recovery period. See <a href="/data-deletion">Data Deletion</a>.
         </p>
 
         <h2>How We Use Information</h2>
-        <p>Information collected is used only to:</p>
+        <p>We use information only to:</p>
         <ul>
-            <li>Respond to inquiries you submit</li>
-            <li>Operate and secure the website</li>
-            <li>Manage administrative access</li>
+            <li>Respond to inquiries</li>
+            <li>Publish approved reviews and our project photos</li>
+            <li>Process and fulfill apparel orders</li>
+            <li>Operate, secure, and maintain the website</li>
         </ul>
+        <p>We do not sell personal information.</p>
 
         <h2>Third-Party Services</h2>
-        <p>The site relies on the following service providers:</p>
+        <p>
+            We use the service providers below to run the site. Cloudflare, Resend, our
+            email provider, and Stripe process information only as needed for the
+            purposes above. Meta is the source of the Facebook Page content we import;
+            this website does not send visitors' information to Meta.
+        </p>
         <ul>
-            <li><strong>Cloudflare</strong> — hosting, networking, and security</li>
-            <li><strong>Resend</strong> — delivery of contact form submissions</li>
+            <li><strong>Cloudflare</strong> — hosting, file storage, database, security, and spam protection (Turnstile)</li>
+            <li><strong>Resend</strong> — delivery of contact form messages to our email inbox</li>
+            <li><strong>Our email provider</strong> — hosts the business inbox where contact messages and deletion requests are received</li>
+            <li><strong>Stripe</strong> — checkout and payment processing for apparel orders</li>
+            <li><strong>Meta (Facebook)</strong> — source of the project photos we post on our own Facebook Page</li>
         </ul>
 
         <h2>Data Retention</h2>
+        <p>We keep information only as long as needed:</p>
+        <ul>
+            <li>
+                <strong>Contact messages</strong> stay in our business email inbox until
+                they are no longer needed or you ask us to delete them.
+            </li>
+            <li>
+                <strong>Reviews</strong> stay until we remove them or you ask us to delete
+                them.
+            </li>
+            <li>
+                <strong>Apparel orders</strong> are kept as needed for fulfillment,
+                accounting, and applicable legal obligations.
+            </li>
+            <li>
+                <strong>Facebook project photos</strong> are kept while they are published
+                on our Facebook Page and shown on this website. When a removal is
+                confirmed, they are hidden at once and permanently deleted after a
+                recovery period of no more than 30 days.
+            </li>
+        </ul>
         <p>
-            Submitted information is retained only as long as reasonably necessary to
-            respond to inquiries, maintain site operations, or meet legal or
-            operational requirements.
+            Our service providers (such as Stripe, our email provider, and our hosting
+            provider) keep their own records and logs under their own policies, and
+            deleted information may remain in automatic backups for a limited time
+            before it expires.
         </p>
 
-        <h2>Your Rights</h2>
+        <h2>Your Choices and Rights</h2>
         <p>
-            You may request access to, correction of, or deletion of personal
-            information you have provided.
+            You may ask us to access, correct, or delete personal information you have
+            provided, or to remove a review or an imported project photo. Instructions
+            are on our <a href="/data-deletion">Data Deletion</a> page.
+        </p>
+
+        <h2>Changes to This Policy</h2>
+        <p>
+            We may update this policy as the site changes. The date at the top shows
+            when it was last revised.
         </p>
 
         <h2>Contact</h2>

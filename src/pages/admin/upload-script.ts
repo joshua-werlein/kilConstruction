@@ -5,12 +5,12 @@ export default function initUploadPage() {
     document.addEventListener("DOMContentLoaded", () => {
         // Grab DOM elements with concrete types (same pattern as manage-script.ts)
         const formEl = document.getElementById("admin-upload-form") as HTMLFormElement;
-        const categoryEl = document.getElementById("category") as HTMLSelectElement;
+        const categoryEl = document.getElementById("category") as unknown as HTMLSelectElement;
         const fileInput = document.getElementById("fileInput") as HTMLInputElement;
         const statusEl = document.getElementById("status") as HTMLDivElement;
         const resultEl = document.getElementById("result") as HTMLDivElement;
         const submitBtn = document.getElementById("submitBtn") as HTMLButtonElement;
-        const subfolderSelectEl = document.getElementById("subfolder-select") as HTMLSelectElement;
+        const subfolderSelectEl = document.getElementById("subfolder-select") as unknown as HTMLSelectElement;
         const subfolderCustomEl = document.getElementById("subfolder-custom") as HTMLInputElement;
 
         function sanitizeSubfolderInput(raw: string): string | null {

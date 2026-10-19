@@ -1,0 +1,165 @@
+---
+import AdminLayout from "../../layout/AdminLayout.astro";
+import "../../styles/global.css";
+import "../../styles/admin.css";
+import { verifyAdminToken } from "../../utils/adminToken";
+
+const cookies = Astro.cookies;
+const auth = cookies.get("admin_auth")?.value || "";
+
+// Cloudflare runtime env
+const env = (Astro.locals as any).runtime?.env ?? {};
+const ADMIN_SECRET = env.ADMIN_SECRET;
+const SESSION_VERSION  = env.SESSION_VERSION ?? "1";
+
+if (!ADMIN_SECRET || !SESSION_VERSION) {
+    console.error("[admin] Missing ADMIN_SECRET or SESSION_VERSION in runtime env");
+    return new Response("Something went wrong. Please try again later.", { status: 500 });
+}
+
+// build-time public API URL for the worker
+const PUBLIC_GALLERY_API = import.meta.env.PUBLIC_GALLERY_API || "https://kilcon.work/api/gallery-api";
+
+const ADMIN_API_BASE = import.meta.env.DEV
+    ? PUBLIC_GALLERY_API          // dev → hit remote worker
+    : "/api/gallery-api";
+
+const isAdmin = auth && ADMIN_SECRET && SESSION_VERSION
+    ? await verifyAdminToken(auth, ADMIN_SECRET, SESSION_VERSION)
+    : false;
+
+if (!isAdmin) {
+    return new Response(null, {
+        status: 302,
+        headers: { Location: "/admin" },
+    });
+}
+---
+<AdminLayout title="Facebook Gallery Sync" description="Manage photos imported from the Facebook Page.">
+    <h1 class="admin-title">Facebook Gallery Sync</h1>
+    <p class="admin-subtitle">
+        Photos come from the Facebook Page automatically. Your changes here (hide, rename, move) are kept during future syncs.
+    </p>
+
+    <div id="fb-root" data-admin-api={ADMIN_API_BASE}>
+        <div id="fb-status" class="status-row" role="status" aria-live="polite">Loading…</div>
+
+        <!-- Sync status -->
+        <section class="panel fb-section" aria-labelledby="fb-sync-heading">
+            <div class="toolbar">
+                <h2 id="fb-sync-heading" class="fb-heading">Sync status</h2>
+                <div class="toolbar-actions">
+                    <button id="fb-refresh" type="button" class="btn-small">Refresh</button>
+                    <button id="fb-retry" type="button" class="btn-small btn-danger">Retry failed</button>
+                </div>
+            </div>
+            <div id="fb-sync" class="fb-sync"></div>
+            <h3 class="fb-subheading">Recent failures</h3>
+            <ul id="fb-failures" class="fb-failures"></ul>
+        </section>
+
+        <!-- Connection -->
+        <section class="panel fb-section" aria-labelledby="fb-health-heading">
+            <div class="toolbar">
+                <h2 id="fb-health-heading" class="fb-heading">Facebook connection</h2>
+                <div class="toolbar-actions">
+                    <button id="fb-health-check" type="button" class="btn-small">Check connection</button>
+                    <button id="fb-subscribe" type="button" class="btn-small" hidden>Subscribe Page to feed</button>
+                </div>
+            </div>
+            <div id="fb-health" class="fb-sync"><p class="hint">Checks the stored Page token and webhook subscription. Secret values are never shown.</p></div>
+        </section>
+
+        <!-- Historical import -->
+        <section class="panel fb-section" aria-labelledby="fb-backfill-heading">
+            <div class="toolbar">
+                <h2 id="fb-backfill-heading" class="fb-heading">Historical import</h2>
+                <div class="toolbar-actions">
+                    <button id="fb-backfill-dry" type="button" class="btn-small">Preview (dry run)</button>
+                    <button id="fb-backfill-run" type="button" class="btn-small btn-danger">Import history</button>
+                    <button id="fb-backfill-stop" type="button" class="btn-small" hidden>Stop</button>
+                </div>
+            </div>
+            <p class="hint">The preview reads Facebook only and changes nothing. Import publishes in small batches and can be stopped and resumed.</p>
+            <div id="fb-backfill" class="fb-sync"></div>
+        </section>
+
+        <!-- Projects -->
+        <section class="panel fb-section" aria-labelledby="fb-projects-heading">
+            <div class="toolbar">
+                <h2 id="fb-projects-heading" class="fb-heading">Projects</h2>
+                <div class="toolbar-actions">
+                    <button id="fb-show-hidden" type="button" class="btn-small">Show hidden photos</button>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table class="fb-table">
+                    <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Category</th>
+                        <th>Photos</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                    </thead>
+                    <tbody id="fb-projects-tbody"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Photos -->
+        <section class="panel fb-section" aria-labelledby="fb-photos-heading">
+            <div class="toolbar">
+                <h2 id="fb-photos-heading" class="fb-heading">Photos</h2>
+            </div>
+            <p id="fb-photos-label" class="hint">Choose “View photos” on a project, or “Show hidden photos”.</p>
+            <div id="fb-bulk" class="fb-bulk" hidden>
+                <label class="fb-inline-label">
+                    <input id="fb-select-all" type="checkbox" /> Select all
+                </label>
+                <button id="fb-bulk-hide" type="button" class="admin-button-sm">Hide</button>
+                <button id="fb-bulk-restore" type="button" class="admin-button-sm">Restore</button>
+                <label for="fb-move-target" class="sr-only">Move to project</label>
+                <select id="fb-move-target" class="admin-input fb-select"></select>
+                <button id="fb-bulk-move" type="button" class="admin-button-sm">Move to project</button>
+                <button id="fb-bulk-delete" type="button" class="admin-button-sm btn-danger" title="For removal requests: deletes the photo, its original and its caption">Delete permanently</button>
+            </div>
+            <ul id="fb-photos" class="fb-photo-grid"></ul>
+        </section>
+
+        <!-- New project -->
+        <section class="panel fb-section" aria-labelledby="fb-new-heading">
+            <h2 id="fb-new-heading" class="fb-heading">New project</h2>
+            <form id="fb-new-form" class="admin-form-grid">
+                <label class="admin-field-label">
+                    Name
+                    <input id="fb-new-name" type="text" class="admin-input" required maxlength="120" />
+                </label>
+                <label class="admin-field-label">
+                    Category
+                    <select id="fb-new-category" class="admin-input">
+                        <option value="projects">Projects</option>
+                        <option value="new-construction">New Construction</option>
+                        <option value="remodels">Remodels</option>
+                        <option value="furniture">Furniture</option>
+                    </select>
+                </label>
+                <label class="admin-field-label">
+                    Merge into existing gallery (optional)
+                    <select id="fb-new-link" class="admin-input">
+                        <option value="">— None (new gallery) —</option>
+                    </select>
+                </label>
+                <div class="actions-row">
+                    <button type="submit" class="btn-small">Create project</button>
+                </div>
+            </form>
+        </section>
+    </div>
+
+    <script>
+        import initFacebookPage from "./facebook-script";
+        initFacebookPage();
+    </script>
+</AdminLayout>

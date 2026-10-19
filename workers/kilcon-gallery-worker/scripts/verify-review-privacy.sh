@@ -47,7 +47,11 @@ check "?project=../Reviews"                     "400" "$SITE/api/gallery-api?pro
 check "?project=constructor/x"                  "400|404" "$SITE/api/gallery-api?project=constructor%2Fx"
 check "?list=reviews"                           "400" "$SITE/api/gallery-api?list=reviews"
 check "?all=1 without admin"                    "401" "$SITE/api/gallery-api?all=1"
-check "Facebook webhook disabled"               "404" "$SITE/api/gallery-api/facebook/webhook"
+# 404 while FB_INTEGRATION_ENABLED="false"; 403 once enabled (wrong verify token)
+check "Facebook webhook rejects bad verify token" "403|404" "$SITE/api/gallery-api/facebook/webhook?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=1"
+check "Facebook webhook rejects unsigned POST"  "401|404" -X POST -H 'Content-Type: application/json' -d '{"object":"page","entry":[]}' "$SITE/api/gallery-api/facebook/webhook"
+check "Facebook admin API without admin"        "401|404" "$SITE/api/gallery-api/facebook/admin/health"
+check "Facebook backfill without admin"         "401|404" -X POST "$SITE/api/gallery-api/facebook/backfill"
 check "migration endpoint without admin"        "401" -X POST -H 'Content-Type: application/json' -d '{}' "$SITE/api/reviews/admin/migrate"
 
 echo "== B. Direct and transformed review-file URLs"

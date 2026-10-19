@@ -67,6 +67,16 @@ Gallery + Reviews Worker (kilcon-gallery-worker)
   v
 R2 bucket + review storage
 ```
+
+**Facebook Page sync:** the gallery worker also serves the Meta Page `feed`
+webhook (`/api/gallery-api/facebook/webhook`), an admin backfill and admin
+controls (`/admin/facebook`). Facebook photos are grouped into projects in D1
+`kilcon-db`; masters live in the private R2 bucket `kilcon-private` and a public
+copy exists under `Facebook/` only while a photo is visible.
+
+**Review photos are private:** new uploads go to `kilcon-private` and are served
+only via `/api/reviews/photo?id=` (approved reviews, or admins).
+`images.kilcon.work/Reviews/*` is blocked. See `docs/facebook-webhook.md`.
 ### 3. Admin credentials & session rotation
 
 Admin authentication for the gallery/admin UI is backed by two key values in the runtime environment:

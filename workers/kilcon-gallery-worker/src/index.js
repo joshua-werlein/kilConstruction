@@ -16,6 +16,7 @@ import {
   listFacebookProjects,
   getFacebookProject,
   getLinkedFacebookItems,
+  runRetention,
 } from "./facebook.js";
 import {
   REVIEWS_PHOTO_PREFIX,
@@ -33,7 +34,8 @@ import {
 } from "./reviewPrivacy.js";
 
 // Facebook sync ships disabled. Until FB_INTEGRATION_ENABLED = "true", every
-// Facebook route 404s, public galleries never query D1, and cron is a no-op.
+// Facebook route 404s, public galleries never query D1, and cron only runs
+// already-due retention deletes.
 function fbEnabled(env) {
   return env.FB_INTEGRATION_ENABLED === "true";
 }
@@ -504,7 +506,12 @@ export default {
   },
 
   async scheduled(controller, env, ctx) {
-    if (!fbEnabled(env)) return;
+    // Kill switch off: no Facebook traffic at all, but already-due retention
+    // deletes (D1 + R2 only) still run so removed content doesn't linger.
+    if (!fbEnabled(env)) {
+      ctx.waitUntil(runRetention(env));
+      return;
+    }
     ctx.waitUntil(
       handleFacebookScheduled(env).catch((err) =>
         console.error("[facebook] scheduled error:", err?.message || err)

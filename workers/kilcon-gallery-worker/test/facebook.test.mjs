@@ -10,7 +10,7 @@ import path from "node:path";
 import { getPlatformProxy } from "wrangler";
 
 import worker from "../src/index.js";
-import { processPendingEvents, handleFacebookScheduled, redact } from "../src/facebook.js";
+import { processPendingEvents, handleFacebookScheduled, purgeExpiredRemovals, runRetention, redact } from "../src/facebook.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -190,11 +190,13 @@ before(async () => {
   });
   baseEnv = proxy.env;
 
-  const sql = await readFile(path.join(repoRoot, "migrations/013_facebook_sync.sql"), "utf8");
-  const statements = sql
-    .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
-    .split(";").map((s) => s.trim()).filter(Boolean);
-  await baseEnv.DB.batch(statements.map((s) => baseEnv.DB.prepare(s)));
+  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql"]) {
+    const sql = await readFile(path.join(repoRoot, "migrations", file), "utf8");
+    const statements = sql
+      .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
+      .split(";").map((s) => s.trim()).filter(Boolean);
+    await baseEnv.DB.batch(statements.map((s) => baseEnv.DB.prepare(s)));
+  }
 });
 
 after(async () => {
@@ -501,9 +503,8 @@ test("migration: inventory → copy → verify → gated delete of public copies
   assert.equal(await (await baseEnv.GALLERY_BUCKET.get("Projects/Deck/1.jpg")).text(), "gallery");
 });
 
-test("Facebook integration is fully inert when FB_INTEGRATION_ENABLED is not \"true\" (shipped default)", async () => {
-  assert.equal(baseEnv.FB_INTEGRATION_ENABLED, "false", "wrangler.toml default");
-  const env = makeEnv({ FB_INTEGRATION_ENABLED: baseEnv.FB_INTEGRATION_ENABLED, FB_AUTO_IMPORT: "true" });
+test("Facebook integration is fully inert when FB_INTEGRATION_ENABLED is not \"true\" (kill switch)", async () => {
+  const env = makeEnv({ FB_INTEGRATION_ENABLED: "false", FB_AUTO_IMPORT: "true" });
 
   const verify = await worker.fetch(new Request(`${BASE}/webhook?hub.mode=subscribe&hub.verify_token=${VERIFY_TOKEN}&hub.challenge=1`), env, makeCtx());
   assert.equal(verify.status, 404);
@@ -519,10 +520,11 @@ test("Facebook integration is fully inert when FB_INTEGRATION_ENABLED is not \"t
   assert.equal((await call("/api/gallery-api?project=ganz-re-deck", { env: noDb })).status, 200);
   assert.equal((await call("/api/gallery-api?project=recent-project-updates", { env: noDb })).status, 404);
 
-  let scheduled = 0;
-  await worker.scheduled({}, env, { waitUntil: () => scheduled++ });
-  assert.equal(scheduled, 0, "cron handler is a no-op");
-  assert.equal(fetchCalls.length, 0);
+  const cron = [];
+  await worker.scheduled({}, env, { waitUntil: (p) => cron.push(p) });
+  await Promise.all(cron);
+  assert.equal(fetchCalls.length, 0, "cron makes no Facebook calls; only D1/R2 retention runs");
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
 });
 
 test("public galleries still work (list, project, category, highlights)", async () => {
@@ -599,12 +601,20 @@ test("non-page objects, non-feed fields, and other Pages are ignored", async () 
 
 test("automatic import is disabled by default (wrangler.toml) and records only", async () => {
   assert.equal(baseEnv.FB_AUTO_IMPORT, "false", "shipped default");
+  assert.equal(baseEnv.FB_INTEGRATION_ENABLED, "true", "stage L2: endpoints on, imports off");
   stubPost("1111111111_100", ["2006"], { message: "x" });
   const ctx = makeCtx();
-  const res = await postWebhook(makeEnv({ FB_AUTO_IMPORT: baseEnv.FB_AUTO_IMPORT }), feedPayload([postAdd("1111111111_100")]), { ctx });
+  const shipped = makeEnv({ FB_AUTO_IMPORT: baseEnv.FB_AUTO_IMPORT, FB_INTEGRATION_ENABLED: baseEnv.FB_INTEGRATION_ENABLED });
+  const verify = await worker.fetch(new Request(`${BASE}/webhook?hub.mode=subscribe&hub.verify_token=${VERIFY_TOKEN}&hub.challenge=4321`), shipped, makeCtx());
+  assert.equal(verify.status, 200);
+  assert.equal(await verify.text(), "4321");
+  const res = await postWebhook(shipped, feedPayload([postAdd("1111111111_100")]), { ctx });
   assert.equal(res.status, 200);
   assert.equal(ctx.pending.length, 0);
-  assert.equal(await handleFacebookScheduled(makeEnv()), null);
+  assert.equal(await handleFacebookScheduled(shipped), null);
+  const cron = [];
+  await worker.scheduled({}, shipped, { waitUntil: (p) => cron.push(p) });
+  assert.deepEqual(await Promise.all(cron), [null], "hourly cron is a no-op while FB_AUTO_IMPORT is off");
   assert.equal(fetchCalls.length, 0);
   assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
   assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
@@ -769,7 +779,7 @@ test("an existing public object is never overwritten", async () => {
   assert.equal(await (await baseEnv.GALLERY_BUCKET.get("Facebook/3601.jpg")).text(), "ORIGINAL");
 });
 
-test("Facebook remove/hide events never remove photos from the website", async () => {
+test("unconfirmed remove/hide events (content still on Facebook) change nothing", async () => {
   await baseEnv.GALLERY_BUCKET.put("Projects/Deck/a.jpg", "KEEP");
   stubPost(`${PAGE_ID}_270`, ["3701"], { message: "x" });
   await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_270`)]));
@@ -782,8 +792,8 @@ test("Facebook remove/hide events never remove photos from the website", async (
   assert.ok(await baseEnv.GALLERY_BUCKET.head("Facebook/3701.jpg"));
   assert.equal((await getJson("/api/gallery-api?project=recent-project-updates")).items.length, 1);
   const [photo] = await rows("SELECT * FROM facebook_photos");
-  assert.ok(photo.removed_on_facebook_at);
-  assert.ok((await rows("SELECT removed_on_facebook_at FROM facebook_posts"))[0].removed_on_facebook_at);
+  assert.equal(photo.hidden, 0);
+  assert.equal(photo.purge_after, null);
 });
 
 test("visitor posts and unpublished posts are ignored", async () => {
@@ -1066,4 +1076,531 @@ test("backfill that hits the fetch budget returns the same cursor and finishes l
   assert.equal(second.complete, true);
   assert.equal((await rows("SELECT * FROM facebook_photos WHERE status='imported'")).length, 30);
   assert.equal((await getJson("/api/gallery-api?project=big-barn")).items.length, 30);
+});
+
+// =====================================================================
+// Launch readiness — edits, health check, Page subscription, retry cron
+// =====================================================================
+
+test("edited captions update the post and photos that showed the old text", async () => {
+  const post = stubPost(`${PAGE_ID}_600`, ["8001", "8002"], { message: "Smith porch in progress" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_600`)]));
+  // 8002 has its own Facebook caption, which an edit to the post must not replace.
+  await baseEnv.DB.prepare(`UPDATE facebook_photos SET caption = 'Own caption' WHERE fb_photo_id = '8002'`).run();
+
+  graphFixtures.set(post.id, { ...post, message: "Smith porch finished" });
+  const before = fetchCalls.length;
+  const res = await postWebhook(autoEnv(), feedPayload([{ ...postAdd(post.id), verb: "edited" }]));
+  assert.equal(res.status, 200);
+  assert.ok(fetchCalls.slice(before).every((c) => c.url.hostname === "graph.facebook.com"), "no image re-download");
+
+  const [p] = await rows("SELECT message FROM facebook_posts WHERE fb_post_id = ?", post.id);
+  assert.equal(p.message, "Smith porch finished");
+  const caps = Object.fromEntries((await rows("SELECT fb_photo_id, caption FROM facebook_photos")).map((r) => [r.fb_photo_id, r.caption]));
+  assert.deepEqual(caps, { 8001: "Smith porch finished", 8002: "Own caption" });
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 2, "no duplicates");
+  const items = (await getJson("/api/gallery-api?project=recent-project-updates")).items;
+  assert.ok(items.some((i) => i.description === "Smith porch finished"));
+});
+
+test("an edited photo event re-reads the post instead of short-circuiting", async () => {
+  const post = stubPost(`${PAGE_ID}_610`, ["8101"], { message: "Old words" });
+  await postWebhook(autoEnv(), feedPayload([photoAdd("8101", { post_id: post.id })]));
+  graphFixtures.set(post.id, { ...post, message: "New words" });
+  await postWebhook(autoEnv(), feedPayload([photoAdd("8101", { post_id: post.id, verb: "edited" })]));
+  assert.equal((await rows("SELECT caption FROM facebook_photos"))[0].caption, "New words");
+});
+
+test("hidden photos stay hidden when their post is edited", async () => {
+  const post = stubPost(`${PAGE_ID}_620`, ["8201"], { message: "Barn" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  await adminPost("photo-update", { photoIds: ["8201"], hidden: true });
+  graphFixtures.set(post.id, { ...post, message: "Barn done" });
+  await postWebhook(autoEnv(), feedPayload([{ ...postAdd(post.id), verb: "edited" }]));
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+  assert.equal((await rows("SELECT hidden FROM facebook_photos"))[0].hidden, 1);
+});
+
+test("admin health reports configuration, token, and feed subscription without secrets", async () => {
+  const env = makeEnv({ FB_APP_ID: "4242" });
+  graphFixtures.set("me", { id: PAGE_ID, name: "KIL Construction" });
+  graphFixtures.set(`${PAGE_ID}/subscribed_apps`, {
+    data: [{ id: "4242", name: "KIL Construction Gallery Sync", subscribed_fields: ["feed"] }],
+  });
+  const res = await call(`${BASE}/admin/health`, { admin: true, env });
+  const text = await res.text();
+  assert.equal(res.status, 200);
+  for (const s of [PAGE_TOKEN, APP_SECRET, VERIFY_TOKEN]) assert.ok(!text.includes(s));
+  const h = JSON.parse(text);
+  assert.equal(h.token, "ok");
+  assert.equal(h.page.name, "KIL Construction");
+  assert.equal(h.feedSubscribed, true);
+  assert.deepEqual(h.secrets, { appSecret: true, verifyToken: true, pageAccessToken: true });
+
+  graphFixtures.set(`${PAGE_ID}/subscribed_apps`, { data: [{ id: "999", name: "Other", subscribed_fields: ["feed"] }] });
+  assert.equal((await getJson(`${BASE}/admin/health`, { admin: true, env })).feedSubscribed, false, "other apps don't count");
+
+  // Token for another Page (or a user token) is caught; so is a missing FB_PAGE_ID.
+  graphFixtures.set("me", { id: "2222222222", name: "Someone Else" });
+  assert.equal((await getJson(`${BASE}/admin/health`, { admin: true, env })).token, "wrong-page");
+  const noId = await getJson(`${BASE}/admin/health`, { admin: true, env: makeEnv({ FB_PAGE_ID: "" }) });
+  assert.equal(noId.token, "page-id-missing");
+  assert.equal(noId.page.id, "2222222222", "reports the token's Page ID so FB_PAGE_ID can be checked");
+
+  graphFixtures.set("me", { status: 400, body: { error: { code: 190, message: `bad token ${PAGE_TOKEN}` } } });
+  const bad = await (await call(`${BASE}/admin/health`, { admin: true, env })).text();
+  assert.ok(!bad.includes(PAGE_TOKEN));
+  assert.equal(JSON.parse(bad).token, "error");
+
+  const unset = await getJson(`${BASE}/admin/health`, { admin: true, env: makeEnv({ FB_PAGE_ACCESS_TOKEN: undefined }) });
+  assert.equal(unset.token, "untested");
+  assert.equal(unset.secrets.pageAccessToken, false);
+  assert.equal((await call(`${BASE}/admin/health`, { env })).status, 401);
+});
+
+test("Page subscription requires admin and an explicit confirmation", async () => {
+  graphFixtures.set(`${PAGE_ID}/subscribed_apps`, { success: true });
+  assert.equal((await call(`${BASE}/admin/subscribe`, { method: "POST", body: { confirm: "SUBSCRIBE FEED" } })).status, 401);
+  const noConfirm = await call(`${BASE}/admin/subscribe`, { method: "POST", body: {}, admin: true });
+  assert.equal(noConfirm.status, 400);
+  assert.equal(graphCalls().length, 0);
+
+  const ok = await adminPost("subscribe", { confirm: "SUBSCRIBE FEED" });
+  assert.equal(ok.ok, true);
+  const [c] = graphCalls();
+  assert.equal(c.init.method, "POST");
+  assert.equal(c.url.pathname, `/v26.0/${PAGE_ID}/subscribed_apps`);
+  assert.equal(c.url.searchParams.get("subscribed_fields"), "feed");
+  assert.ok(!c.url.toString().includes(PAGE_TOKEN));
+});
+
+test("retry cron is configured, is D1-only, and recovers a failed import", async () => {
+  const toml = await readFile(path.join(repoRoot, "workers/kilcon-gallery-worker/wrangler.toml"), "utf8");
+  const cron = /^crons\s*=\s*\["([^"]+)"\]/m.exec(toml)?.[1];
+  assert.equal(cron, "17 * * * *", "hourly, not a 15/30-minute poll");
+
+  // No pending work → the sweep makes no outbound calls at all.
+  assert.deepEqual(await handleFacebookScheduled(autoEnv()), { processed: 0, done: 0, ignored: 0, retry: 0, failed: 0, deferred: 0 });
+  assert.equal(fetchCalls.length, 0, "never polls Facebook");
+
+  stubPost(`${PAGE_ID}_630`, ["8301"], { message: "x" });
+  const src = graphFixtures.get("8301").images[1].source;
+  imageFixtures.set(src, { status: 503 });
+  await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_630`)]));
+  assert.equal((await rows("SELECT status FROM facebook_webhook_events"))[0].status, "retry");
+
+  imageFixtures.set(src, { bytes: new TextEncoder().encode("JPEG-8301") });
+  await handleFacebookScheduled(autoEnv());
+  assert.equal((await rows("SELECT status FROM facebook_webhook_events"))[0].status, "done");
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Facebook/8301.jpg"]);
+});
+
+test("backfill dry run reports scanned posts, posts without photos, and the oldest post", async () => {
+  const withPhotos = stubPost(`${PAGE_ID}_700`, ["8401", "8402"], { message: "Deck", created: "2021-03-04T10:00:00+0000" });
+  const textOnly = { id: `${PAGE_ID}_701`, message: "Hiring!", created_time: "2019-01-02T10:00:00+0000", from: { id: PAGE_ID } };
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [withPhotos, textOnly], paging: {} });
+  const r = await getJson(`${BASE}/backfill`, { method: "POST", body: { dryRun: true }, admin: true });
+  assert.equal(r.scanned, 2);
+  assert.equal(r.withoutPhotos, 1);
+  assert.equal(r.oldestCreatedTime, "2019-01-02T10:00:00.000Z");
+  assert.equal(r.posts.length, 1);
+  assert.equal(r.posts[0].newPhotos, 2);
+  assert.equal(r.next, null);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
+});
+
+// =====================================================================
+// Data deletion — permanent removal on request
+// =====================================================================
+
+test("purge permanently deletes a post's photos, captions and payloads and never re-imports them", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Projects/Ganz Re-Deck/1.jpg", "manual");
+  await putReview("r_keep_9", "approved", { bucket: "private" });
+  const post = stubPost(`${PAGE_ID}_800`, ["8501", "8502"], { message: "Customer's porch at 12 Elm" });
+  stubPost(`${PAGE_ID}_801`, ["8503"], { message: "Other job" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id, { message: "Customer's porch at 12 Elm" })]));
+  await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_801`)]));
+
+  assert.equal((await call(`${BASE}/admin/purge`, { method: "POST", body: { postId: post.id } , admin: true })).status, 400, "needs confirmation");
+  assert.equal((await call(`${BASE}/admin/purge`, { method: "POST", body: { postId: post.id, confirm: "PERMANENTLY DELETE" } })).status, 401);
+  const r = await adminPost("purge", { postId: post.id, confirm: "PERMANENTLY DELETE" });
+  assert.equal(r.purged, 2);
+  assert.equal(r.remainingFacebookPhotos, 1);
+
+  // Only the purged photos are gone; manual galleries, reviews and other posts are untouched.
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Facebook/8503.jpg", "Projects/Ganz Re-Deck/1.jpg", "Reviews/data/r_keep_9.json"]);
+  assert.ok((await keys(baseEnv.PRIVATE_BUCKET)).includes("Facebook/8503.jpg"));
+  assert.ok(!(await keys(baseEnv.PRIVATE_BUCKET)).some((k) => /850[12]/.test(k)));
+  assert.ok((await keys(baseEnv.PRIVATE_BUCKET)).includes("Reviews/photos/r_keep_9/photo.jpg"));
+
+  const purged = await rows("SELECT * FROM facebook_photos WHERE fb_post_id = ?", post.id);
+  assert.ok(purged.every((p) => p.caption === null && p.master_key === null && p.public_key === null && p.permalink === null && p.hidden === 1));
+  assert.equal((await rows("SELECT message FROM facebook_posts WHERE fb_post_id = ?", post.id))[0].message, null);
+  assert.ok((await rows("SELECT payload FROM facebook_webhook_events WHERE post_id = ?", post.id)).every((e) => e.payload === "{}"));
+  const allText = JSON.stringify(await rows("SELECT * FROM facebook_webhook_events")) + JSON.stringify(await rows("SELECT * FROM facebook_photos"));
+  assert.ok(!allText.includes("12 Elm"), "no copy of the deleted caption remains");
+
+  // Redelivery, edits, backfill, restore and retry never bring it back.
+  await postWebhook(autoEnv(), feedPayload([{ ...postAdd(post.id), verb: "edited", message: "again" }]));
+  await postWebhook(autoEnv(), feedPayload([photoAdd("8501", { post_id: post.id })]));
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post], paging: {} });
+  await getJson(`${BASE}/backfill`, { method: "POST", body: { dryRun: false, after: "X" }, admin: true });
+  await adminPost("photo-update", { photoIds: ["8501"], hidden: false });
+  await adminPost("retry", {});
+  assert.ok(!(await keys(baseEnv.GALLERY_BUCKET)).some((k) => /850[12]/.test(k)));
+  assert.ok(!(await keys(baseEnv.PRIVATE_BUCKET)).some((k) => /850[12]/.test(k)));
+  assert.equal((await rows("SELECT caption FROM facebook_photos WHERE fb_photo_id='8501'"))[0].caption, null);
+  assert.equal((await rows("SELECT message FROM facebook_posts WHERE fb_post_id = ?", post.id))[0].message, null);
+
+  const ov = await getJson(`${BASE}/admin/overview`, { admin: true });
+  assert.equal(ov.sync.photos.deleted, 2);
+  assert.equal(ov.sync.photos.imported, 1);
+  const hidden = await getJson(`${BASE}/admin/photos?hidden=1`, { admin: true });
+  assert.ok(hidden.photos.every((p) => p.deleted && p.previewUrl === null));
+});
+
+test("purge all removes every Facebook photo in batches and nothing else", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Remodels/Kitchen/1.jpg", "manual");
+  stubPost(`${PAGE_ID}_810`, ["8601", "8602", "8603"], { message: "x" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_810`)]));
+  // a master stranded by an interrupted import is removed too
+  await baseEnv.PRIVATE_BUCKET.put("Facebook/8604.png", "orphan");
+  await baseEnv.DB.prepare(`INSERT INTO facebook_photos (fb_photo_id, page_id, source, status) VALUES ('8604', ?, 'webhook', 'failed')`).bind(PAGE_ID).run();
+
+  const r = await adminPost("purge", { all: true, confirm: "PERMANENTLY DELETE" });
+  assert.equal(r.purged, 4);
+  assert.equal(r.remainingFacebookPhotos, 0);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Remodels/Kitchen/1.jpg"]);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+  assert.equal((await adminPost("purge", { all: true, confirm: "PERMANENTLY DELETE" })).purged, 0, "idempotent");
+  assert.equal((await getJson("/api/gallery-api?list=projects")).projects.filter((p) => p.source === "facebook").length, 0);
+});
+
+// =====================================================================
+// Removals on Facebook — confirm, hide, retain, then delete
+// =====================================================================
+
+const GONE = { status: 400, body: { error: { code: 100, error_subcode: 33, message: "Unsupported get request. Object does not exist" } } };
+const removePost = (postId) => ({ item: "status", verb: "remove", post_id: postId, from: { id: PAGE_ID } });
+
+test("a post confirmed deleted on Facebook is hidden at once, kept privately, and scheduled for deletion", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Projects/Ganz Re-Deck/1.jpg", "manual");
+  const post = stubPost(`${PAGE_ID}_900`, ["9001", "9002"], { message: "Barn", album: { id: "77", name: "Smith Barn" } });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  assert.equal((await getJson("/api/gallery-api?project=smith-barn")).items.length, 2);
+
+  graphFixtures.set(post.id, GONE);
+  const res = await postWebhook(autoEnv(), feedPayload([removePost(post.id)]));
+  assert.equal(res.status, 200);
+
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Projects/Ganz Re-Deck/1.jpg"], "public copies gone, manual photo kept");
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), ["Facebook/9001.jpg", "Facebook/9002.jpg"], "masters kept for recovery");
+  assert.equal((await call("/api/gallery-api?project=smith-barn")).status, 404, "empty project leaves the site");
+  const photos = await rows("SELECT * FROM facebook_photos ORDER BY fb_photo_id");
+  for (const p of photos) {
+    assert.equal(p.hidden, 1);
+    assert.equal(p.hidden_reason, "removed_on_facebook");
+    const days = (new Date(p.purge_after) - Date.now()) / 86400000;
+    assert.ok(days > 29.9 && days <= 30, `deletion scheduled in 30 days (got ${days})`);
+  }
+  assert.ok((await rows("SELECT removed_on_facebook_at FROM facebook_posts"))[0].removed_on_facebook_at);
+  assert.equal((await rows("SELECT status FROM facebook_webhook_events ORDER BY id DESC"))[0].status, "done");
+});
+
+test("a single photo removed from a multi-photo post hides only that photo", async () => {
+  const post = stubPost(`${PAGE_ID}_901`, ["9011", "9012"], { message: "x" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  graphFixtures.set("9012", GONE);
+  await postWebhook(autoEnv(), feedPayload([photoAdd("9012", { verb: "remove", post_id: post.id })]));
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Facebook/9011.jpg"]);
+});
+
+test("unpublished or hidden posts count as removed", async () => {
+  const post = stubPost(`${PAGE_ID}_902`, ["9021"], { message: "x" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  graphFixtures.set(post.id, { ...post, is_published: false });
+  await postWebhook(autoEnv(), feedPayload([{ ...removePost(post.id), verb: "hide" }]));
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+});
+
+test("transient or ambiguous Graph errors never hide anything; the event retries then fails", async () => {
+  const post = stubPost(`${PAGE_ID}_903`, ["9031"], { message: "x" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  for (const fx of [
+    { status: 500, body: { error: { code: 2, message: "Service temporarily unavailable" } } },
+    { status: 400, body: { error: { code: 100, message: "Tried accessing nonexisting field (is_hidden)" } } },
+    { status: 400, body: { error: { code: 190, message: "Invalid OAuth access token" } } },
+    { status: 429, body: { error: { code: 4, message: "Application request limit reached" } } },
+  ]) {
+    graphFixtures.set(post.id, fx);
+    await baseEnv.DB.prepare("DELETE FROM facebook_webhook_events WHERE verb = 'remove'").run();
+    await postWebhook(autoEnv(), feedPayload([removePost(post.id)]));
+    for (let i = 0; i < 6; i++) await processPendingEvents(autoEnv());
+    assert.ok(await baseEnv.GALLERY_BUCKET.head("Facebook/9031.jpg"), JSON.stringify(fx.body));
+    const [ev] = await rows("SELECT status, attempts FROM facebook_webhook_events WHERE verb = 'remove'");
+    assert.equal(ev.status, "failed");
+    assert.equal(ev.attempts, 5);
+  }
+  assert.equal((await rows("SELECT hidden FROM facebook_photos"))[0].hidden, 0);
+});
+
+test("comment, reaction, and visitor removals never hide Page photos and make no Graph calls", async () => {
+  const post = stubPost(`${PAGE_ID}_904`, ["9041"], { message: "x" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  graphFixtures.set(post.id, GONE);
+  const before = graphCalls().length;
+  await postWebhook(autoEnv(), feedPayload([
+    { item: "comment", verb: "remove", post_id: post.id, comment_id: "1_2", from: { id: PAGE_ID } },
+    { item: "reaction", verb: "remove", post_id: post.id, from: { id: PAGE_ID } },
+    { item: "status", verb: "remove", post_id: post.id, from: { id: "999999" } },
+  ]));
+  assert.equal(graphCalls().length, before);
+  assert.ok(await baseEnv.GALLERY_BUCKET.head("Facebook/9041.jpg"));
+});
+
+test("retention: removed photos are permanently deleted when due, even with imports paused", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Furniture/Table/1.jpg", "manual");
+  const post = stubPost(`${PAGE_ID}_905`, ["9051", "9052"], { message: "Owner's address" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  graphFixtures.set(post.id, GONE);
+  await postWebhook(autoEnv(), feedPayload([removePost(post.id)]));
+
+  // Not yet due: nothing deleted.
+  await handleFacebookScheduled(makeEnv());
+  assert.equal((await keys(baseEnv.PRIVATE_BUCKET)).length, 2);
+
+  await baseEnv.DB.prepare(`UPDATE facebook_photos SET purge_after = '2000-01-01T00:00:00.000Z' WHERE fb_photo_id = '9051'`).run();
+  assert.equal(await handleFacebookScheduled(makeEnv({ FB_AUTO_IMPORT: "false" })), null);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), ["Facebook/9052.jpg"], "only the due photo is deleted");
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Furniture/Table/1.jpg"]);
+  const [t] = await rows("SELECT * FROM facebook_photos WHERE fb_photo_id = '9051'");
+  assert.equal(t.master_key, null);
+  assert.equal(t.caption, null);
+  assert.equal(t.purge_after, null);
+  assert.equal(t.hidden_reason, "deleted");
+
+  // Worker cron entry point runs it too (FB enabled, imports off).
+  await baseEnv.DB.prepare(`UPDATE facebook_photos SET purge_after = '2000-01-01T00:00:00.000Z' WHERE fb_photo_id = '9052'`).run();
+  const cron = [];
+  await worker.scheduled({}, makeEnv({ FB_AUTO_IMPORT: "false" }), { waitUntil: (p) => cron.push(p) });
+  await Promise.all(cron);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+  assert.equal(fetchCalls.filter((c) => c.url.hostname === "graph.facebook.com" && c.url.pathname.includes("_905")).length, 2, "no Graph calls from the purge");
+});
+
+test("admin Restore cannot keep content removed on Facebook; the post coming back does", async () => {
+  const a = stubPost(`${PAGE_ID}_906`, ["9061"], { message: "a" });
+  const b = stubPost(`${PAGE_ID}_907`, ["9071"], { message: "b" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(a.id), postAdd(b.id)]));
+  await adminPost("photo-update", { photoIds: ["9071"], hidden: true }); // admin decision on b
+  graphFixtures.set(a.id, GONE);
+  graphFixtures.set(b.id, GONE);
+  await postWebhook(autoEnv(), feedPayload([removePost(a.id), removePost(b.id)]));
+  const r1 = Object.fromEntries((await rows("SELECT fb_photo_id, hidden_reason, purge_after FROM facebook_photos")).map((r) => [r.fb_photo_id, r]));
+  assert.equal(r1["9061"].hidden_reason, "removed_on_facebook");
+  assert.equal(r1["9071"].hidden_reason, "admin", "an earlier admin hide is kept");
+  assert.ok(r1["9061"].purge_after && r1["9071"].purge_after, "both scheduled for deletion");
+
+  // Restore is refused while the post is gone from Facebook; the deadline stands.
+  const res = await adminPost("photo-update", { photoIds: ["9061"], hidden: false });
+  assert.deepEqual([res.updated, res.skipped], [0, 1]);
+  const [still] = await rows("SELECT hidden, purge_after FROM facebook_photos WHERE fb_photo_id='9061'");
+  assert.equal(still.hidden, 1);
+  assert.equal(still.purge_after, r1["9061"].purge_after);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+
+  // a comes back on Facebook (e.g. restored from Facebook's trash): shown again, nothing scheduled.
+  graphFixtures.set(a.id, a);
+  await postWebhook(autoEnv(), feedPayload([{ ...postAdd(a.id), verb: "edited" }]));
+  // b comes back too, but stays hidden because an admin hid it.
+  graphFixtures.set(b.id, b);
+  await postWebhook(autoEnv(), feedPayload([{ ...postAdd(b.id), verb: "edited" }]));
+  const after = Object.fromEntries((await rows("SELECT fb_photo_id, hidden, purge_after FROM facebook_photos")).map((r) => [r.fb_photo_id, r]));
+  assert.deepEqual(after["9061"], { fb_photo_id: "9061", hidden: 0, purge_after: null });
+  assert.deepEqual(after["9071"], { fb_photo_id: "9071", hidden: 1, purge_after: null });
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Facebook/9061.jpg"]);
+  // Once it is back, a normal admin hide/restore works again.
+  await adminPost("photo-update", { photoIds: ["9071"], hidden: false });
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Facebook/9061.jpg", "Facebook/9071.jpg"]);
+  const ov = await getJson(`${BASE}/admin/overview`, { admin: true });
+  assert.equal(ov.sync.removedRetentionDays, 30);
+});
+
+test("FB_REMOVED_RETENTION_DAYS is honored and clamped", async () => {
+  const post = stubPost(`${PAGE_ID}_908`, ["9081"], { message: "x" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  graphFixtures.set(post.id, GONE);
+  await postWebhook(makeEnv({ FB_AUTO_IMPORT: "true", FB_REMOVED_RETENTION_DAYS: "7" }), feedPayload([removePost(post.id)]));
+  const [p] = await rows("SELECT purge_after FROM facebook_photos");
+  const days = (new Date(p.purge_after) - Date.now()) / 86400000;
+  assert.ok(days > 6.9 && days <= 7);
+  const { removedRetentionDays } = await import("../src/facebook.js");
+  assert.equal(removedRetentionDays({}), 30);
+  assert.equal(removedRetentionDays({ FB_REMOVED_RETENTION_DAYS: "0" }), 30);
+  assert.equal(removedRetentionDays({ FB_REMOVED_RETENTION_DAYS: "9999" }), 30);
+  assert.equal(removedRetentionDays({ FB_REMOVED_RETENTION_DAYS: "45" }), 30, "never more than the policy's 30 days");
+  assert.equal(removedRetentionDays({ FB_REMOVED_RETENTION_DAYS: "14" }), 14);
+  assert.equal(removedRetentionDays({ FB_REMOVED_RETENTION_DAYS: "abc" }), 30);
+});
+
+// =====================================================================
+// Retention clock, scheduling, and inbox minimisation
+// =====================================================================
+
+const DAY = 86400000;
+
+async function importAndRemove(postId, photoIds, env = autoEnv()) {
+  const post = stubPost(postId, photoIds, { message: `Caption for ${postId}` });
+  await postWebhook(autoEnv(), feedPayload([postAdd(postId)]));
+  graphFixtures.set(postId, GONE);
+  await postWebhook(env, feedPayload([removePost(postId)]));
+  return post;
+}
+
+test("30-day clock: hidden at once, privately recoverable until day 30, then permanently deleted", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Projects/Ganz Re-Deck/1.jpg", "manual");
+  await putReview("r_keep_c", "approved", { bucket: "private" });
+  const t0 = Date.now();
+  await importAndRemove(`${PAGE_ID}_950`, ["9501", "9502"]);
+  const reviewKeys = (await keys(baseEnv.PRIVATE_BUCKET)).filter((k) => k.startsWith("Reviews/"));
+
+  // Day 0..29: public copy gone, private masters still there, nothing else touched.
+  for (const days of [0, 1, 29]) {
+    assert.equal(await purgeExpiredRemovals(baseEnv, { now: new Date(t0 + days * DAY) }), 0, `day ${days}`);
+    assert.deepEqual((await keys(baseEnv.PRIVATE_BUCKET)).filter((k) => k.startsWith("Facebook/")), ["Facebook/9501.jpg", "Facebook/9502.jpg"]);
+  }
+  assert.ok(!(await keys(baseEnv.GALLERY_BUCKET)).some((k) => k.startsWith("Facebook/")));
+
+  // Day 30 (+1 minute): permanently deleted, captions and post text cleared.
+  assert.equal(await purgeExpiredRemovals(baseEnv, { now: new Date(t0 + 30 * DAY + 60000) }), 2);
+  assert.ok(!(await keys(baseEnv.PRIVATE_BUCKET)).some((k) => k.startsWith("Facebook/")));
+  const photos = await rows("SELECT * FROM facebook_photos");
+  assert.ok(photos.every((p) => p.master_key === null && p.caption === null && p.permalink === null && p.purge_after === null));
+  assert.equal((await rows("SELECT message FROM facebook_posts"))[0].message, null);
+  assert.ok(!JSON.stringify(await rows("SELECT * FROM facebook_webhook_events")).includes("Caption for"));
+  // Unrelated content untouched.
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Projects/Ganz Re-Deck/1.jpg", "Reviews/data/r_keep_c.json"]);
+  assert.deepEqual((await keys(baseEnv.PRIVATE_BUCKET)).filter((k) => k.startsWith("Reviews/")), reviewKeys);
+});
+
+test("an explicit deletion request bypasses the recovery period", async () => {
+  await importAndRemove(`${PAGE_ID}_951`, ["9511"]);
+  assert.ok((await rows("SELECT purge_after FROM facebook_photos"))[0].purge_after, "scheduled in 30 days");
+  const r = await adminPost("purge", { photoIds: ["9511"], confirm: "PERMANENTLY DELETE" });
+  assert.equal(r.purged, 1);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), [], "deleted now, not in 30 days");
+});
+
+test("deleted photos are never resurrected when the post comes back or is re-delivered", async () => {
+  const post = await importAndRemove(`${PAGE_ID}_952`, ["9521"]);
+  await purgeExpiredRemovals(baseEnv, { now: new Date(Date.now() + 31 * DAY) });
+  graphFixtures.set(post.id, post); // back on Facebook
+  await postWebhook(autoEnv(), feedPayload([{ ...postAdd(post.id), verb: "edited", message: "back" }]));
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)])); // duplicate delivery
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post], paging: {} });
+  await getJson(`${BASE}/backfill`, { method: "POST", body: { dryRun: false, after: "Y" }, admin: true });
+  await adminPost("photo-update", { photoIds: ["9521"], hidden: false });
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+  const [p] = await rows("SELECT hidden, caption, master_key FROM facebook_photos");
+  assert.deepEqual(p, { hidden: 1, caption: null, master_key: null });
+});
+
+test("removals are processed while FB_AUTO_IMPORT is off; imports stay paused", async () => {
+  const kept = stubPost(`${PAGE_ID}_953`, ["9531"], { message: "x" });
+  const other = stubPost(`${PAGE_ID}_955`, ["9551"], { message: "y" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(kept.id), postAdd(other.id)])); // imported earlier (e.g. backfill)
+  graphFixtures.set(kept.id, GONE);
+  stubPost(`${PAGE_ID}_954`, ["9541"], { message: "new" });
+  const paused = makeEnv({ FB_AUTO_IMPORT: "false" });
+
+  // Webhook path: the removal is handled right away, the new post waits.
+  await postWebhook(paused, feedPayload([removePost(kept.id), postAdd(`${PAGE_ID}_954`)]));
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), ["Facebook/9551.jpg"], "removed post hidden; other post untouched");
+  assert.ok(await baseEnv.PRIVATE_BUCKET.head("Facebook/9531.jpg"), "recoverable copy kept");
+  const ev = Object.fromEntries((await rows("SELECT post_id, verb, status FROM facebook_webhook_events WHERE post_id IN (?, ?)", kept.id, `${PAGE_ID}_954`)).map((r) => [`${r.post_id}:${r.verb}`, r.status]));
+  assert.equal(ev[`${kept.id}:remove`], "done");
+  assert.equal(ev[`${PAGE_ID}_954:add`], "pending");
+  assert.ok(!(await baseEnv.PRIVATE_BUCKET.head("Facebook/9541.jpg")), "not imported while paused");
+
+  // Cron path: a removal that failed transiently is retried while paused.
+  graphFixtures.set(other.id, { status: 500, body: { error: { code: 2, message: "temporary" } } });
+  await postWebhook(paused, feedPayload([removePost(other.id)]));
+  assert.ok(await baseEnv.GALLERY_BUCKET.head("Facebook/9551.jpg"), "transient error hides nothing");
+  graphFixtures.set(other.id, GONE);
+  assert.equal(await handleFacebookScheduled(paused), null);
+  assert.ok(!(await baseEnv.GALLERY_BUCKET.head("Facebook/9551.jpg")), "cron retry confirmed and hid it");
+  assert.ok(!(await baseEnv.PRIVATE_BUCKET.head("Facebook/9541.jpg")), "imports still paused");
+});
+
+test("the kill switch stops Facebook traffic but due retention deletes still run", async () => {
+  await importAndRemove(`${PAGE_ID}_956`, ["9561"]);
+  await baseEnv.DB.prepare(`UPDATE facebook_photos SET purge_after = '2000-01-01T00:00:00.000Z'`).run();
+  const before = fetchCalls.length;
+  const cron = [];
+  await worker.scheduled({}, makeEnv({ FB_INTEGRATION_ENABLED: "false" }), { waitUntil: (p) => cron.push(p) });
+  await Promise.all(cron);
+  assert.equal(fetchCalls.length, before, "no Facebook calls");
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+  // And with no tables at all (security-only deploy), retention fails soft.
+  assert.equal(await runRetention({ ...makeEnv(), DB: { prepare() { throw new Error("no such table"); } } }), 0);
+});
+
+test("retention purge is batched, idempotent across overlapping runs, and isolates failures", async () => {
+  const ids = Array.from({ length: 60 }, (_, i) => String(9600 + i));
+  for (const id of ids) {
+    await baseEnv.PRIVATE_BUCKET.put(`Facebook/${id}.jpg`, "m");
+    await baseEnv.DB
+      .prepare(
+        `INSERT INTO facebook_photos (fb_photo_id, page_id, source, status, master_key, hidden, hidden_reason, purge_after, caption)
+         VALUES (?, ?, 'webhook', 'imported', ?, 1, 'removed_on_facebook', '2000-01-01T00:00:00.000Z', 'c')`
+      )
+      .bind(id, PAGE_ID, `Facebook/${id}.jpg`)
+      .run();
+  }
+  // Two overlapping cron runs: together they delete 50 (one batch), safely.
+  const [a, b] = await Promise.all([purgeExpiredRemovals(baseEnv), purgeExpiredRemovals(baseEnv)]);
+  assert.ok(a <= 50 && b <= 50);
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE master_key IS NOT NULL")).length, 10);
+
+  // One photo fails to delete: the others still go, and it is retried next run.
+  const realDelete = baseEnv.PRIVATE_BUCKET.delete.bind(baseEnv.PRIVATE_BUCKET);
+  const flaky = { ...baseEnv, PRIVATE_BUCKET: new Proxy(baseEnv.PRIVATE_BUCKET, {
+    get(t, k) {
+      if (k === "delete") return async (key) => { if (key.startsWith("Facebook/9659")) throw new Error("R2 503"); return realDelete(key); };
+      const v = t[k]; return typeof v === "function" ? v.bind(t) : v;
+    },
+  }) };
+  assert.equal(await purgeExpiredRemovals(flaky), 9);
+  assert.deepEqual((await rows("SELECT fb_photo_id FROM facebook_photos WHERE master_key IS NOT NULL")).map((r) => r.fb_photo_id), ["9659"]);
+  assert.equal(await purgeExpiredRemovals(baseEnv), 1);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+});
+
+test("the inbox stores no visitor content and no message text, and drops old processed rows", async () => {
+  stubPost(`${PAGE_ID}_957`, ["9571"], { message: "x" });
+  await postWebhook(makeEnv(), feedPayload([
+    { item: "comment", verb: "add", post_id: `${PAGE_ID}_957`, comment_id: "c1", message: "Call me at 555-0100", from: { id: "42", name: "Pat Visitor" } },
+    { item: "status", verb: "add", post_id: "42_1", message: "Visitor post", from: { id: "42", name: "Pat Visitor" } },
+    { item: "reaction", verb: "add", post_id: `${PAGE_ID}_957`, from: { id: "42", name: "Pat Visitor" } },
+    { ...postAdd(`${PAGE_ID}_957`), message: "Our own caption", from: { id: PAGE_ID, name: "KIL Construction" }, link: "https://x" },
+  ]));
+  const evs = await rows("SELECT item, payload FROM facebook_webhook_events");
+  assert.deepEqual(evs.map((e) => e.item), ["status"], "only the Page's own post is stored");
+  const stored = JSON.parse(evs[0].payload);
+  assert.deepEqual(Object.keys(stored).sort(), ["from", "item", "post_id", "published", "verb"]);
+  assert.deepEqual(stored.from, { id: PAGE_ID });
+  assert.ok(!JSON.stringify(evs).match(/Pat|555|Visitor|Our own caption|https:/));
+
+  // Two different edits of the same post are both kept (dedupe uses the full change).
+  await postWebhook(makeEnv(), feedPayload([{ ...postAdd(`${PAGE_ID}_957`), verb: "edited", message: "one" }]));
+  await postWebhook(makeEnv(), feedPayload([{ ...postAdd(`${PAGE_ID}_957`), verb: "edited", message: "two" }]));
+  assert.equal((await rows("SELECT * FROM facebook_webhook_events WHERE verb = 'edited'")).length, 2);
+
+  // Processed rows older than 30 days are pruned; pending/failed rows are kept.
+  await baseEnv.DB.prepare(`UPDATE facebook_webhook_events SET status = 'done', updated_at = '2000-01-01T00:00:00.000Z' WHERE verb = 'edited'`).run();
+  await runRetention(baseEnv);
+  assert.equal((await rows("SELECT * FROM facebook_webhook_events WHERE verb = 'edited'")).length, 0);
+  assert.equal((await rows("SELECT * FROM facebook_webhook_events WHERE verb = 'add'")).length, 1);
 });

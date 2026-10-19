@@ -40,3 +40,7 @@ pnpm-debug.log*
 /wrangler.contact.toml
 
 nul
+
+# one-off secret handoff file (docs/facebook-webhook.md §6)
+fbvt.tmp
+migration-014-baseline.json
