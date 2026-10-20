@@ -1,6 +1,6 @@
 # Facebook gallery automation: launch and resume checklist
 
-Last updated 2026-10-19 (contractor confirmations recorded; predeployment checks re-run). Pick up at the first ⬜ in **Deployment sequence**.
+Last updated 2026-10-20 (automatic imports enabled). Steps 1–13 are done or skipped by decision. **Only step 14 remains**: the contractor's next real post is the end-to-end test.
 
 The full runbook is [`facebook-webhook.md`](facebook-webhook.md). The security release is in [`security-deployment-plan.md`](security-deployment-plan.md).
 
@@ -29,11 +29,25 @@ No credentials appear here. Never paste tokens or secrets into chat, docs, or Gi
 
 ## Current production state
 
-- **Live Worker:** `ed738015` (security-release code). Facebook is off (`FB_INTEGRATION_ENABLED="false"`, empty Page ID), so nothing imports.
-- **Website:** the old `/privacy` and `/terms` are live. `/data-deletion` and `/admin/facebook` return 404.
+- **Live Worker:** `e65673d3` (2026-10-20). `FB_AUTO_IMPORT="true"`, otherwise identical to `859e5f9d`.
+  - Owner-reported (from the Meta dashboard and the admin page): the app is Live, the callback is verified, `feed` is subscribed, Page token Working, Subscription Subscribed.
+  - Before the switch: 0 webhook events, 0 Facebook photos, posts and projects, and an empty sync state.
+  - To pause imports: set `FB_AUTO_IMPORT="false"` and deploy, or `npx wrangler rollback 859e5f9d-6c17-4539-8078-ac24cf8f51d1`.
+  - The next real Page post is the end-to-end test (step 14).
+- **Previous Worker:** `14199cc2` (deployed 2026-10-19 from `7f37546`). The two secret changes on 2026-10-20 produced `3182cb4e` and then `859e5f9d`.
+  - Integration on, `FB_AUTO_IMPORT="false"`, cron `17 * * * *`.
+  - Webhook checks: wrong verify token → 403; unsigned or badly signed POST → 401.
+  - Facebook admin, backfill and purge without login → 401.
+  - Privacy script: 37 passed, 0 failed, 2 skipped.
+  - Facebook tables are still 0 rows; other counts are unchanged.
+  - To roll back: `npx wrangler rollback ed738015-5415-4554-a507-e7ad97ffbcad`.
+- **Website:** `7f37546` is live (Pages `6a5db3ad`, 2026-10-19).
+  - The new `/privacy`, `/terms` and `/data-deletion` match the approved source text. Cloudflare Email Obfuscation rewrites the mailto links, and they decode to the right address.
+  - `/admin/facebook` redirects to `/admin` without a valid session.
+  - The privacy script passed 37, failed 0 and skipped 2. All 190 gallery and apparel images and their thumbnails return 200, along with all project and apparel pages.
 - **D1:** 013 and 014 applied; nothing pending.
-- **Meta:** the app is unpublished, no webhook is configured, and the Page is not subscribed.
-- **Git:** `662dedd`. Everything since is uncommitted (list at the end).
+- **Meta (owner-reported 2026-10-20):** the app is Live, the webhook callback is verified, the `feed` field is subscribed, and the Page is subscribed.
+- **Git:** `origin/main` has the release (`7f37546`) and the auto-import config commit that follows it. The working tree is clean.
 
 Re-verified read-only on 2026-10-19:
 - Wrangler is on the **Kil.con.contact** account (`8481dbc4…`).
@@ -70,20 +84,20 @@ The code was checked: there are no trackers, analytics, ad pixels or marketing-l
 | # | Step | Verify |
 |---|---|---|
 | 1 | ✅ **Approve the legal pages**: the owner approved them 2026-10-18, and the contractor confirmed the business practices 2026-10-19 | |
-| 2 | ⬜ **Prepare Meta App Settings → Basic**: icon (no Meta logos, no "Facebook" or "FB"), category, contact email, App Domain `kilcon.work`. **Enter the three URLs only after step 5**, because Meta may fetch them. | Fields filled; nothing published |
+| 2 | ✅ (owner saved all fields, including the three URLs, 2026-10-19) **Prepare Meta App Settings → Basic**: icon (no Meta logos, no "Facebook" or "FB"), category, contact email, App Domain `kilcon.work`. **Enter the three URLs only after step 5**, because Meta may fetch them. | Fields filled; nothing published |
 | 3 | ✅ **Applied D1 migration 014** on 2026-10-19 00:58 UTC (`d1_migrations` id 8). Preflight 7/7, verify 6/6. | Done: 25 columns, index present, all row counts unchanged |
-| 4 | ⬜ **Commit** to `main` (one release commit; see the plan below) | `git status` clean of these files |
-| 5 | ⬜ **Deploy the website**: push to `main`. Cloudflare Pages deploys it automatically (confirmed: no CI, and the Worker is unaffected). This ships the legal pages, the footer link and `/admin/facebook`. Until step 6, `/admin/facebook` loads but its API calls 404. | `/privacy`, `/terms`, `/data-deletion` return 200; footer links; then enter the URLs in Meta (step 2) |
-| 6 | ⬜ **Deploy the webhook-enabled Worker**: `npx wrangler deploy` from `workers/kilcon-gallery-worker`, with `FB_AUTO_IMPORT="false"` | Dry run first shows both IDs, `FB_INTEGRATION_ENABLED "true"`, `FB_AUTO_IMPORT "false"`, `FB_REMOVED_RETENTION_DAYS "30"`. The deploy output must list the `17 * * * *` schedule: **the live Worker has no cron today** (the security release shipped with it commented out). |
-| 7 | ⬜ **Verify security and site** | Privacy script passes (webhook wrong token → 403, unsigned POST → 401). All 220 gallery images 200. Reviews, apparel and contact OK. `/admin/facebook` → Check connection: "Working", KIL Construction |
-| 8 | ⬜ **Configure and verify the Meta Page webhook**: Webhooks → Page → callback URL + verify token → Verify and save | Meta shows verified |
-| 9 | ⬜ **Subscribe to `feed`**: turn on the field, then `/admin/facebook` → Subscribe Page to feed | Check connection: "Subscribed" |
-| 9a | ⬜ **Publish the Meta app** (Publish → Go live; complete any Data Use Checkup). Standard Access only. **Needed for step 10:** Development mode delivers only dashboard test events. | App shows Live |
-| 10 | ⬜ **Confirm real webhook delivery**: publish a real Page post | "Last event received" updates; the event waits as `pending` because imports are off |
-| 11 | ⬜ **Historical import dry run**: `/admin/facebook` → Preview | Review posts, date range, photos, duplicates, proposed galleries, Recent fallback, errors |
-| 12 | ⬜ **Approve and run the historical import** (Import history; resumable) | Counts match the preview; spot-check galleries |
-| 13 | ⬜ **Enable automatic imports**: `FB_AUTO_IMPORT="true"`, deploy | Pending events (including the step 10 post) are processed |
-| 14 | ⬜ **Verify a real post appears on kilcon.work** without a rebuild. Then optionally delete or unpublish a test post and check it leaves the site and shows "Removed on Facebook — deletes …" in the admin. | **Only now is the integration operational.** |
+| 4 | ✅ **Committed** `7f37546` to `main` (2026-10-19) (one release commit; see the plan below) | `git status` clean of these files |
+| 5 | ✅ (2026-10-19, Pages deployment `6a5db3ad`) **Deploy the website**: push to `main`. Cloudflare Pages deploys it automatically (confirmed: no CI, and the Worker is unaffected). This ships the legal pages, the footer link and `/admin/facebook`. Until step 6, `/admin/facebook` loads but its API calls 404. | `/privacy`, `/terms`, `/data-deletion` return 200; footer links; then enter the URLs in Meta (step 2) |
+| 6 | ✅ (2026-10-19, version `14199cc2`; rollback target `ed738015`) **Deploy the webhook-enabled Worker**: `npx wrangler deploy` from `workers/kilcon-gallery-worker`, with `FB_AUTO_IMPORT="false"` | Dry run first shows both IDs, `FB_INTEGRATION_ENABLED "true"`, `FB_AUTO_IMPORT "false"`, `FB_REMOVED_RETENTION_DAYS "30"`. The deploy output must list the `17 * * * *` schedule: **the live Worker has no cron today** (the security release shipped with it commented out). |
+| 7 | ✅ (automated checks 2026-10-19; owner confirmed Check connection Working on 2026-10-20) **Verify security and site** | Privacy script passes (webhook wrong token → 403, unsigned POST → 401). All 220 gallery images 200. Reviews, apparel and contact OK. `/admin/facebook` → Check connection: "Working", KIL Construction |
+| 8 | ✅ (owner, 2026-10-20) **Configure and verify the Meta Page webhook**: Webhooks → Page → callback URL + verify token → Verify and save | Meta shows verified |
+| 9 | ✅ (owner, 2026-10-20; Check connection: Subscribed) **Subscribe to `feed`**: turn on the field, then `/admin/facebook` → Subscribe Page to feed | Check connection: "Subscribed" |
+| 9a | ✅ (owner, 2026-10-20) **Publish the Meta app** (Publish → Go live; complete any Data Use Checkup). Standard Access only. **Needed for step 10:** Development mode delivers only dashboard test events. | App shows Live |
+| 10 | ⏭ (skipped: no post since activation. Step 14 now covers delivery and import together.) **Confirm real webhook delivery**: publish a real Page post | "Last event received" updates; the event waits as `pending` because imports are off |
+| 11 | ⏭ (skipped by owner decision; can still be run later) **Historical import dry run**: `/admin/facebook` → Preview | Review posts, date range, photos, duplicates, proposed galleries, Recent fallback, errors |
+| 12 | ⏭ (skipped by owner decision) **Approve and run the historical import** (Import history; resumable) | Counts match the preview; spot-check galleries |
+| 13 | ✅ (2026-10-20, Worker `e65673d3`; owner chose to skip steps 11–12, so older posts aren't imported) **Enable automatic imports**: `FB_AUTO_IMPORT="true"`, deploy | Pending events (including the step 10 post) are processed |
+| 14 | ⬜ **Verify a real post appears on kilcon.work** without a rebuild. If it doesn't, check "Last event received" in `/admin/facebook`: no event means delivery failed; an event with an error means the import failed. Then optionally delete or unpublish a test post and check it leaves the site and shows "Removed on Facebook — deletes …" in the admin. | **Only now is the integration operational.** |
 
 Dependencies that differ from a plain list:
 - **3 before 6:** the new Worker reads the 014 columns.

@@ -80,12 +80,12 @@ test("no review placeholders or owner notes leak into visible legal text", async
   }
 });
 
-test("Worker is configured with the confirmed Meta App ID and Page ID, imports off", async () => {
+test("Worker is configured with the confirmed Meta App ID and Page ID, automatic imports on (owner-approved 2026-10-19)", async () => {
   const toml = await workerToml();
   assert.equal(tomlVar(toml, "FB_APP_ID"), "1427044999395408");
   assert.equal(tomlVar(toml, "FB_PAGE_ID"), "305397115992497");
   assert.equal(tomlVar(toml, "FB_INTEGRATION_ENABLED"), "true");
-  assert.equal(tomlVar(toml, "FB_AUTO_IMPORT"), "false");
+  assert.equal(tomlVar(toml, "FB_AUTO_IMPORT"), "true");
   for (const secret of ["FB_APP_SECRET", "FB_VERIFY_TOKEN", "FB_PAGE_ACCESS_TOKEN"]) {
     assert.ok(!new RegExp(`^${secret}\\s*=`, "m").test(toml), `${secret} is not a plaintext var`);
   }

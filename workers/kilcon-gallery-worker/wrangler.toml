@@ -20,7 +20,7 @@ SESSION_VERSION = "3"
 FB_PAGE_ID       = "305397115992497" # numeric Page ID; events for other Pages are ignored
 FB_APP_ID        = "1427044999395408" # Meta App ID (public, not a secret); used by the admin health check
 FB_GRAPH_VERSION = "v26.0"
-FB_AUTO_IMPORT   = "false"   # "true" lets webhook events import + publish photos
+FB_AUTO_IMPORT   = "true"    # owner-approved 2026-10-19; "false" pauses imports (events still recorded)
 # Days a photo confirmed deleted/unpublished on Facebook stays recoverable
 # (hidden, private master kept) before permanent deletion. OWNER DECISION.
 FB_REMOVED_RETENTION_DAYS = "30"

@@ -599,12 +599,13 @@ test("non-page objects, non-feed fields, and other Pages are ignored", async () 
 // Auto import gate
 // =====================================================================
 
-test("automatic import is disabled by default (wrangler.toml) and records only", async () => {
-  assert.equal(baseEnv.FB_AUTO_IMPORT, "false", "shipped default");
-  assert.equal(baseEnv.FB_INTEGRATION_ENABLED, "true", "stage L2: endpoints on, imports off");
+test("with FB_AUTO_IMPORT paused, events are recorded only (shipped config: imports on)", async () => {
+  assert.equal(baseEnv.FB_AUTO_IMPORT, "true", "shipped config: automatic imports approved 2026-10-19");
+  assert.equal(baseEnv.FB_INTEGRATION_ENABLED, "true", "endpoints on");
   stubPost("1111111111_100", ["2006"], { message: "x" });
   const ctx = makeCtx();
-  const shipped = makeEnv({ FB_AUTO_IMPORT: baseEnv.FB_AUTO_IMPORT, FB_INTEGRATION_ENABLED: baseEnv.FB_INTEGRATION_ENABLED });
+  // "false" stays the pause switch; its behavior must not regress.
+  const shipped = makeEnv({ FB_AUTO_IMPORT: "false", FB_INTEGRATION_ENABLED: baseEnv.FB_INTEGRATION_ENABLED });
   const verify = await worker.fetch(new Request(`${BASE}/webhook?hub.mode=subscribe&hub.verify_token=${VERIFY_TOKEN}&hub.challenge=4321`), shipped, makeCtx());
   assert.equal(verify.status, 200);
   assert.equal(await verify.text(), "4321");
