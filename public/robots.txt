@@ -10,6 +10,4 @@ Disallow: /
 User-agent: Google-Extended
 Disallow: /
 
-Allow: /
-
 Sitemap: https://kilcon.work/sitemap.xml
