@@ -10,7 +10,7 @@ import path from "node:path";
 import { getPlatformProxy } from "wrangler";
 
 import worker from "../src/index.js";
-import { processPendingEvents, handleFacebookScheduled, purgeExpiredRemovals, runRetention, redact } from "../src/facebook.js";
+import { processPendingEvents, handleFacebookScheduled, purgeExpiredRemovals, runRetention, redact, runFacebookDiscovery } from "../src/facebook.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -190,7 +190,7 @@ before(async () => {
   });
   baseEnv = proxy.env;
 
-  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql"]) {
+  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql"]) {
     const sql = await readFile(path.join(repoRoot, "migrations", file), "utf8");
     const statements = sql
       .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
@@ -229,12 +229,13 @@ beforeEach(async () => {
     }
     const img = imageFixtures.get(url.toString());
     if (img?.status) return new Response("err", { status: img.status });
+    if (img?.beforeReturn) await img.beforeReturn();
     if (img) return new Response(img.bytes, { headers: { "Content-Type": img.type || "image/jpeg" } });
     return new Response("nope", { status: 404 });
   };
 
   await baseEnv.DB.batch(
-    ["facebook_webhook_events", "facebook_photos", "facebook_posts", "facebook_projects", "facebook_sync_state"]
+    ["facebook_discovery_jobs", "facebook_album_mappings", "facebook_albums", "facebook_webhook_events", "facebook_photos", "facebook_posts", "facebook_projects", "facebook_sync_state"]
       .map((t) => baseEnv.DB.prepare(`DELETE FROM ${t}`))
   );
   for (const b of [baseEnv.GALLERY_BUCKET, baseEnv.PRIVATE_BUCKET]) {
@@ -1604,4 +1605,353 @@ test("the inbox stores no visitor content and no message text, and drops old pro
   await runRetention(baseEnv);
   assert.equal((await rows("SELECT * FROM facebook_webhook_events WHERE verb = 'edited'")).length, 0);
   assert.equal((await rows("SELECT * FROM facebook_webhook_events WHERE verb = 'add'")).length, 1);
+});
+
+
+// Complete album discovery. All Graph/CDN traffic remains mocked.
+function discoveryFixtures(ids = ['9701'], { albumId = '970', name = 'Harper Barn', created } = {}) {
+  const album = { id: albumId, name, description: 'Project album', from: { id: PAGE_ID } };
+  graphFixtures.set(`${PAGE_ID}/albums`, { data: [album] });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [] });
+  for (const id of ids) stubPhoto(id, { album, created });
+  graphFixtures.set(`${albumId}/photos`, url => {
+    const offset = Number((url.searchParams.get('after') || 'C0').slice(1));
+    const next = offset + 10;
+    return { data: ids.slice(offset, next).map(id => ({ id })), ...(next < ids.length ? { paging: { cursors: { after: `C${next}` }, next: `https://graph.facebook.com/v26.0/${albumId}/photos?after=C${next}&access_token=${PAGE_TOKEN}` } } : {}) };
+  });
+  return album;
+}
+async function scanAll({ dry = true, env = makeEnv(), mappings = {} } = {}) {
+  let state;
+  const report = { albums: [], posts: [], photos: [], errors: [], complete: false };
+  for (let n = 0; n < 100; n++) {
+    const batch = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, env, body: { discovery: true, dryRun: dry, authorizeHistorical: !dry, mappings, ...(state ? { state } : {}) } });
+    assert.equal(batch.busy, undefined, 'no unexpected lease or retry delay');
+    for (const key of ['albums', 'posts', 'photos', 'errors']) report[key].push(...batch[key]);
+    state = batch.nextState;
+    if (batch.complete || batch.errors.length) { report.complete = batch.complete; return report; }
+  }
+  throw new Error('Discovery did not terminate');
+}
+
+test('complete discovery: album-only history previews without storage writes or downloads', async () => {
+  discoveryFixtures(['9701', '9702']);
+  const r = await scanAll();
+  assert.equal(r.complete, true);
+  assert.equal(r.albums.length, 1);
+  assert.deepEqual(r.photos.map(p => p.id), ['9701', '9702']);
+  assert.ok(r.photos.every(p => p.origin === 'album' && p.outcome === 'new'));
+  for (const table of ['facebook_photos', 'facebook_projects', 'facebook_posts', 'facebook_sync_state', 'facebook_discovery_jobs', 'facebook_album_mappings', 'facebook_albums']) assert.equal((await rows(`SELECT * FROM ${table}`)).length, 0, table);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith('fbcdn.net')));
+  assert.ok(!JSON.stringify(r).includes(PAGE_TOKEN), 'Graph paging token never returned');
+});
+
+test('complete discovery: 125 album photos paginate, checkpoint, and import exactly once', async () => {
+  const ids = Array.from({ length: 125 }, (_, i) => String(97000 + i));
+  discoveryFixtures(ids);
+  const r = await scanAll({ dry: false });
+  assert.equal(r.complete, true);
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 125);
+  assert.equal((await rows('SELECT * FROM facebook_projects')).length, 1);
+  assert.equal((await rows('SELECT * FROM facebook_albums'))[0].description, 'Project album');
+  assert.equal((await keys(baseEnv.GALLERY_BUCKET)).length, 125);
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 125);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 125);
+});
+
+test('complete discovery: album listing pages and post overlap use one photo record', async () => {
+  const album = discoveryFixtures(['9701', '9702']);
+  const post = stubPost(`${PAGE_ID}_980`, ['9702', '9703'], { album, message: 'Harper Barn update' });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  graphFixtures.set(`${PAGE_ID}/albums`, url => url.searchParams.get('after') ? { data: [{ id: '971', name: 'Second project' }] } : { data: [album], paging: { cursors: { after: 'NEXT' }, next: `https://graph.facebook.com/v26.0/${PAGE_ID}/albums?after=NEXT` } });
+  graphFixtures.set('971/photos', { data: [{ id: '9703' }] });
+  const preview = await scanAll();
+  assert.equal(preview.albums.length, 2);
+  assert.equal(new Set(preview.photos.map(p => p.id)).size, 3);
+  assert.ok(preview.photos.filter(p => p.id === '9702').some(p => p.origin === 'post'));
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 3);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 3);
+});
+
+test('complete discovery: attachments and nested subattachments follow every returned page', async () => {
+  discoveryFixtures([]);
+  for (const id of ['9711', '9712', '9713']) stubPhoto(id);
+  const post = { id: `${PAGE_ID}_981`, from: { id: PAGE_ID }, message: 'Progress', attachments: { data: [{ type: 'album', subattachments: { data: [{ type: 'photo', target: { id: '9711' } }], paging: { next: `https://graph.facebook.com/v26.0/981/subattachments?after=SUB`, cursors: { after: 'SUB' } } } }], paging: { next: `https://graph.facebook.com/v26.0/${PAGE_ID}_981/attachments?after=ATT`, cursors: { after: 'ATT' } } } };
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  graphFixtures.set('981/subattachments', { data: [{ type: 'photo', target: { id: '9712' } }] });
+  graphFixtures.set(`${PAGE_ID}_981/attachments`, { data: [{ type: 'photo', target: { id: '9713' } }] });
+  const r = await scanAll();
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(new Set(r.photos.map(p => p.id)), new Set(['9711', '9712', '9713']));
+});
+
+test('complete discovery: errors retain the exact cursor; tokens are redacted', async () => {
+  discoveryFixtures();
+  graphFixtures.set('970/photos', { status: 429, body: { error: { code: 4, message: `Rate limited access_token=${PAGE_TOKEN}` } } });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.equal(r.errors.length, 1);
+  assert.ok(!JSON.stringify(r).includes(PAGE_TOKEN));
+  const job = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, body: { discovery: true, dryRun: false, authorizeHistorical: true } });
+  assert.equal(job.complete, false);
+  const [stored] = await rows('SELECT * FROM facebook_discovery_jobs');
+  assert.equal(JSON.parse(stored.state).tasks[0].id, '970');
+  assert.equal(stored.attempts, 1);
+  assert.ok(stored.next_attempt_at > Date.now());
+  graphFixtures.set('970/photos', { data: [{ id: '9701' }] });
+  await baseEnv.DB.prepare('UPDATE facebook_discovery_jobs SET next_attempt_at=0').run();
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+});
+
+test('complete discovery: malicious pagination cannot send credentials to another host', async () => {
+  discoveryFixtures();
+  graphFixtures.set(`${PAGE_ID}/albums`, { data: [], paging: { next: 'https://evil.example/steal?after=X', cursors: { after: 'X' } } });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.match(r.errors[0].error, /Unsafe/);
+  assert.ok(fetchCalls.every(c => c.url.hostname !== 'evil.example'));
+});
+
+test('complete discovery: generic albums use Recent; named albums link to manual galleries', async () => {
+  await baseEnv.GALLERY_BUCKET.put('Projects/Harper Barn/old.jpg', 'manual');
+  discoveryFixtures(['9701'], { name: 'Harper Barn - progress' });
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT linked_prefix FROM facebook_projects'))[0].linked_prefix, 'Projects/Harper Barn/');
+  assert.equal(await (await baseEnv.GALLERY_BUCKET.get('Projects/Harper Barn/old.jpg')).text(), 'manual');
+  const [photo] = await rows('SELECT * FROM facebook_photos');
+  await call(`${BASE}/admin/photo-update`, { method: 'POST', admin: true, body: { photoIds: [photo.fb_photo_id], hidden: true } });
+  const again = await scanAll({ dry: false });
+  assert.ok(again.photos.some(p => p.outcome === 'suppressed'));
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 1);
+});
+
+test('complete discovery: explicit album destination applies only to new imports', async () => {
+  discoveryFixtures();
+  await scanAll({ dry: false, mappings: { '970': 'recent' } });
+  assert.equal((await rows('SELECT kind FROM facebook_projects'))[0].kind, 'recent');
+  const r = await call(`${BASE}/backfill`, { method: 'POST', admin: true, body: { discovery: true, dryRun: false } });
+  assert.equal(r.status, 400);
+  assert.equal((await call(`${BASE}/backfill`, { method: 'POST', body: { discovery: true, dryRun: false, authorizeHistorical: true } })).status, 401);
+});
+
+test('complete discovery: reconciliation establishes future-only cutoff and recovers a missed album upload', async () => {
+  discoveryFixtures(['9701'], { created: '2020-01-01T00:00:00+0000' });
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await handleFacebookScheduled(env);
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 0, 'no unauthorized history');
+  const cutoff = JSON.parse((await rows('SELECT state FROM facebook_discovery_jobs'))[0].state).cutoff;
+  assert.ok(cutoff);
+  discoveryFixtures(['9701', '9702'], { created: new Date(Date.now() + 1000).toISOString() });
+  await baseEnv.DB.prepare('UPDATE facebook_discovery_jobs SET next_attempt_at=0').run();
+  for (let n = 0; n < 5 && !(await rows('SELECT * FROM facebook_photos')).length; n++) await handleFacebookScheduled(env);
+  assert.ok((await rows('SELECT * FROM facebook_photos')).some(p => p.fb_photo_id === '9702'));
+  assert.equal(JSON.parse((await rows('SELECT state FROM facebook_discovery_jobs'))[0].state).cutoff, cutoff);
+});
+
+test('complete discovery: a lease prevents concurrent history scans and expires for recovery', async () => {
+  discoveryFixtures();
+  const [a, b] = await Promise.all([runFacebookDiscovery(makeEnv(), { dryRun: false, authorizeHistorical: true }), runFacebookDiscovery(makeEnv(), { dryRun: false, authorizeHistorical: true })]);
+  assert.ok([a, b].some(r => r.body.busy));
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+  await baseEnv.DB.prepare("UPDATE facebook_discovery_jobs SET lease_token='dead',lease_until=1").run();
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+});
+
+test('complete discovery: invalid CDN data fails durably and never publishes', async () => {
+  discoveryFixtures();
+  imageFixtures.set('https://scontent.xx.fbcdn.net/big/9701.jpg', { bytes: new TextEncoder().encode('<svg/>'), type: 'image/svg+xml' });
+  const r = await scanAll({ dry: false });
+  assert.equal(r.complete, false);
+  assert.equal((await rows('SELECT status FROM facebook_photos'))[0].status, 'failed');
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+  assert.equal((await rows('SELECT attempts FROM facebook_discovery_jobs'))[0].attempts, 1);
+});
+
+test('complete discovery: removed and permanently deleted photos stay suppressed', async () => {
+  discoveryFixtures();
+  await scanAll({ dry: false });
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET hidden=1,hidden_reason='removed_on_facebook',removed_on_facebook_at='2026-01-01' WHERE fb_photo_id='9701'").run();
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 1);
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET master_key=NULL WHERE fb_photo_id='9701'").run();
+  assert.ok((await scanAll({ dry: false })).photos.some(p => p.outcome === 'suppressed'));
+});
+
+test('complete discovery: enabled webhook imports a photo-only event once without a feed post', async () => {
+  discoveryFixtures();
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await postWebhook(env, feedPayload([photoAdd('9701', { post_id: undefined })]));
+  await postWebhook(env, feedPayload([photoAdd('9701', { post_id: undefined })]));
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 1);
+});
+
+test('complete discovery: missing ownership and unsupported cursors are explicit incomplete results', async () => {
+  discoveryFixtures();
+  graphFixtures.set('9701', { ...graphFixtures.get('9701'), from: undefined });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.match(r.errors[0].error, /ownership/);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+});
+
+
+test('complete discovery: generic albums never become construction projects', async () => {
+  discoveryFixtures(['9701'], { name: 'Timeline Photos' });
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT kind,name FROM facebook_projects'))[0].kind, 'recent');
+});
+
+test('complete discovery: an admin album mapping survives future uploads', async () => {
+  discoveryFixtures(['9701']);
+  await scanAll({ dry: false, mappings: { '970': 'recent' } });
+  discoveryFixtures(['9701', '9702']);
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_projects')).length, 1);
+  assert.equal((await rows('SELECT kind FROM facebook_projects'))[0].kind, 'recent');
+  assert.equal((await rows('SELECT locked FROM facebook_album_mappings'))[0].locked, 1);
+});
+
+test('complete discovery: similar album names do not fork an existing manual project', async () => {
+  await baseEnv.GALLERY_BUCKET.put('Projects/Harper Barn/old.jpg', 'manual');
+  discoveryFixtures(['9701'], { name: 'Harper Big Barn' });
+  const r = await scanAll();
+  assert.equal(r.photos[0].project.action, 'recent', 'uncertain near-match requires review');
+  assert.equal((await rows('SELECT * FROM facebook_projects')).length, 0);
+});
+
+test('complete discovery: paginated webhook work checkpoints rather than losing large posts', async () => {
+  const ids = Array.from({ length: 35 }, (_, i) => String(98000 + i));
+  const album = discoveryFixtures(ids);
+  const post = stubPost(`${PAGE_ID}_999`, ids, { album });
+  graphFixtures.set(`${post.id}/attachments`, { data: post.attachments.data });
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await postWebhook(env, feedPayload([postAdd(post.id)]));
+  let events = await rows('SELECT * FROM facebook_webhook_events');
+  assert.equal(events[0].status, 'retry');
+  assert.ok(events[0].discovery_state);
+  for (let n = 0; n < 8 && events[0].status !== 'done'; n++) {
+    await processPendingEvents(env);
+    events = await rows('SELECT * FROM facebook_webhook_events');
+  }
+  assert.equal(events[0].status, 'done');
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 35);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 35);
+});
+
+test('complete discovery: preview identifies metadata duplicate candidates without downloading manual files', async () => {
+  discoveryFixtures();
+  await baseEnv.GALLERY_BUCKET.put('Projects/Existing/9701.jpg', 'manual');
+  const r = await scanAll();
+  assert.deepEqual(r.photos[0].potentialManualDuplicates, ['Projects/Existing/9701.jpg']);
+  assert.equal(r.photos[0].visualDuplicatesChecked, false);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith('fbcdn.net')));
+  assert.equal(await (await baseEnv.GALLERY_BUCKET.get('Projects/Existing/9701.jpg')).text(), 'manual');
+});
+
+test('complete discovery: unsupported cursors and forged task paths fail closed', async () => {
+  discoveryFixtures();
+  graphFixtures.set(`${PAGE_ID}/albums`, { data: [], paging: { next: `https://graph.facebook.com/v26.0/${PAGE_ID}/albums` } });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.match(r.errors[0].error, /cursor/);
+  const invalid = await call(`${BASE}/backfill`, { method: 'POST', admin: true, body: { discovery: true, state: { version: 1, pageId: PAGE_ID, cutoff: null, tasks: [{ edge: 'photos', id: '../me' }] } } });
+  assert.equal(invalid.status, 400);
+});
+
+test('complete discovery: album access health checks are read-only and do not assert untested permissions', async () => {
+  discoveryFixtures();
+  graphFixtures.set('me', { id: PAGE_ID, name: 'KIL Construction' });
+  graphFixtures.set(`${PAGE_ID}/subscribed_apps`, { data: [] });
+  const h = await getJson(`${BASE}/admin/health`, { admin: true, env: makeEnv({ FB_DISCOVERY_ENABLED: 'true' }) });
+  assert.equal(h.albumAccess, 'ok');
+  assert.equal(h.albumPhotoAccess, 'ok');
+  assert.ok(graphCalls().every(c => (c.init.method || 'GET') === 'GET'));
+  assert.equal((await rows('SELECT * FROM facebook_discovery_jobs')).length, 0);
+});
+
+test('complete discovery: reconciliation follows existing Facebook removal and retention policy', async () => {
+  discoveryFixtures();
+  await scanAll({ dry: false });
+  graphFixtures.set('9701', { status: 400, body: { error: { code: 100, error_subcode: 33, message: 'Object unavailable' } } });
+  await runFacebookDiscovery(makeEnv(), { dryRun: false }, { mode: 'reconcile' });
+  const [photo] = await rows('SELECT * FROM facebook_photos');
+  assert.equal(photo.hidden_reason, 'removed_on_facebook');
+  assert.ok(photo.purge_after);
+  assert.ok(await baseEnv.PRIVATE_BUCKET.head(photo.master_key));
+  assert.equal(await baseEnv.GALLERY_BUCKET.head('Facebook/9701.jpg'), null);
+});
+
+
+test('complete discovery: a deletion request racing a download cannot resurrect the photo', async () => {
+  discoveryFixtures();
+  const img = imageFixtures.get('https://scontent.xx.fbcdn.net/big/9701.jpg');
+  img.beforeReturn = async () => {
+    delete img.beforeReturn;
+    await adminPost('purge', { confirm: 'PERMANENTLY DELETE', photoIds: ['9701'] });
+  };
+  await scanAll({ dry: false });
+  const [photo] = await rows('SELECT * FROM facebook_photos');
+  assert.equal(photo.hidden_reason, 'deleted');
+  assert.equal(photo.master_key, null);
+  assert.equal(photo.caption, null);
+  assert.equal(await baseEnv.PRIVATE_BUCKET.head('Facebook/9701.jpg'), null);
+  assert.equal(await baseEnv.GALLERY_BUCKET.head('Facebook/9701.jpg'), null);
+});
+
+
+test('complete discovery: an interrupted stale photo claim is retried even with auto-import paused', async () => {
+  discoveryFixtures();
+  await baseEnv.DB.prepare("INSERT INTO facebook_photos(fb_photo_id,page_id,source,status,updated_at) VALUES ('9701',?,'backfill','importing','2000-01-01')").bind(PAGE_ID).run();
+  await scanAll({ dry: false, env: makeEnv({ FB_AUTO_IMPORT: 'false' }) });
+  assert.equal((await rows('SELECT status FROM facebook_photos'))[0].status, 'imported');
+  assert.ok(await baseEnv.GALLERY_BUCKET.head('Facebook/9701.jpg'));
+});
+
+test('complete discovery: an explicit republish event restores only Facebook-removed photos', async () => {
+  const album = discoveryFixtures();
+  const post = stubPost(`${PAGE_ID}_991`, ['9701'], { album });
+  graphFixtures.set(`${post.id}/attachments`, { data: post.attachments.data });
+  await scanAll({ dry: false });
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET hidden=1,hidden_reason='removed_on_facebook',removed_on_facebook_at='2026-01-01' WHERE fb_photo_id='9701'").run();
+  post.is_published = true;
+  post.is_hidden = false;
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await postWebhook(env, feedPayload([postAdd(post.id, { verb: 'edited' })]));
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 0);
+  await adminPost('photo-update', { photoIds: ['9701'], hidden: true });
+  await postWebhook(env, feedPayload([postAdd(post.id, { verb: 'edited', message: 'another edit' })]));
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 1);
+});
+
+
+test('complete discovery: large post captions are stored once per continuation', async () => {
+  discoveryFixtures([]);
+  const ids = Array.from({ length: 125 }, (_, i) => String(99000 + i));
+  const post = stubPost(`${PAGE_ID}_992`, ids, { message: 'Long construction update '.repeat(200) });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  const preview = await scanAll();
+  assert.equal(preview.complete, true);
+  assert.equal(new Set(preview.photos.map(p => p.id)).size, 125);
+  assert.equal(preview.errors.length, 0);
+});
+
+
+test('complete discovery: album-first discovery can improve an automatic Recent assignment using later post evidence', async () => {
+  await baseEnv.GALLERY_BUCKET.put('Projects/Harper Barn/old.jpg', 'manual');
+  const album = discoveryFixtures(['9701'], { name: 'Timeline Photos' });
+  const post = stubPost(`${PAGE_ID}_993`, ['9701'], { album, message: 'Harper Barn progress' });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  await scanAll({ dry: false });
+  const [target] = await rows('SELECT p.linked_prefix FROM facebook_photos ph JOIN facebook_projects p ON p.id=ph.project_id');
+  assert.equal(target.linked_prefix, 'Projects/Harper Barn/');
+  assert.equal((await rows('SELECT * FROM facebook_posts')).length, 1);
+  const repeat = await scanAll();
+  assert.ok(repeat.photos.every(p => p.outcome === 'existing'));
 });

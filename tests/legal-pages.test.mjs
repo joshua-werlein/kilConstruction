@@ -91,7 +91,7 @@ test("Worker is configured with the confirmed Meta App ID and Page ID, automatic
   }
 });
 
-test("all three legal pages carry the same, valid, non-future Last updated date", async () => {
+test("all three legal pages carry valid, non-future Last updated dates", async () => {
   const dates = [];
   for (const p of ["src/pages/privacy.astro", "src/pages/data-deletion.astro", "src/pages/terms.astro"]) {
     const src = await read(p);
@@ -102,7 +102,8 @@ test("all three legal pages carry the same, valid, non-future Last updated date"
     assert.ok(Number.isFinite(t) && t <= Date.now(), `${p}: ${d} is a real, non-future date`);
     dates.push(d);
   }
-  assert.equal(new Set(dates).size, 1, `dates match: ${dates.join(", ")}`);
+  // Each policy records its own last text change; changing privacy scope does
+  // not imply the terms or deletion instructions were edited on the same day.
 });
 
 test("privacy policy does not imply Meta receives website data, and deletion follows verification", async () => {
