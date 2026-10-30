@@ -2,12 +2,9 @@
 import MainLayout from "../../layout/MainLayout.astro";
 import "../../styles/global.css";
 import "../../styles/projects.css";
+import { normalizeApparelSlug } from "../../utils/apparelSlug";
 
 export const prerender = false;
-
-const { env } = Astro.locals.runtime;
-const GALLERY_WORKER = env?.GALLERY_WORKER as Fetcher | undefined;
-if (!GALLERY_WORKER) throw new Error("Missing service binding: GALLERY_WORKER");
 
 type Photo = {
     name: string;
@@ -21,7 +18,23 @@ type ProjectMeta = {
     description?: string;
 };
 
-const { slug } = Astro.params as { slug: string };
+const { slug: rawSlug } = Astro.params as { slug?: string };
+
+// The slug is passed to the inline script via define:vars, whose escaping is
+// incomplete in Astro 5, so only valid slugs may reach the page.
+const slug = normalizeApparelSlug(rawSlug);
+if (!slug) return new Response(null, { status: 404 });
+if (slug !== rawSlug) {
+    // The gallery worker matches case-insensitively; keep old mixed-case links working.
+    return new Response(null, {
+        status: 301,
+        headers: { Location: `/apparel/${slug}${Astro.url.search}` },
+    });
+}
+
+const { env } = Astro.locals.runtime;
+const GALLERY_WORKER = env?.GALLERY_WORKER as Fetcher | undefined;
+if (!GALLERY_WORKER) throw new Error("Missing service binding: GALLERY_WORKER");
 
 let items: Photo[] = [];
 let loadError: string | null = null;
