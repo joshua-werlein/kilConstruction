@@ -15,7 +15,7 @@ import {
   handleFacebookAdmin,
   listFacebookProjects,
   getFacebookProject,
-  getLinkedFacebookItems,
+  getLinkedFacebookGallery,
   runRetention,
 } from "./facebook.js";
 import {
@@ -784,7 +784,8 @@ async function getProject(projectKey, env, request) {
     }
 
     // Facebook photos merged into this gallery (caption match or admin move)
-    if (fbEnabled(env)) items.push(...(await getLinkedFacebookItems(env, prefix, galleryUrls(env))));
+    const linked = fbEnabled(env) ? await getLinkedFacebookGallery(env, prefix, galleryUrls(env)) : null;
+    if (linked) items.push(...linked.items);
 
     items.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
 
@@ -798,7 +799,7 @@ async function getProject(projectKey, env, request) {
 
     const project = {
       name: projectFolder,
-      description: "",
+      description: linked?.description || "",
     };
 
     return json({ project, items }, 200, request);

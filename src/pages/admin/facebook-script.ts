@@ -26,6 +26,7 @@ type FbProject = {
     hidden: boolean;
     linkedPrefix: string | null;
     nameLocked: boolean;
+    descriptionOverride: string | null;
     photoCount: number;
     visibleCount: number;
     publicPath: string | null;
@@ -320,6 +321,15 @@ export default function initFacebookPage() {
                         <button type="button" class="admin-button-sm js-rename-save">Save</button>
                         <button type="button" class="admin-button-sm js-rename-cancel">Cancel</button>
                     </div>
+                    <details>
+                        <summary>Project description</summary>
+                        <label>Website description
+                            <textarea class="admin-input js-description" maxlength="5000" rows="4">${escapeHtml(p.descriptionOverride ?? "")}</textarea>
+                        </label>
+                        <small class="hint">${p.descriptionOverride == null ? "Using the first eligible Facebook post." : "Using your saved description."} Save an empty description to hide it.</small>
+                        <button type="button" class="admin-button-sm js-description-save">Save description</button>
+                        <button type="button" class="admin-button-sm js-description-reset"${p.descriptionOverride == null ? " disabled" : ""}>Use Facebook description</button>
+                    </details>
                     ${linkedNote}
                     ${viewLink}`;
 
@@ -388,6 +398,7 @@ export default function initFacebookPage() {
             name?: string;
             hidden?: boolean;
             category?: string;
+            description?: string | null;
         }, successMsg: string) {
             try {
                 await api("/project-update", body);
@@ -588,6 +599,12 @@ export default function initFacebookPage() {
                 }
                 btn.setAttribute("disabled", "");
                 void updateProject({ projectId: id, name }, "Project renamed.");
+            } else if (btn.classList.contains("js-description-save") || btn.classList.contains("js-description-reset")) {
+                const field = tr.querySelector<HTMLTextAreaElement>(".js-description");
+                if (!field) return;
+                const description = btn.classList.contains("js-description-reset") ? null : field.value;
+                btn.disabled = true;
+                void updateProject({ projectId: id, description }, "Project description updated.");
             } else if (btn.classList.contains("js-toggle-hidden")) {
                 btn.setAttribute("disabled", "");
                 const hidden = !project.hidden;

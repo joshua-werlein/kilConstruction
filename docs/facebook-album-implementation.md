@@ -1,5 +1,63 @@
 # Facebook albums and post discovery — local implementation, pending approval
 
+## November 15 follow-up: project descriptions and release order
+
+- Current GitHub `main` was verified at `8a5f5ff`. Its only change since the
+  album branch diverged is the Node.js `22.23.5` pin. It was merged locally
+  without changing the album commit or the earlier security fixes.
+- A read-only production D1 lookup found migration `014` recorded and `015`
+  and `016` absent. A second read-only lookup confirmed eight distinct visible
+  `ganz-garage` photos, all from one post and all with captions identical to
+  that post's stored text. No production rows were changed.
+- `016_facebook_project_descriptions.sql` adds a nullable admin override and
+  distinguishes a photo's own caption from the post-text fallback on future
+  imports. Existing captions, IDs, image URLs and objects are untouched.
+  The Worker reuses the first recorded eligible post with a visible photo in
+  the gallery; later posts and older history discovered later do not displace
+  it. The selected source can change if it is removed or no longer visible.
+  The text of the selected source follows edits on Facebook unless overridden.
+  An administrator can save text, save blank to hide it, or return to the
+  automatic description. Recent Project Updates does not pick a project-wide
+  Facebook caption. Legacy captions equal to the stored post text (ignoring
+  whitespace) are suppressed only in public rendering.
+- Reconciliation no longer treats an ambiguous Graph `100/33` lookup by
+  itself as a removal. A signed removal event preserves the existing
+  confirmation flow; a clear unpublished/hidden post can still be hidden by
+  periodic verification. Album-only removals without a reliable signal may
+  require admin review.
+
+Use this updated order after separate approvals:
+
+1. Reconfirm GitHub/CI state, Pages branch deployment behavior, the production
+   Worker/Pages rollback IDs, D1 migration ledger and a recovery bookmark.
+   Ensure no automatic Pages production cutover can get ahead of D1/Worker.
+2. In the Worker directory, inspect pending migrations with
+   `npx wrangler d1 migrations list kilcon-db --remote`. If `015` and `016`
+   are the only pending migrations, apply both in order using
+   `npx wrangler d1 migrations apply kilcon-db --remote` **after approval**.
+   If the ledger and schema disagree or unrelated migrations are pending,
+   stop and investigate. Do not rerun migrations already recorded.
+3. Deploy the matching Worker, then Pages, with `FB_DISCOVERY_ENABLED="false"`
+   and the existing post importer enabled. Keep existing secret bindings and
+   security rules. Verify Ganz Garage has the same eight IDs and renders one
+   description, then smoke-check the old webhook path, admin and public routes.
+4. In `/admin/facebook`, choose **Preview (dry run)**. This combined preview
+   works while album automation is off. Review access errors, coverage and
+   destinations; rerun preview after assigning albums. Do not click **Import
+   history** until separately approved.
+5. After the preview proves access and the owner approves ongoing discovery,
+   enable `FB_DISCOVERY_ENABLED`, record the first reconciliation cutoff and
+   verify both a normal post and an album-only upload. The historical import
+   is still a distinct decision; when approved, use the reviewed admin preview
+   and explicit import confirmation. The first reconciliation picks up only
+   uploads whose creation dates meet its cutoff.
+6. If the release causes regressions, restore the captured secure Pages/Worker
+   deployments. Leave additive migrations `015`/`016` in place; do not roll
+   back the shared database or remove content without separate approval.
+
+The October handoff and validation below remain as a record of the original
+album implementation.
+
 No commit, push, deployment, production migration, historical import, Meta setting
 change, or secret update is authorized by this document. Those actions require
 the owner's approval. The implementation is staged with `FB_DISCOVERY_ENABLED`
@@ -166,9 +224,9 @@ an empty album list is reported as having no album available to test.
 - New album mappings apply to new imports, not already manually placed photos.
 - Graph/CDN budgets do not account for all D1/R2 binding operations. Use a local
   or staging runtime to measure CPU/operation use; no free-tier guarantee is made.
-- Removal verification inherits the existing handling of Graph error 100/33.
-  Permission/visibility changes can also make objects unavailable. Temporary
-  errors otherwise do not cause removals; existing retention rules remain.
+- Graph error 100/33 has multiple meanings. Periodic verification alone does
+  not start retention for this error; a signed removal event uses the existing
+  confirmation flow. Temporary errors do not trigger removal.
 
 ## Deployment plan — execute only after approval
 

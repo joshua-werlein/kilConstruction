@@ -190,7 +190,7 @@ before(async () => {
   });
   baseEnv = proxy.env;
 
-  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql"]) {
+  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql"]) {
     const sql = await readFile(path.join(repoRoot, "migrations", file), "utf8");
     const statements = sql
       .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
@@ -653,7 +653,8 @@ test("signed event imports in waitUntil: master private, public copy, visible ga
   const page = await getJson("/api/gallery-api?project=johnson-backyard-deck");
   assert.equal(page.project.name, "Johnson Backyard Deck");
   assert.equal(page.items.length, 3);
-  assert.equal(page.items[0].description, "Johnson backyard deck");
+  assert.equal(page.project.description, "Johnson backyard deck");
+  assert.ok(page.items.every(i => i.description === null));
   assert.match(page.items[0].name, /^2026-10-01_\d+\.jpg$/);
 
   const [post] = await rows("SELECT * FROM facebook_posts");
@@ -719,7 +720,8 @@ test("ambiguous posts appear in Recent Project Updates", async () => {
   assert.equal(recent.name, "Recent Project Updates");
   const page = await getJson("/api/gallery-api?project=recent-project-updates");
   assert.equal(page.items.length, 3);
-  assert.ok(page.items.some((i) => /^Posted October 1, 2026$/.test(i.description)), "fallback caption");
+  assert.equal(page.project.description, "", "a collection does not represent one project");
+  assert.ok(page.items.some((i) => i.description === null));
 });
 
 test("a completed-build post with several photos creates a new project", async () => {
@@ -1088,7 +1090,7 @@ test("edited captions update the post and photos that showed the old text", asyn
   const post = stubPost(`${PAGE_ID}_600`, ["8001", "8002"], { message: "Smith porch in progress" });
   await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_600`)]));
   // 8002 has its own Facebook caption, which an edit to the post must not replace.
-  await baseEnv.DB.prepare(`UPDATE facebook_photos SET caption = 'Own caption' WHERE fb_photo_id = '8002'`).run();
+  await baseEnv.DB.prepare(`UPDATE facebook_photos SET caption = 'Own caption', caption_from_post = 0 WHERE fb_photo_id = '8002'`).run();
 
   graphFixtures.set(post.id, { ...post, message: "Smith porch finished" });
   const before = fetchCalls.length;
@@ -1102,7 +1104,7 @@ test("edited captions update the post and photos that showed the old text", asyn
   assert.deepEqual(caps, { 8001: "Smith porch finished", 8002: "Own caption" });
   assert.equal((await rows("SELECT * FROM facebook_photos")).length, 2, "no duplicates");
   const items = (await getJson("/api/gallery-api?project=recent-project-updates")).items;
-  assert.ok(items.some((i) => i.description === "Smith porch finished"));
+  assert.ok(items.some((i) => i.description === null));
 });
 
 test("an edited photo event re-reads the post instead of short-circuiting", async () => {
@@ -1876,11 +1878,15 @@ test('complete discovery: album access health checks are read-only and do not as
   assert.equal((await rows('SELECT * FROM facebook_discovery_jobs')).length, 0);
 });
 
-test('complete discovery: reconciliation follows existing Facebook removal and retention policy', async () => {
+test('complete discovery: an ambiguous lookup only triggers retention when corroborated by a removal webhook', async () => {
   discoveryFixtures();
   await scanAll({ dry: false });
   graphFixtures.set('9701', { status: 400, body: { error: { code: 100, error_subcode: 33, message: 'Object unavailable' } } });
   await runFacebookDiscovery(makeEnv(), { dryRun: false }, { mode: 'reconcile' });
+  const [unchanged] = await rows('SELECT * FROM facebook_photos');
+  assert.equal(unchanged.hidden, 0);
+  assert.equal(unchanged.purge_after, null);
+  await postWebhook(autoEnv(), feedPayload([photoAdd('9701', { verb: 'remove', post_id: undefined })]));
   const [photo] = await rows('SELECT * FROM facebook_photos');
   assert.equal(photo.hidden_reason, 'removed_on_facebook');
   assert.ok(photo.purge_after);
@@ -1954,4 +1960,61 @@ test('complete discovery: album-first discovery can improve an automatic Recent 
   assert.equal((await rows('SELECT * FROM facebook_posts')).length, 1);
   const repeat = await scanAll();
   assert.ok(repeat.photos.every(p => p.outcome === 'existing'));
+});
+
+test("project descriptions: legacy Ganz Garage shape displays one description without rewriting eight photos", async () => {
+  const message = "Ganz Garage framing is complete.\n\nThe next step is the roof.";
+  const ids = Array.from({ length: 8 }, (_, i) => String(99400 + i));
+  const album = { id: "994", name: "Ganz Garage" };
+  const post = stubPost(`${PAGE_ID}_994`, ids, { message, album });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET caption_from_post=NULL").run();
+  const before = await rows("SELECT fb_photo_id, caption, public_key FROM facebook_photos ORDER BY fb_photo_id");
+  const page = await getJson("/api/gallery-api?project=ganz-garage");
+  assert.equal(page.project.description, message);
+  assert.equal(page.items.length, 8);
+  assert.equal(new Set(page.items.map(i => i.id)).size, 8);
+  assert.ok(page.items.every(i => i.description === null));
+  assert.deepEqual(await rows("SELECT fb_photo_id, caption, public_key FROM facebook_photos ORDER BY fb_photo_id"), before);
+  assert.equal((await keys(baseEnv.GALLERY_BUCKET)).length, 8);
+});
+
+test("project descriptions: additional posts including older backfill do not replace the first description", async () => {
+  const album = { id: "995", name: "Miller Garage" };
+  const first = stubPost(`${PAGE_ID}_995`, ["99501"], { message: "First project description", album });
+  await postWebhook(autoEnv(), feedPayload([postAdd(first.id)]));
+  const later = stubPost(`${PAGE_ID}_996`, ["99502", "99503"], { message: "An older post discovered later", album, created: "2020-03-01T00:00:00+0000" });
+  graphFixtures.get("99503").name = "Inspecting the south wall.\nReady for siding.";
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [later] });
+  await getJson(`${BASE}/backfill`, { method: "POST", body: { dryRun: false }, admin: true });
+  const page = await getJson("/api/gallery-api?project=miller-garage");
+  assert.equal(page.project.description, first.message);
+  assert.deepEqual(page.items.filter(i => i.description).map(i => i.description), ["Inspecting the south wall.\nReady for siding."]);
+});
+
+test("project descriptions: manual, blank and automatic choices work for linked manual galleries", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Projects/Miller Garage/manual.jpg", "manual");
+  const post = stubPost(`${PAGE_ID}_997`, ["99701"], { message: "Miller Garage progress" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  const [p] = await rows("SELECT id FROM facebook_projects");
+  const body = { projectId: p.id, description: "Our custom description" };
+  assert.equal((await call(`${BASE}/admin/project-update`, { method: "POST", body })).status, 401);
+  assert.equal((await call(`${BASE}/admin/project-update`, { method: "POST", admin: true, body: { ...body, description: {} } })).status, 400);
+  await adminPost("project-update", body);
+  post.message = "Miller Garage progress, edited";
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id, { verb: "edited" })]));
+  const getPage = () => getJson("/api/gallery-api?project=miller-garage");
+  let page = await getPage();
+  assert.equal(page.project.description, body.description);
+  assert.equal(page.items.length, 2);
+  assert.equal(page.items.find(i => i.source === "facebook").description, null);
+  await adminPost("project-update", { ...body, description: "" });
+  assert.equal((await getPage()).project.description, "");
+  await adminPost("project-update", { ...body, description: null });
+  assert.equal((await getPage()).project.description, post.message);
+  await adminPost("photo-update", { photoIds: ["99701"], hidden: true });
+  page = await getPage();
+  assert.equal(page.project.description, "", "hidden Facebook source never contributes text");
+  assert.equal(page.items.length, 1);
+  assert.equal(await (await baseEnv.GALLERY_BUCKET.get("Projects/Miller Garage/manual.jpg")).text(), "manual");
 });

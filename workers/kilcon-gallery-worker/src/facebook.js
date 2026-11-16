@@ -597,7 +597,7 @@ async function handleRemoval(env, row, budget) {
   ).all();
   if (!results.length) return { status: "ignored", note: `${row.verb}: nothing imported` };
 
-  const gone = await confirmUnavailable(env, byPhoto ? row.photo_id : row.post_id, byPhoto ? "photo" : "post", budget);
+  const gone = await confirmUnavailable(env, byPhoto ? row.photo_id : row.post_id, byPhoto ? "photo" : "post", budget, row.source !== 'reconcile');
   if (!gone) return { status: "ignored", note: `${row.verb} not confirmed; still on Facebook` };
 
   const days = removedRetentionDays(env);
@@ -625,14 +625,15 @@ async function handleRemoval(env, row, budget) {
   return { status: "done", note: `hid ${results.length} photo(s) removed on Facebook; deleting in ${days} days` };
 }
 
-async function confirmUnavailable(env, id, kind, budget) {
+async function confirmUnavailable(env, id, kind, budget, hasRemovalEvent) {
   if (!cleanId(id)) return false;
   try {
     const obj = await graphGet(env, id, { fields: kind === "post" ? "id,is_published,is_hidden" : "id" }, budget);
     return kind === "post" && (obj?.is_published === false || obj?.is_hidden === true);
   } catch (e) {
-    // 100/33: "object does not exist, cannot be loaded due to missing permissions".
-    if (e?.graphCode === 100 && e?.graphSubcode === 33) return true;
+    // 100/33 also means permissions changed. A periodic scan alone may
+    // not use it to hide photos or start the permanent-deletion timer.
+    if (e?.graphCode === 100 && e?.graphSubcode === 33) return hasRemovalEvent;
     throw e;
   }
 }
@@ -850,8 +851,9 @@ async function refreshPostText(db, post) {
   await db.batch([
     db
       .prepare(
-        `UPDATE facebook_photos SET caption = ?, updated_at = ${NOW_SQL}
-          WHERE fb_post_id = ? AND caption IS ? AND master_key IS NOT NULL`
+        `UPDATE facebook_photos SET caption = ?, caption_from_post = 1, updated_at = ${NOW_SQL}
+          WHERE fb_post_id = ? AND master_key IS NOT NULL
+            AND (caption_from_post = 1 OR (caption_from_post IS NULL AND caption IS ?))`
       )
       .bind(message || null, postId, old.message || null),
     db
@@ -1173,16 +1175,14 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
       });
     }
 
-    const caption =
-      typeof photo.name === "string" && photo.name.trim()
-        ? photo.name
-        : context.message || null;
+    const photoCaption = typeof photo.name === "string" && photo.name.trim() ? photo.name : null;
+    const caption = photoCaption ?? (context.postId ? context.message || null : null);
 
     const committed = await db
       .prepare(
         `UPDATE facebook_photos
             SET status = 'imported', master_key = ?, content_type = ?, bytes = ?, width = ?, height = ?,
-                caption = ?, fb_created_time = ?, permalink = ?, album_id = ?, album_name = ?,
+                caption = ?, caption_from_post = ?, fb_created_time = ?, permalink = ?, album_id = ?, album_name = ?,
                 fb_post_id = COALESCE(fb_post_id, ?), last_error = NULL, updated_at = ${NOW_SQL}
           WHERE fb_photo_id = ? AND status = 'importing'`
       )
@@ -1193,6 +1193,7 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
         Number(best.width) || null,
         Number(best.height) || null,
         caption ? caption.slice(0, 5000) : null,
+        photoCaption && (!context.postId || comparableCaption(photoCaption) !== comparableCaption(context.message)) ? 0 : 1,
         toIso(photo.created_time) || context.createdTime || null,
         typeof photo.link === "string" ? photo.link.slice(0, 500) : context.permalink,
         cleanId(photo?.album?.id),
@@ -1297,11 +1298,15 @@ async function reconcileProject(env, projectId) {
 // These fail soft: if D1 is unbound or the migration hasn't been applied, the
 // existing R2 gallery keeps working with no Facebook content.
 
-function formatPosted(iso) {
-  if (!iso) return "Project photo";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "Project photo";
-  return `Posted ${d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })}`;
+function comparableCaption(text) {
+  return typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+}
+
+function uniquePhotoCaption(row) {
+  const caption = comparableCaption(row.caption);
+  return caption && row.caption_from_post !== 1 && caption !== comparableCaption(row.post_message)
+    ? row.caption.trim()
+    : null;
 }
 
 function toItem(row, urls) {
@@ -1313,7 +1318,7 @@ function toItem(row, urls) {
     name: `${date}_${row.fb_photo_id}.${ext}`,
     full,
     thumb: urls.thumbUrl(full),
-    description: firstLine(row.caption) || formatPosted(row.fb_created_time),
+    description: uniquePhotoCaption(row),
     createdTime: row.fb_created_time || null,
     id: row.fb_photo_id,
     source: "facebook",
@@ -1369,6 +1374,37 @@ export async function listFacebookProjects(env, category, urls) {
   }
 }
 
+// Choose the first eligible post recorded for this gallery, not the newest
+// upload or the oldest Facebook date. A later historical backfill cannot
+// replace it simply by discovering older posts. Only visible photo sources
+// contribute text; never republish a removed or hidden source's description.
+async function publicProjectDescription(db, project) {
+  if (project.description_override !== null) return project.description_override ?? "";
+  if (project.kind === "recent") return "";
+  const post = await db.prepare(
+    `SELECT fp.message FROM facebook_posts fp
+      WHERE fp.removed_on_facebook_at IS NULL AND NULLIF(TRIM(fp.message), '') IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM facebook_photos ph WHERE ph.project_id = ? AND ph.fb_post_id = fp.fb_post_id
+            AND ph.status = 'imported' AND ph.hidden = 0 AND ph.public_key IS NOT NULL
+        )
+      ORDER BY fp.rowid LIMIT 1`
+  ).bind(project.id).first();
+  return post?.message?.trim() || "";
+}
+
+async function publicProjectPhotos(db, projectId, urls) {
+  const { results = [] } = await db.prepare(
+    `SELECT ph.fb_photo_id, ph.public_key, ph.fb_created_time, ph.caption,
+            ph.caption_from_post, fp.message AS post_message
+       FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id
+       LEFT JOIN facebook_posts fp ON fp.fb_post_id = ph.fb_post_id
+      WHERE p.id = ? AND ${VISIBLE_PHOTO_SQL}
+      ORDER BY ph.fb_created_time`
+  ).bind(projectId).all();
+  return results.map(row => toItem(row, urls));
+}
+
 // key: "slug" or "category/slug" (as accepted by ?project=)
 export async function getFacebookProject(env, key, urls) {
   if (!env.DB) return null;
@@ -1380,25 +1416,16 @@ export async function getFacebookProject(env, key, urls) {
   try {
     const project = await env.DB
       .prepare(
-        `SELECT id, slug, name, category FROM facebook_projects
+        `SELECT id, slug, name, category, kind, description_override FROM facebook_projects
           WHERE slug = ? AND hidden = 0 AND linked_prefix IS NULL`
       )
       .bind(slug)
       .first();
     if (!project || (category && project.category !== category)) return null;
 
-    const { results = [] } = await env.DB
-      .prepare(
-        `SELECT ph.fb_photo_id, ph.public_key, ph.fb_created_time, ph.caption
-           FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id
-          WHERE p.id = ? AND ${VISIBLE_PHOTO_SQL}
-          ORDER BY ph.fb_created_time`
-      )
-      .bind(project.id)
-      .all();
-    if (!results.length) return null;
-
-    return { project: { name: project.name, description: "" }, items: results.map((r) => toItem(r, urls)) };
+    const items = await publicProjectPhotos(env.DB, project.id, urls);
+    if (!items.length) return null;
+    return { project: { name: project.name, description: await publicProjectDescription(env.DB, project) }, items };
   } catch (e) {
     console.error("[facebook] getFacebookProject error:", e?.message || e);
     return null;
@@ -1406,22 +1433,20 @@ export async function getFacebookProject(env, key, urls) {
 }
 
 // Facebook photos merged into an existing manual gallery (R2 prefix).
-export async function getLinkedFacebookItems(env, prefix, urls) {
-  if (!env.DB || !prefix) return [];
+export async function getLinkedFacebookGallery(env, prefix, urls) {
+  if (!env.DB || !prefix) return { items: [], description: "" };
   try {
-    const { results = [] } = await env.DB
-      .prepare(
-        `SELECT ph.fb_photo_id, ph.public_key, ph.fb_created_time, ph.caption
-           FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id
-          WHERE p.linked_prefix = ? AND ${VISIBLE_PHOTO_SQL}
-          ORDER BY ph.fb_created_time`
-      )
-      .bind(prefix)
-      .all();
-    return results.map((r) => toItem(r, urls));
+    const project = await env.DB.prepare(
+      "SELECT id, kind, description_override FROM facebook_projects WHERE linked_prefix = ? AND hidden = 0"
+    ).bind(prefix).first();
+    if (!project) return { items: [], description: "" };
+    return {
+      items: await publicProjectPhotos(env.DB, project.id, urls),
+      description: await publicProjectDescription(env.DB, project),
+    };
   } catch (e) {
-    console.error("[facebook] getLinkedFacebookItems error:", e?.message || e);
-    return [];
+    console.error("[facebook] getLinkedFacebookGallery error:", e?.message || e);
+    return { items: [], description: "" };
   }
 }
 
@@ -1579,6 +1604,7 @@ function projectOut(r) {
     hidden: !!r.hidden,
     linkedPrefix: r.linked_prefix || null,
     nameLocked: !!r.name_locked,
+    descriptionOverride: r.description_override ?? null,
     photoCount: r.photo_count || 0,
     visibleCount: r.visible_count || 0,
     publicPath,
@@ -1778,6 +1804,13 @@ async function adminProjectUpdate(env, body) {
     if (!FB_CATEGORIES.includes(body.category)) return jsonResult({ error: "Invalid category" }, 400);
     sets.push("category = ?");
     binds.push(body.category);
+  }
+  if (body.description !== undefined) {
+    if (body.description !== null && (typeof body.description !== "string" || body.description.length > 5000)) {
+      return jsonResult({ error: "Description must be text of at most 5000 characters or null" }, 400);
+    }
+    sets.push("description_override = ?");
+    binds.push(body.description?.trim() ?? null);
   }
   if (!sets.length) return jsonResult({ error: "Nothing to update" }, 400);
 
@@ -2195,7 +2228,7 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
         if (!dryRun && context.postId) {
           if (!existing.fb_post_id) await env.DB.prepare('UPDATE facebook_photos SET fb_post_id=? WHERE fb_photo_id=? AND fb_post_id IS NULL').bind(context.postId, photo.id).run();
           await refreshPostText(env.DB, task.post);
-          await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message,permalink=excluded.permalink`).bind(context.postId, state.pageId, context.message.slice(0,5000), context.createdTime, context.permalink, existing.project_id, 'existing-photo', source).run();
+          await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message,permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, existing.project_id, 'existing-photo', source).run();
         }
         return { outcome: 'existing', project: improved ? { name: improved.name, reason: improved.reason, action: improved.action } : null };
       }
@@ -2205,9 +2238,9 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       if (!best) throw new Error('Photo has no downloadable image');
       assertFacebookCdnUrl(best.source);
       if (dryRun) return { outcome: 'new', project: { name: project.name, reason: project.reason, action: project.action }, caption: String(photo.name || context.message).slice(0, 200), createdTime: date, potentialManualDuplicates: await duplicateCandidates(photo), visualDuplicatesChecked: false };
-      if (context.postId) await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message, permalink=excluded.permalink`).bind(context.postId, state.pageId, context.message.slice(0, 5000), context.createdTime, context.permalink, project.id, project.reason, source).run();
+      if (context.postId) await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message, permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, project.id, project.reason, source).run();
       await renew?.();
-      const result = await importPhoto(env, { ...photo, album: photo.album || task.album }, { context, projectId: project.id, source, budget: b });
+      const result = await importPhoto(env, { ...photo, album: photo.album || task.album }, { context: { ...context, message: task.post?.message || "" }, projectId: project.id, source, budget: b });
       return { outcome: result.imported ? 'imported' : 'existing', project: { name: project.name, reason: project.reason, action: project.action } };
     },
   });
@@ -2278,7 +2311,7 @@ async function verifyDiscoveredPhotos(env, budget) {
   for (const row of results) {
     if (budget.remaining < 5) break;
     const target = row.fb_post_id ? { item: 'post', post_id: row.fb_post_id } : { item: 'photo', photo_id: row.fb_photo_id };
-    await handleRemoval(env, { ...target, verb: 'remove' }, budget);
+    await handleRemoval(env, { ...target, verb: 'remove', source: 'reconcile' }, budget);
     await setState(env.DB, 'discovery_verify_after', row.fb_photo_id);
   }
   if (!results.length) await setState(env.DB, 'discovery_verify_after', '');
