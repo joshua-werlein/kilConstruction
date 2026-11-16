@@ -13,7 +13,8 @@ type Photo = {
     name: string;
     thumb: string;
     full: string;
-    description?: string;
+    description?: string | null;
+    source?: string;
 };
 
 type ProjectMeta = {
@@ -151,7 +152,7 @@ function slugToTitle(s: string): string {
 }
 const metaDescription =
     albumDesc
-        ? `${albumName} – ${albumDesc}`
+        ? `${albumName} – ${albumDesc.replace(/\s+/g, " ").slice(0, 160)}`
         : `${albumName} – Remodeling project photos by KIL Construction. Explore before-and-after shots and details from this remodel.`;
 
 ---
@@ -160,7 +161,7 @@ const metaDescription =
     <h1 class="page-head container">{albumName}</h1>
 
     {albumDesc && (
-        <p class="container muted" style="margin-top:-6px;margin-bottom:14px;">
+        <p class="container muted" style="margin-top:-6px;margin-bottom:14px;white-space:pre-line;">
             {albumDesc}
         </p>
     )}
@@ -181,7 +182,7 @@ const metaDescription =
                     // 4) Prefer item description; fall back to cleaned filename; then to a generic label
                     const sceneLabel =
                         (i.description && i.description.trim()) ||
-                        cleanedName ||
+                        (i.source !== "facebook" && cleanedName) ||
                         `project photo ${index + 1}`;
 
                     const alt = `${base} – ${sceneLabel}`;
@@ -200,7 +201,7 @@ const metaDescription =
                                     sizes="(max-width: 560px) 90vw, (max-width: 1200px) 45vw, 28vw"
                                 />
                             </a>
-                            {(i.description || i.name) && (
+                            {(i.description || (i.source !== "facebook" && i.name)) && (
                                 <figcaption class="caption">
                                     {i.description || cropName(i.name)}
                                 </figcaption>

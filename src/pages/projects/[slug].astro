@@ -15,7 +15,8 @@ type Photo = {
     thumb: string;
     full: string;
     createdTime: string;
-    description?: string;
+    description?: string | null;
+    source?: string;
     };
 
 const { slug } = Astro.params as { slug: string };
@@ -104,13 +105,13 @@ const cropName = (s: string) =>
         .trim();
 const metaDescription =
     projectDesc
-        ? `${projectName} – ${projectDesc}`
+        ? `${projectName} – ${projectDesc.replace(/\s+/g, " ").slice(0, 160)}`
         : `${projectName} from KIL Construction – view project photos and details.`;
 ---
 
 <MainLayout title={projectName} description={metaDescription} noSticky>
     <h1 class="page-head container">{projectName}</h1>
-    {projectDesc && <p class="container muted" style="margin-top:-6px;margin-bottom:14px;">{projectDesc}</p>}
+    {projectDesc && <p class="container muted" style="margin-top:-6px;margin-bottom:14px;white-space:pre-line;">{projectDesc}</p>}
 
     <section class="container page-section">
         {items.length > 0 ? (
@@ -127,7 +128,7 @@ const metaDescription =
                     // 4) Prefer item description; fall back to cleaned filename; then to a generic label
                     const sceneLabel =
                         (i.description && i.description.trim()) ||
-                        cleanedName ||
+                        (i.source !== "facebook" && cleanedName) ||
                         `project photo ${index + 1}`;
 
                     const alt = `${base} – ${sceneLabel}`;
@@ -146,7 +147,7 @@ const metaDescription =
                                     sizes="(max-width: 560px) 90vw, (max-width: 1200px) 45vw, 28vw"
                                 />
                             </a>
-                            {(i.description || i.name) && (
+                            {(i.description || (i.source !== "facebook" && i.name)) && (
                                 <figcaption class="caption">
                                     {i.description || cropName(i.name)}
                                 </figcaption>

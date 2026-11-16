@@ -10,7 +10,7 @@ import path from "node:path";
 import { getPlatformProxy } from "wrangler";
 
 import worker from "../src/index.js";
-import { processPendingEvents, handleFacebookScheduled, purgeExpiredRemovals, runRetention, redact } from "../src/facebook.js";
+import { processPendingEvents, handleFacebookScheduled, purgeExpiredRemovals, runRetention, redact, runFacebookDiscovery } from "../src/facebook.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
@@ -41,6 +41,7 @@ function makeEnv(overrides = {}) {
     FB_PAGE_ID: PAGE_ID,
     FB_GRAPH_VERSION: "v26.0",
     FB_AUTO_IMPORT: "false",
+    FB_HISTORICAL_IMPORT_ENABLED: "true",
     FB_INTEGRATION_ENABLED: "true",
     // Real limiters (3 writes/min) would throttle the suite; limits aren't under test.
     READ_LIMITER: { limit: async () => ({ success: true }) },
@@ -190,7 +191,7 @@ before(async () => {
   });
   baseEnv = proxy.env;
 
-  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql"]) {
+  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql"]) {
     const sql = await readFile(path.join(repoRoot, "migrations", file), "utf8");
     const statements = sql
       .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
@@ -229,12 +230,13 @@ beforeEach(async () => {
     }
     const img = imageFixtures.get(url.toString());
     if (img?.status) return new Response("err", { status: img.status });
+    if (img?.beforeReturn) await img.beforeReturn();
     if (img) return new Response(img.bytes, { headers: { "Content-Type": img.type || "image/jpeg" } });
     return new Response("nope", { status: 404 });
   };
 
   await baseEnv.DB.batch(
-    ["facebook_webhook_events", "facebook_photos", "facebook_posts", "facebook_projects", "facebook_sync_state"]
+    ["facebook_discovery_jobs", "facebook_album_mappings", "facebook_albums", "facebook_webhook_events", "facebook_photos", "facebook_posts", "facebook_projects", "facebook_sync_state"]
       .map((t) => baseEnv.DB.prepare(`DELETE FROM ${t}`))
   );
   for (const b of [baseEnv.GALLERY_BUCKET, baseEnv.PRIVATE_BUCKET]) {
@@ -652,7 +654,8 @@ test("signed event imports in waitUntil: master private, public copy, visible ga
   const page = await getJson("/api/gallery-api?project=johnson-backyard-deck");
   assert.equal(page.project.name, "Johnson Backyard Deck");
   assert.equal(page.items.length, 3);
-  assert.equal(page.items[0].description, "Johnson backyard deck");
+  assert.equal(page.project.description, "Johnson backyard deck");
+  assert.ok(page.items.every(i => i.description === null));
   assert.match(page.items[0].name, /^2026-10-01_\d+\.jpg$/);
 
   const [post] = await rows("SELECT * FROM facebook_posts");
@@ -718,7 +721,8 @@ test("ambiguous posts appear in Recent Project Updates", async () => {
   assert.equal(recent.name, "Recent Project Updates");
   const page = await getJson("/api/gallery-api?project=recent-project-updates");
   assert.equal(page.items.length, 3);
-  assert.ok(page.items.some((i) => /^Posted October 1, 2026$/.test(i.description)), "fallback caption");
+  assert.equal(page.project.description, "", "a collection does not represent one project");
+  assert.ok(page.items.some((i) => i.description === null));
 });
 
 test("a completed-build post with several photos creates a new project", async () => {
@@ -1087,7 +1091,7 @@ test("edited captions update the post and photos that showed the old text", asyn
   const post = stubPost(`${PAGE_ID}_600`, ["8001", "8002"], { message: "Smith porch in progress" });
   await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_600`)]));
   // 8002 has its own Facebook caption, which an edit to the post must not replace.
-  await baseEnv.DB.prepare(`UPDATE facebook_photos SET caption = 'Own caption' WHERE fb_photo_id = '8002'`).run();
+  await baseEnv.DB.prepare(`UPDATE facebook_photos SET caption = 'Own caption', caption_from_post = 0 WHERE fb_photo_id = '8002'`).run();
 
   graphFixtures.set(post.id, { ...post, message: "Smith porch finished" });
   const before = fetchCalls.length;
@@ -1101,7 +1105,7 @@ test("edited captions update the post and photos that showed the old text", asyn
   assert.deepEqual(caps, { 8001: "Smith porch finished", 8002: "Own caption" });
   assert.equal((await rows("SELECT * FROM facebook_photos")).length, 2, "no duplicates");
   const items = (await getJson("/api/gallery-api?project=recent-project-updates")).items;
-  assert.ok(items.some((i) => i.description === "Smith porch finished"));
+  assert.ok(items.some((i) => i.description === null));
 });
 
 test("an edited photo event re-reads the post instead of short-circuiting", async () => {
@@ -1604,4 +1608,566 @@ test("the inbox stores no visitor content and no message text, and drops old pro
   await runRetention(baseEnv);
   assert.equal((await rows("SELECT * FROM facebook_webhook_events WHERE verb = 'edited'")).length, 0);
   assert.equal((await rows("SELECT * FROM facebook_webhook_events WHERE verb = 'add'")).length, 1);
+});
+
+
+// Complete album discovery. All Graph/CDN traffic remains mocked.
+function discoveryFixtures(ids = ['9701'], { albumId = '970', name = 'Harper Barn', created } = {}) {
+  const album = { id: albumId, name, description: 'Project album', from: { id: PAGE_ID } };
+  graphFixtures.set(`${PAGE_ID}/albums`, { data: [album] });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [] });
+  for (const id of ids) stubPhoto(id, { album, created });
+  graphFixtures.set(`${albumId}/photos`, url => {
+    const offset = Number((url.searchParams.get('after') || 'C0').slice(1));
+    const next = offset + 10;
+    return { data: ids.slice(offset, next).map(id => ({ id })), ...(next < ids.length ? { paging: { cursors: { after: `C${next}` }, next: `https://graph.facebook.com/v26.0/${albumId}/photos?after=C${next}&access_token=${PAGE_TOKEN}` } } : {}) };
+  });
+  return album;
+}
+async function scanAll({ dry = true, env = makeEnv(), mappings = {}, state, onBatch = () => {} } = {}) {
+  const report = { albums: [], posts: [], photos: [], errors: [], discoveredPhotos: [], duplicateCandidates: [], warnings: [], complete: false, partial: false };
+  for (let n = 0; n < 500; n++) {
+    const batch = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, env, body: { discovery: true, dryRun: dry, authorizeHistorical: !dry, mappings, ...(state ? { state } : {}) } });
+    assert.equal(batch.busy, undefined, 'no unexpected lease or retry delay');
+    for (const key of ['albums', 'posts', 'photos', 'errors', 'discoveredPhotos', 'duplicateCandidates', 'warnings']) report[key].push(...(batch[key] || []));
+    report.partial ||= !!batch.partial;
+    onBatch(batch);
+    state = batch.nextState;
+    if (batch.complete || batch.errors.length) { report.complete = batch.complete; return report; }
+  }
+  throw new Error('Discovery did not terminate');
+}
+
+test('complete discovery: album-only history previews without storage writes or downloads', async () => {
+  discoveryFixtures(['9701', '9702']);
+  const r = await scanAll();
+  assert.equal(r.complete, true);
+  assert.equal(r.albums.length, 1);
+  assert.deepEqual(r.photos.map(p => p.id), ['9701', '9702']);
+  assert.ok(r.photos.every(p => p.origin === 'album' && p.outcome === 'new'));
+  for (const table of ['facebook_photos', 'facebook_projects', 'facebook_posts', 'facebook_sync_state', 'facebook_discovery_jobs', 'facebook_album_mappings', 'facebook_albums']) assert.equal((await rows(`SELECT * FROM ${table}`)).length, 0, table);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith('fbcdn.net')));
+  assert.ok(!JSON.stringify(r).includes(PAGE_TOKEN), 'Graph paging token never returned');
+});
+
+test('complete discovery: 125 album photos paginate, checkpoint, and import exactly once', async () => {
+  const ids = Array.from({ length: 125 }, (_, i) => String(97000 + i));
+  discoveryFixtures(ids);
+  const r = await scanAll({ dry: false });
+  assert.equal(r.complete, true);
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 125);
+  assert.equal((await rows('SELECT * FROM facebook_projects')).length, 1);
+  assert.equal((await rows('SELECT * FROM facebook_albums'))[0].description, 'Project album');
+  assert.equal((await keys(baseEnv.GALLERY_BUCKET)).length, 125);
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 125);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 125);
+});
+
+test('complete discovery: album listing pages and post overlap use one photo record', async () => {
+  const album = discoveryFixtures(['9701', '9702']);
+  const post = stubPost(`${PAGE_ID}_980`, ['9702', '9703'], { album, message: 'Harper Barn update' });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  graphFixtures.set(`${PAGE_ID}/albums`, url => url.searchParams.get('after') ? { data: [{ id: '971', name: 'Second project' }] } : { data: [album], paging: { cursors: { after: 'NEXT' }, next: `https://graph.facebook.com/v26.0/${PAGE_ID}/albums?after=NEXT` } });
+  graphFixtures.set('971/photos', { data: [{ id: '9703' }] });
+  const preview = await scanAll();
+  assert.equal(preview.albums.length, 2);
+  assert.equal(new Set(preview.photos.map(p => p.id)).size, 3);
+  assert.ok(preview.photos.filter(p => p.id === '9702').some(p => p.origin === 'post'));
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 3);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 3);
+});
+
+test('complete discovery: attachments and nested subattachments follow every returned page', async () => {
+  discoveryFixtures([]);
+  for (const id of ['9711', '9712', '9713']) stubPhoto(id);
+  const post = { id: `${PAGE_ID}_981`, from: { id: PAGE_ID }, message: 'Progress', attachments: { data: [{ type: 'album', subattachments: { data: [{ type: 'photo', target: { id: '9711' } }], paging: { next: `https://graph.facebook.com/v26.0/981/subattachments?after=SUB`, cursors: { after: 'SUB' } } } }], paging: { next: `https://graph.facebook.com/v26.0/${PAGE_ID}_981/attachments?after=ATT`, cursors: { after: 'ATT' } } } };
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  graphFixtures.set('981/subattachments', { data: [{ type: 'photo', target: { id: '9712' } }] });
+  graphFixtures.set(`${PAGE_ID}_981/attachments`, { data: [{ type: 'photo', target: { id: '9713' } }] });
+  const r = await scanAll();
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(new Set(r.photos.map(p => p.id)), new Set(['9711', '9712', '9713']));
+});
+
+test('complete discovery: errors retain the exact cursor; tokens are redacted', async () => {
+  discoveryFixtures();
+  graphFixtures.set('970/photos', { status: 429, body: { error: { code: 4, message: `Rate limited access_token=${PAGE_TOKEN}` } } });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.equal(r.errors.length, 1);
+  assert.ok(!JSON.stringify(r).includes(PAGE_TOKEN));
+  const job = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, body: { discovery: true, dryRun: false, authorizeHistorical: true } });
+  assert.equal(job.complete, false);
+  const [stored] = await rows('SELECT * FROM facebook_discovery_jobs');
+  assert.equal(JSON.parse(stored.state).tasks[0].id, '970');
+  assert.equal(stored.attempts, 1);
+  assert.ok(stored.next_attempt_at > Date.now());
+  graphFixtures.set('970/photos', { data: [{ id: '9701' }] });
+  await baseEnv.DB.prepare('UPDATE facebook_discovery_jobs SET next_attempt_at=0').run();
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+});
+
+test('complete discovery: malicious pagination cannot send credentials to another host', async () => {
+  discoveryFixtures();
+  graphFixtures.set(`${PAGE_ID}/albums`, { data: [], paging: { next: 'https://evil.example/steal?after=X', cursors: { after: 'X' } } });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.match(r.errors[0].error, /Unsafe/);
+  assert.ok(fetchCalls.every(c => c.url.hostname !== 'evil.example'));
+});
+
+test('complete discovery: generic albums use Recent; named albums link to manual galleries', async () => {
+  await baseEnv.GALLERY_BUCKET.put('Projects/Harper Barn/old.jpg', 'manual');
+  discoveryFixtures(['9701'], { name: 'Harper Barn - progress' });
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT linked_prefix FROM facebook_projects'))[0].linked_prefix, 'Projects/Harper Barn/');
+  assert.equal(await (await baseEnv.GALLERY_BUCKET.get('Projects/Harper Barn/old.jpg')).text(), 'manual');
+  const [photo] = await rows('SELECT * FROM facebook_photos');
+  await call(`${BASE}/admin/photo-update`, { method: 'POST', admin: true, body: { photoIds: [photo.fb_photo_id], hidden: true } });
+  const again = await scanAll({ dry: false });
+  assert.ok(again.photos.some(p => p.outcome === 'suppressed'));
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 1);
+});
+
+test('complete discovery: explicit album destination applies only to new imports', async () => {
+  discoveryFixtures();
+  await scanAll({ dry: false, mappings: { '970': 'recent' } });
+  assert.equal((await rows('SELECT kind FROM facebook_projects'))[0].kind, 'recent');
+  const r = await call(`${BASE}/backfill`, { method: 'POST', admin: true, body: { discovery: true, dryRun: false } });
+  assert.equal(r.status, 400);
+  assert.equal((await call(`${BASE}/backfill`, { method: 'POST', body: { discovery: true, dryRun: false, authorizeHistorical: true } })).status, 401);
+});
+
+test('complete discovery: reconciliation establishes future-only cutoff and recovers a missed album upload', async () => {
+  discoveryFixtures(['9701'], { created: '2020-01-01T00:00:00+0000' });
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await handleFacebookScheduled(env);
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 0, 'no unauthorized history');
+  const cutoff = JSON.parse((await rows('SELECT state FROM facebook_discovery_jobs'))[0].state).cutoff;
+  assert.ok(cutoff);
+  discoveryFixtures(['9701', '9702'], { created: new Date(Date.now() + 1000).toISOString() });
+  await baseEnv.DB.prepare('UPDATE facebook_discovery_jobs SET next_attempt_at=0').run();
+  for (let n = 0; n < 5 && !(await rows('SELECT * FROM facebook_photos')).length; n++) await handleFacebookScheduled(env);
+  assert.ok((await rows('SELECT * FROM facebook_photos')).some(p => p.fb_photo_id === '9702'));
+  assert.equal(JSON.parse((await rows('SELECT state FROM facebook_discovery_jobs'))[0].state).cutoff, cutoff);
+});
+
+test('complete discovery: a lease prevents concurrent history scans and expires for recovery', async () => {
+  discoveryFixtures();
+  const [a, b] = await Promise.all([runFacebookDiscovery(makeEnv(), { dryRun: false, authorizeHistorical: true }), runFacebookDiscovery(makeEnv(), { dryRun: false, authorizeHistorical: true })]);
+  assert.ok([a, b].some(r => r.body.busy));
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+  await baseEnv.DB.prepare("UPDATE facebook_discovery_jobs SET lease_token='dead',lease_until=1").run();
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+});
+
+test('complete discovery: invalid CDN data fails durably and never publishes', async () => {
+  discoveryFixtures();
+  imageFixtures.set('https://scontent.xx.fbcdn.net/big/9701.jpg', { bytes: new TextEncoder().encode('<svg/>'), type: 'image/svg+xml' });
+  const r = await scanAll({ dry: false });
+  assert.equal(r.complete, false);
+  assert.equal((await rows('SELECT status FROM facebook_photos'))[0].status, 'failed');
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+  assert.equal((await rows('SELECT attempts FROM facebook_discovery_jobs'))[0].attempts, 1);
+});
+
+test('complete discovery: removed and permanently deleted photos stay suppressed', async () => {
+  discoveryFixtures();
+  await scanAll({ dry: false });
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET hidden=1,hidden_reason='removed_on_facebook',removed_on_facebook_at='2026-01-01' WHERE fb_photo_id='9701'").run();
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 1);
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET master_key=NULL WHERE fb_photo_id='9701'").run();
+  assert.ok((await scanAll({ dry: false })).photos.some(p => p.outcome === 'suppressed'));
+});
+
+test('complete discovery: enabled webhook imports a photo-only event once without a feed post', async () => {
+  discoveryFixtures();
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await postWebhook(env, feedPayload([photoAdd('9701', { post_id: undefined })]));
+  await postWebhook(env, feedPayload([photoAdd('9701', { post_id: undefined })]));
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 1);
+});
+
+test('complete discovery: missing ownership and unsupported cursors are explicit incomplete results', async () => {
+  discoveryFixtures();
+  graphFixtures.set('9701', { ...graphFixtures.get('9701'), from: undefined });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.match(r.errors[0].error, /ownership/);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
+});
+
+
+test('complete discovery: generic albums never become construction projects', async () => {
+  discoveryFixtures(['9701'], { name: 'Timeline Photos' });
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT kind,name FROM facebook_projects'))[0].kind, 'recent');
+});
+
+test('complete discovery: an admin album mapping survives future uploads', async () => {
+  discoveryFixtures(['9701']);
+  await scanAll({ dry: false, mappings: { '970': 'recent' } });
+  discoveryFixtures(['9701', '9702']);
+  await scanAll({ dry: false });
+  assert.equal((await rows('SELECT * FROM facebook_projects')).length, 1);
+  assert.equal((await rows('SELECT kind FROM facebook_projects'))[0].kind, 'recent');
+  assert.equal((await rows('SELECT locked FROM facebook_album_mappings'))[0].locked, 1);
+});
+
+test('complete discovery: similar album names do not fork an existing manual project', async () => {
+  await baseEnv.GALLERY_BUCKET.put('Projects/Harper Barn/old.jpg', 'manual');
+  discoveryFixtures(['9701'], { name: 'Harper Big Barn' });
+  const r = await scanAll();
+  assert.equal(r.photos[0].project.action, 'recent', 'uncertain near-match requires review');
+  assert.equal((await rows('SELECT * FROM facebook_projects')).length, 0);
+});
+
+test('complete discovery: paginated webhook work checkpoints rather than losing large posts', async () => {
+  const ids = Array.from({ length: 35 }, (_, i) => String(98000 + i));
+  const album = discoveryFixtures(ids);
+  const post = stubPost(`${PAGE_ID}_999`, ids, { album });
+  graphFixtures.set(`${post.id}/attachments`, { data: post.attachments.data });
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await postWebhook(env, feedPayload([postAdd(post.id)]));
+  let events = await rows('SELECT * FROM facebook_webhook_events');
+  assert.equal(events[0].status, 'retry');
+  assert.ok(events[0].discovery_state);
+  for (let n = 0; n < 8 && events[0].status !== 'done'; n++) {
+    await processPendingEvents(env);
+    events = await rows('SELECT * FROM facebook_webhook_events');
+  }
+  assert.equal(events[0].status, 'done');
+  assert.equal((await rows('SELECT * FROM facebook_photos')).length, 35);
+  assert.equal(fetchCalls.filter(c => c.url.hostname.endsWith('fbcdn.net')).length, 35);
+});
+
+test('complete discovery: preview identifies metadata duplicate candidates without downloading manual files', async () => {
+  discoveryFixtures();
+  await baseEnv.GALLERY_BUCKET.put('Projects/Existing/9701.jpg', 'manual');
+  const r = await scanAll();
+  assert.deepEqual(r.duplicateCandidates, [{ id: '9701', key: 'Projects/Existing/9701.jpg' }]);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith('fbcdn.net')));
+  assert.equal(await (await baseEnv.GALLERY_BUCKET.get('Projects/Existing/9701.jpg')).text(), 'manual');
+});
+
+test('historical preview bounds Graph and paginated R2 reads across a large scan', async () => {
+  const ids = Array.from({ length: 399 }, (_, n) => String(n + 80000));
+  const album = discoveryFixtures(ids);
+  const post = stubPost(`${PAGE_ID}_800`, [ids[0], '89999'], { album, message: 'Harper Barn update' });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  let inventoryReads = 0;
+  const gallery = {
+    async list(options) {
+      if (!options.include) return baseEnv.GALLERY_BUCKET.list(options);
+      inventoryReads++;
+      assert.equal(options.limit, 200);
+      if (options.prefix === 'Projects/' && !options.cursor) return { objects: [], truncated: true, cursor: 'page-two' };
+      if (options.cursor === 'page-two') return { objects: [{ key: 'Projects/Harper Barn/cover.jpg', customMetadata: { fbPhotoId: ids[0] } }] };
+      return { objects: [] };
+    },
+  };
+  let previousGraphReads = 0;
+  let previousInventoryReads = 0;
+  const report = await scanAll({
+    env: makeEnv({ GALLERY_BUCKET: gallery, FB_HISTORICAL_IMPORT_ENABLED: 'false' }),
+    onBatch(batch) {
+      const graphReads = fetchCalls.length - previousGraphReads;
+      const r2Reads = inventoryReads - previousInventoryReads;
+      assert.ok(graphReads <= 4);
+      assert.ok(r2Reads <= 1);
+      assert.ok(!graphReads || !r2Reads, 'Graph and inventory stay in separate requests');
+      assert.ok(batch.complete || batch.nextState);
+      previousGraphReads = fetchCalls.length;
+      previousInventoryReads = inventoryReads;
+    },
+  });
+  assert.equal(report.complete, true);
+  assert.equal(report.partial, false);
+  assert.equal(inventoryReads, 5);
+  assert.equal(new Set(report.discoveredPhotos.map(p => p.id)).size, 400);
+  assert.equal(report.photos.find(p => p.id === '89999').sourcePostId, post.id);
+  assert.deepEqual(report.duplicateCandidates, [{ id: ids[0], key: 'Projects/Harper Barn/cover.jpg' }]);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith('fbcdn.net')));
+  assert.deepEqual(await rows('SELECT * FROM facebook_photos'), []);
+  assert.deepEqual(await rows('SELECT * FROM facebook_discovery_jobs'), []);
+});
+
+test('historical preview reports Graph 503 separately and retries from the exact failed photo', async () => {
+  discoveryFixtures(['9701', '9702']);
+  graphFixtures.set('9701', { status: 503, body: { error: { code: 2, message: `access_token=${PAGE_TOKEN}` } } });
+  const payload = { discovery: true, dryRun: true };
+  const failed = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, body: payload });
+  assert.equal(failed.complete, false);
+  assert.equal(failed.partial, true);
+  assert.equal(failed.errors[0].httpStatus, 503);
+  assert.equal(failed.errors[0].graphCode, 2);
+  assert.deepEqual(failed.discoveredPhotos.map(p => p.id), ['9701', '9702']);
+  assert.equal(failed.nextState.tasks[0].id, '9701');
+  assert.ok(!JSON.stringify(failed).includes(PAGE_TOKEN));
+  stubPhoto('9701', { album: { id: '970', name: 'Harper Barn' } });
+  const start = fetchCalls.length;
+  const single = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, body: { ...payload, state: failed.nextState, singleStep: true } });
+  assert.equal(fetchCalls.length - start, 1);
+  assert.deepEqual(single.photos.map(p => p.id), ['9701']);
+  const resumed = await scanAll({ state: single.nextState });
+  assert.equal(resumed.complete, true);
+  assert.deepEqual(resumed.photos.map(p => p.id), ['9702']);
+});
+
+test('complete discovery: unsupported cursors and forged task paths fail closed', async () => {
+  discoveryFixtures();
+  graphFixtures.set(`${PAGE_ID}/albums`, { data: [], paging: { next: `https://graph.facebook.com/v26.0/${PAGE_ID}/albums` } });
+  const r = await scanAll();
+  assert.equal(r.complete, false);
+  assert.match(r.errors[0].error, /cursor/);
+  const invalid = await call(`${BASE}/backfill`, { method: 'POST', admin: true, body: { discovery: true, state: { version: 1, pageId: PAGE_ID, cutoff: null, tasks: [{ edge: 'photos', id: '../me' }] } } });
+  assert.equal(invalid.status, 400);
+});
+
+test('complete discovery: album access health checks are read-only and do not assert untested permissions', async () => {
+  discoveryFixtures();
+  graphFixtures.set('me', { id: PAGE_ID, name: 'KIL Construction' });
+  graphFixtures.set(`${PAGE_ID}/subscribed_apps`, { data: [] });
+  const h = await getJson(`${BASE}/admin/health`, { admin: true, env: makeEnv({ FB_DISCOVERY_ENABLED: 'true' }) });
+  assert.equal(h.albumAccess, 'ok');
+  assert.equal(h.albumPhotoAccess, 'ok');
+  assert.ok(graphCalls().every(c => (c.init.method || 'GET') === 'GET'));
+  assert.equal((await rows('SELECT * FROM facebook_discovery_jobs')).length, 0);
+});
+
+test('complete discovery: an ambiguous lookup only triggers retention when corroborated by a removal webhook', async () => {
+  discoveryFixtures();
+  await scanAll({ dry: false });
+  graphFixtures.set('9701', { status: 400, body: { error: { code: 100, error_subcode: 33, message: 'Object unavailable' } } });
+  await runFacebookDiscovery(makeEnv(), { dryRun: false }, { mode: 'reconcile' });
+  const [unchanged] = await rows('SELECT * FROM facebook_photos');
+  assert.equal(unchanged.hidden, 0);
+  assert.equal(unchanged.purge_after, null);
+  await postWebhook(autoEnv(), feedPayload([photoAdd('9701', { verb: 'remove', post_id: undefined })]));
+  const [photo] = await rows('SELECT * FROM facebook_photos');
+  assert.equal(photo.hidden_reason, 'removed_on_facebook');
+  assert.ok(photo.purge_after);
+  assert.ok(await baseEnv.PRIVATE_BUCKET.head(photo.master_key));
+  assert.equal(await baseEnv.GALLERY_BUCKET.head('Facebook/9701.jpg'), null);
+});
+
+
+test('complete discovery: a deletion request racing a download cannot resurrect the photo', async () => {
+  discoveryFixtures();
+  const img = imageFixtures.get('https://scontent.xx.fbcdn.net/big/9701.jpg');
+  img.beforeReturn = async () => {
+    delete img.beforeReturn;
+    await adminPost('purge', { confirm: 'PERMANENTLY DELETE', photoIds: ['9701'] });
+  };
+  await scanAll({ dry: false });
+  const [photo] = await rows('SELECT * FROM facebook_photos');
+  assert.equal(photo.hidden_reason, 'deleted');
+  assert.equal(photo.master_key, null);
+  assert.equal(photo.caption, null);
+  assert.equal(await baseEnv.PRIVATE_BUCKET.head('Facebook/9701.jpg'), null);
+  assert.equal(await baseEnv.GALLERY_BUCKET.head('Facebook/9701.jpg'), null);
+});
+
+
+test('complete discovery: an interrupted stale photo claim is retried even with auto-import paused', async () => {
+  discoveryFixtures();
+  await baseEnv.DB.prepare("INSERT INTO facebook_photos(fb_photo_id,page_id,source,status,updated_at) VALUES ('9701',?,'backfill','importing','2000-01-01')").bind(PAGE_ID).run();
+  await scanAll({ dry: false, env: makeEnv({ FB_AUTO_IMPORT: 'false' }) });
+  assert.equal((await rows('SELECT status FROM facebook_photos'))[0].status, 'imported');
+  assert.ok(await baseEnv.GALLERY_BUCKET.head('Facebook/9701.jpg'));
+});
+
+test('complete discovery: an explicit republish event restores only Facebook-removed photos', async () => {
+  const album = discoveryFixtures();
+  const post = stubPost(`${PAGE_ID}_991`, ['9701'], { album });
+  graphFixtures.set(`${post.id}/attachments`, { data: post.attachments.data });
+  await scanAll({ dry: false });
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET hidden=1,hidden_reason='removed_on_facebook',removed_on_facebook_at='2026-01-01' WHERE fb_photo_id='9701'").run();
+  post.is_published = true;
+  post.is_hidden = false;
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
+  await postWebhook(env, feedPayload([postAdd(post.id, { verb: 'edited' })]));
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 0);
+  await adminPost('photo-update', { photoIds: ['9701'], hidden: true });
+  await postWebhook(env, feedPayload([postAdd(post.id, { verb: 'edited', message: 'another edit' })]));
+  assert.equal((await rows('SELECT hidden FROM facebook_photos'))[0].hidden, 1);
+});
+
+
+test('complete discovery: large post captions are stored once per continuation', async () => {
+  discoveryFixtures([]);
+  const ids = Array.from({ length: 125 }, (_, i) => String(99000 + i));
+  const post = stubPost(`${PAGE_ID}_992`, ids, { message: 'Long construction update '.repeat(200) });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  const preview = await scanAll();
+  assert.equal(preview.complete, true);
+  assert.equal(new Set(preview.photos.map(p => p.id)).size, 125);
+  assert.equal(preview.errors.length, 0);
+});
+
+
+test('complete discovery: album-first discovery can improve an automatic Recent assignment using later post evidence', async () => {
+  await baseEnv.GALLERY_BUCKET.put('Projects/Harper Barn/old.jpg', 'manual');
+  const album = discoveryFixtures(['9701'], { name: 'Timeline Photos' });
+  const post = stubPost(`${PAGE_ID}_993`, ['9701'], { album, message: 'Harper Barn progress' });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  await scanAll({ dry: false });
+  const [target] = await rows('SELECT p.linked_prefix FROM facebook_photos ph JOIN facebook_projects p ON p.id=ph.project_id');
+  assert.equal(target.linked_prefix, 'Projects/Harper Barn/');
+  assert.equal((await rows('SELECT * FROM facebook_posts')).length, 1);
+  const repeat = await scanAll();
+  assert.ok(repeat.photos.every(p => p.outcome === 'existing'));
+});
+
+test("project descriptions: legacy Ganz Garage shape displays one description without rewriting eight photos", async () => {
+  const message = "Ganz Garage framing is complete.\n\nThe next step is the roof.";
+  const ids = Array.from({ length: 8 }, (_, i) => String(99400 + i));
+  const album = { id: "994", name: "Ganz Garage" };
+  const post = stubPost(`${PAGE_ID}_994`, ids, { message, album });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  await baseEnv.DB.prepare("UPDATE facebook_photos SET caption_from_post=NULL").run();
+  const before = await rows("SELECT fb_photo_id, caption, public_key FROM facebook_photos ORDER BY fb_photo_id");
+  const page = await getJson("/api/gallery-api?project=ganz-garage");
+  assert.equal(page.project.description, message);
+  assert.equal(page.items.length, 8);
+  assert.equal(new Set(page.items.map(i => i.id)).size, 8);
+  assert.ok(page.items.every(i => i.description === null));
+  assert.deepEqual(await rows("SELECT fb_photo_id, caption, public_key FROM facebook_photos ORDER BY fb_photo_id"), before);
+  assert.equal((await keys(baseEnv.GALLERY_BUCKET)).length, 8);
+});
+
+test("project descriptions: additional posts including older backfill do not replace the first description", async () => {
+  const album = { id: "995", name: "Miller Garage" };
+  const first = stubPost(`${PAGE_ID}_995`, ["99501"], { message: "First project description", album });
+  await postWebhook(autoEnv(), feedPayload([postAdd(first.id)]));
+  const later = stubPost(`${PAGE_ID}_996`, ["99502", "99503"], { message: "An older post discovered later", album, created: "2020-03-01T00:00:00+0000" });
+  graphFixtures.get("99503").name = "Inspecting the south wall.\nReady for siding.";
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [later] });
+  await getJson(`${BASE}/backfill`, { method: "POST", body: { dryRun: false }, admin: true });
+  const page = await getJson("/api/gallery-api?project=miller-garage");
+  assert.equal(page.project.description, first.message);
+  assert.deepEqual(page.items.filter(i => i.description).map(i => i.description), ["Inspecting the south wall.\nReady for siding."]);
+});
+
+test("project descriptions: manual, blank and automatic choices work for linked manual galleries", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Projects/Miller Garage/manual.jpg", "manual");
+  const post = stubPost(`${PAGE_ID}_997`, ["99701"], { message: "Miller Garage progress" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id)]));
+  const [p] = await rows("SELECT id FROM facebook_projects");
+  const body = { projectId: p.id, description: "Our custom description" };
+  assert.equal((await call(`${BASE}/admin/project-update`, { method: "POST", body })).status, 401);
+  assert.equal((await call(`${BASE}/admin/project-update`, { method: "POST", admin: true, body: { ...body, description: {} } })).status, 400);
+  await adminPost("project-update", body);
+  post.message = "Miller Garage progress, edited";
+  await postWebhook(autoEnv(), feedPayload([postAdd(post.id, { verb: "edited" })]));
+  const getPage = () => getJson("/api/gallery-api?project=miller-garage");
+  let page = await getPage();
+  assert.equal(page.project.description, body.description);
+  assert.equal(page.items.length, 2);
+  assert.equal(page.items.find(i => i.source === "facebook").description, null);
+  await adminPost("project-update", { ...body, description: "" });
+  assert.equal((await getPage()).project.description, "");
+  await adminPost("project-update", { ...body, description: null });
+  assert.equal((await getPage()).project.description, post.message);
+  await adminPost("photo-update", { photoIds: ["99701"], hidden: true });
+  page = await getPage();
+  assert.equal(page.project.description, "", "hidden Facebook source never contributes text");
+  assert.equal(page.items.length, 1);
+  assert.equal(await (await baseEnv.GALLERY_BUCKET.get("Projects/Miller Garage/manual.jpg")).text(), "manual");
+});
+
+test("album review: same names remain distinguishable but a linked project and its folder share one target", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Projects/Wheelman_Performance/one.jpg", "manual");
+  await baseEnv.GALLERY_BUCKET.put("Remodels/Wheelman_Performance/two.jpg", "manual");
+  const response = await adminPost("project-create", { name: "Wheelman Performance", category: "projects", linkedPrefix: "Projects/Wheelman_Performance/" });
+  const overview = await getJson(`${BASE}/admin/overview`, { admin: true });
+  const targets = overview.albumTargets.filter(t => t.name === "Wheelman Performance");
+  assert.equal(targets.length, 2);
+  assert.deepEqual(new Set(targets.map(t => t.value)), new Set([`project:${response.project.id}`, "manual:Remodels/Wheelman_Performance/"]));
+  assert.deepEqual(new Set(targets.map(t => t.prefix)), new Set(["Projects/Wheelman_Performance/", "Remodels/Wheelman_Performance/"]));
+});
+
+test("album review: short names and near spellings are suggestions while exact unique destinations can be linked", async () => {
+  for (const name of ["Kiley Enclosed Porch", "Kiley Lean-to", "D. Dahl Porch", "Pfaffe House"]) {
+    await baseEnv.GALLERY_BUCKET.put(`Projects/${name}/old.jpg`, "manual");
+  }
+  await baseEnv.GALLERY_BUCKET.put("Remodels/J&A_Dahl/old.jpg", "manual");
+  for (const [name, expected, choices] of [
+    ["Kiley porch", "review-album", ["Kiley Enclosed Porch", "Kiley Lean-to"]],
+    ["Dahl", "review-album", ["D. Dahl Porch", "J&A Dahl"]],
+    ["Pfafe", "review-album", ["Pfaffe House"]],
+    ["D.Dahl Porch", "album-match", []],
+  ]) {
+    discoveryFixtures(["9701"], { name });
+    const scan = await scanAll();
+    const project = scan.photos[0].project;
+    assert.equal(project.reason, expected);
+    assert.deepEqual(new Set(project.candidates.map(p => p.name)), new Set(choices));
+    assert.equal(project.action, expected === "album-match" ? "link" : "recent");
+  }
+  assert.equal((await rows("SELECT * FROM facebook_projects")).length, 0);
+});
+
+test("album review: exclusions are visible in preview and honored across album and post discovery without downloads", async () => {
+  const album = discoveryFixtures(["9701"]);
+  const post = stubPost(`${PAGE_ID}_998`, ["9701"], { album, message: "Project update" });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  const mappings = { "970": "exclude" };
+  const preview = await scanAll({ mappings });
+  assert.ok(preview.photos.every(p => p.outcome === "excluded"));
+  assert.equal(preview.photos.find(p => p.origin === "album").sourceAlbumId, "970");
+  const run = await scanAll({ mappings, dry: false });
+  assert.ok(run.photos.every(p => p.outcome === "excluded"));
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
+  assert.equal((await rows("SELECT * FROM facebook_album_mappings")).length, 0);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith("fbcdn.net")));
+});
+
+test("preview coverage: Meta returned posts without author IDs; report partial instead of empty success", async () => {
+  discoveryFixtures([]);
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [{ id: `${PAGE_ID}_1` }, { id: "9_1", from: { id: "9" } }] });
+  const result = await getJson(`${BASE}/backfill`, { method:"POST", admin:true, body:{ discovery:true, dryRun:true } });
+  assert.equal(result.complete, false, "manual duplicate inventory is still pending");
+  assert.equal(result.coveragePhase, 'manual-inventory');
+  assert.equal(result.partial, true, "coverage is incomplete");
+  assert.deepEqual(result.coverage, { albumPages:1, postPages:1, postsReturned:2, postsUnknownAuthor:1, postsOtherAuthor:1 });
+  assert.deepEqual(result.posts, []);
+  assert.match(result.warnings[0], /verifiable author/);
+  assert.equal((await rows("SELECT * FROM facebook_discovery_jobs")).length,0);
+});
+
+test("preview coverage: posts edge unexpectedly empty despite an existing imported post", async () => {
+  const p = stubPost(`${PAGE_ID}_999`, ["99801"], { message:"Known Page post" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(p.id)]));
+  discoveryFixtures([]);
+  const result = await getJson(`${BASE}/backfill`, { method:"POST", admin:true, body:{ discovery:true, dryRun:true } });
+  assert.equal(result.partial, true);
+  assert.equal(result.coverage.postPages, 1);
+  assert.equal(result.coverage.postsReturned, 0);
+  assert.match(result.warnings[0], /previously imported post/);
+});
+
+test("preview-only production gate: even authenticated writes fail on both historical paths", async () => {
+  discoveryFixtures(["9701"]);
+  const env = makeEnv({ FB_HISTORICAL_IMPORT_ENABLED: "false" });
+  for (const discovery of [false, true]) {
+    const response = await call(`${BASE}/backfill`, {
+      method: "POST", admin: true, env, body: { discovery, dryRun: false, authorizeHistorical: true },
+    });
+    assert.equal(response.status, 403);
+  }
+  assert.equal(graphCalls().length, 0);
+  const report = await scanAll({ env });
+  assert.equal(report.photos[0].id, "9701");
+  assert.equal((await rows("SELECT * FROM facebook_discovery_jobs")).length, 0);
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
 });

@@ -1,3 +1,5 @@
+import { initCompleteDiscoveryUI, type AlbumTarget } from "./facebook-discovery-ui";
+
 type EventCounts = {
     pending: number;
     processing: number;
@@ -8,7 +10,7 @@ type EventCounts = {
 };
 
 type Failure = {
-    kind: "event" | "photo";
+    kind: "event" | "photo" | "discovery";
     ref: string;
     attempts: number | null;
     error: string | null;
@@ -24,6 +26,7 @@ type FbProject = {
     hidden: boolean;
     linkedPrefix: string | null;
     nameLocked: boolean;
+    descriptionOverride: string | null;
     photoCount: number;
     visibleCount: number;
     publicPath: string | null;
@@ -33,6 +36,9 @@ type ManualProject = { prefix: string; name: string };
 
 type Overview = {
     autoImport: boolean;
+    historicalImportEnabled?: boolean;
+    albumTargets?: AlbumTarget[];
+    discovery?: { mode: string; status: string; attempts: number; next_attempt_at: number }[];
     sync: {
         lastEventReceivedAt: string | null;
         lastSuccessAt: string | null;
@@ -66,6 +72,8 @@ type FbPhoto = {
 };
 
 type Health = {
+    albumAccess?: string;
+    albumPhotoAccess?: string;
     integrationEnabled: boolean;
     autoImport: boolean;
     graphVersion: string | null;
@@ -76,46 +84,6 @@ type Health = {
     page: { id: string | null; name: string | null } | null;
     feedSubscribed: boolean | null;
     errors: string[];
-};
-
-type BackfillPost = {
-    postId: string;
-    createdTime: string | null;
-    caption: string | null;
-    photos: number;
-    newPhotos: number;
-    project: { name: string; action: string; reason: string } | null;
-    ignored: string | null;
-};
-
-type BackfillBatch = {
-    dryRun: boolean;
-    scanned: number;
-    withoutPhotos: number;
-    oldestCreatedTime: string | null;
-    posts: BackfillPost[];
-    imported: number;
-    skipped: number;
-    failed: { postId: string; error: string }[];
-    next: string | null;
-    complete: boolean;
-};
-
-type BackfillReport = {
-    batches: number;
-    scanned: number;
-    withPhotos: number;
-    withoutPhotos: number;
-    oldest: string | null;
-    newest: string | null;
-    photos: number;
-    newPhotos: number;
-    imported: number;
-    duplicates: number;
-    galleries: Map<string, { name: string; action: string; reason: string; posts: number; photos: number }>;
-    recent: number;
-    failed: { postId: string; error: string }[];
-    done: boolean;
 };
 
 type PhotoView = { type: "project"; projectId: number } | { type: "hidden" } | null;
@@ -228,8 +196,8 @@ export default function initFacebookPage() {
             return apiUrl<T>(`${fbBase}${path}`, body);
         }
 
-        async function apiUrl<T>(url: string, body?: unknown): Promise<T> {
-            const init: RequestInit = { credentials: "include" };
+        async function apiUrl<T>(url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+            const init: RequestInit = { credentials: "include", signal };
             if (body !== undefined) {
                 init.method = "POST";
                 init.headers = { "Content-Type": "application/json" };
@@ -239,7 +207,8 @@ export default function initFacebookPage() {
             const data = (await res.json().catch(() => ({}))) as any;
             if (!res.ok) {
                 const msg = typeof data?.error === "string" ? data.error : `HTTP ${res.status}`;
-                throw new Error(msg);
+                const ray = res.headers.get("cf-ray");
+                throw Object.assign(new Error(msg), { status: res.status, rayId: ray && /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(ray) ? ray : undefined });
             }
             return data as T;
         }
@@ -293,6 +262,8 @@ export default function initFacebookPage() {
                         <strong>${escapeHtml(p.failed)} failed</strong>${p.deleted ? ` · ${escapeHtml(p.deleted)} deleted` : ""}${p.scheduledForDeletion ? ` · ${escapeHtml(p.scheduledForDeletion)} removed on Facebook (deleted after ${escapeHtml(sync.removedRetentionDays ?? 30)} days unless the post returns)` : ""}
                     </dd></div>
                 </dl>`;
+
+            if (overview.discovery?.length) syncEl.innerHTML += `<p>${overview.discovery.map(job => `${escapeHtml(job.mode)} scan: ${escapeHtml(job.status)}${job.attempts ? ` (${job.attempts} retry attempt(s))` : ''}`).join(' · ')}</p>`;
 
             const failures = sync.recentFailures || [];
             if (!failures.length) {
@@ -353,6 +324,15 @@ export default function initFacebookPage() {
                         <button type="button" class="admin-button-sm js-rename-save">Save</button>
                         <button type="button" class="admin-button-sm js-rename-cancel">Cancel</button>
                     </div>
+                    <details>
+                        <summary>Project description</summary>
+                        <label>Website description
+                            <textarea class="admin-input js-description" maxlength="5000" rows="4">${escapeHtml(p.descriptionOverride ?? "")}</textarea>
+                        </label>
+                        <small class="hint">${p.descriptionOverride == null ? "Using the first eligible Facebook post." : "Using your saved description."} Save an empty description to hide it.</small>
+                        <button type="button" class="admin-button-sm js-description-save">Save description</button>
+                        <button type="button" class="admin-button-sm js-description-reset"${p.descriptionOverride == null ? " disabled" : ""}>Use Facebook description</button>
+                    </details>
                     ${linkedNote}
                     ${viewLink}`;
 
@@ -421,6 +401,7 @@ export default function initFacebookPage() {
             name?: string;
             hidden?: boolean;
             category?: string;
+            description?: string | null;
         }, successMsg: string) {
             try {
                 await api("/project-update", body);
@@ -621,6 +602,12 @@ export default function initFacebookPage() {
                 }
                 btn.setAttribute("disabled", "");
                 void updateProject({ projectId: id, name }, "Project renamed.");
+            } else if (btn.classList.contains("js-description-save") || btn.classList.contains("js-description-reset")) {
+                const field = tr.querySelector<HTMLTextAreaElement>(".js-description");
+                if (!field) return;
+                const description = btn.classList.contains("js-description-reset") ? null : field.value;
+                btn.disabled = true;
+                void updateProject({ projectId: id, description }, "Project description updated.");
             } else if (btn.classList.contains("js-toggle-hidden")) {
                 btn.setAttribute("disabled", "");
                 const hidden = !project.hidden;
@@ -771,6 +758,7 @@ export default function initFacebookPage() {
                         <div><dt>Page</dt><dd>${escapeHtml(h.page?.name || (h.pageIdConfigured ? "Configured" : "FB_PAGE_ID not set"))}</dd></div>
                         <div><dt>Page token</dt><dd>${yesNo(h.token === "ok", "Working", escapeHtml(tokenText[h.token]))}</dd></div>
                         <div><dt>Webhook feed subscription</dt><dd>${h.feedSubscribed === null ? "Unknown" : yesNo(h.feedSubscribed, "Subscribed", "Not subscribed")}</dd></div>
+                        ${h.albumAccess ? `<div><dt>Album read access</dt><dd>${escapeHtml(h.albumAccess)}</dd></div><div><dt>Album photo read access</dt><dd>${escapeHtml(h.albumPhotoAccess)}</dd></div>` : ''}
                         <div><dt>Secrets set</dt><dd>
                             App secret ${yesNo(h.secrets.appSecret)} · Verify token ${yesNo(h.secrets.verifyToken)} · Page token ${yesNo(h.secrets.pageAccessToken)}
                         </dd></div>
@@ -803,106 +791,13 @@ export default function initFacebookPage() {
 
         // ---------- Historical import ----------
 
-        const backfillEl = document.getElementById("fb-backfill") as HTMLDivElement | null;
-        const dryBtn = document.getElementById("fb-backfill-dry") as HTMLButtonElement | null;
-        const runBtn = document.getElementById("fb-backfill-run") as HTMLButtonElement | null;
-        const stopBtn = document.getElementById("fb-backfill-stop") as HTMLButtonElement | null;
-        let stopRequested = false;
-
-        function emptyReport(): BackfillReport {
-            return { batches: 0, scanned: 0, withPhotos: 0, withoutPhotos: 0, oldest: null, newest: null,
-                photos: 0, newPhotos: 0, imported: 0, duplicates: 0, galleries: new Map(), recent: 0, failed: [], done: false };
-        }
-
-        function addBatch(r: BackfillReport, b: BackfillBatch) {
-            r.batches++;
-            r.scanned += b.scanned || 0;
-            r.withoutPhotos += b.withoutPhotos || 0;
-            r.imported += b.imported || 0;
-            if (b.oldestCreatedTime && (!r.oldest || b.oldestCreatedTime < r.oldest)) r.oldest = b.oldestCreatedTime;
-            for (const p of b.posts) {
-                if (p.createdTime && (!r.newest || p.createdTime > r.newest)) r.newest = p.createdTime;
-                if (p.ignored) continue;
-                r.withPhotos++;
-                r.photos += p.photos;
-                r.newPhotos += p.newPhotos;
-                r.duplicates += Math.max(0, p.photos - p.newPhotos);
-                if (!p.project) continue;
-                if (p.project.action === "recent") r.recent += p.newPhotos;
-                else {
-                    const key = `${p.project.name}|${p.project.action}`;
-                    const g = r.galleries.get(key) || { name: p.project.name, action: p.project.action, reason: p.project.reason, posts: 0, photos: 0 };
-                    g.posts++;
-                    g.photos += p.newPhotos;
-                    r.galleries.set(key, g);
-                }
-            }
-            r.failed.push(...b.failed);
-        }
-
-        function renderReport(r: BackfillReport, dry: boolean) {
-            if (!backfillEl) return;
-            const actionLabel: Record<string, string> = { create: "New gallery", reuse: "Existing", link: "Merge into existing" };
-            const galleries = [...r.galleries.values()].sort((a, b) => b.photos - a.photos);
-            backfillEl.innerHTML = `
-                <dl class="fb-stats">
-                    <div><dt>${dry ? "Preview" : "Import"}</dt><dd>${r.done ? "Complete" : stopRequested ? "Stopped" : "Running…"} · ${escapeHtml(r.batches)} batch(es)</dd></div>
-                    <div><dt>Posts scanned</dt><dd>${escapeHtml(r.scanned)} (${escapeHtml(r.withPhotos)} with photos, ${escapeHtml(r.withoutPhotos)} without)</dd></div>
-                    <div><dt>Date range</dt><dd>${escapeHtml(r.oldest ? r.oldest.slice(0, 10) : "—")} → ${escapeHtml(r.newest ? r.newest.slice(0, 10) : "—")}</dd></div>
-                    <div><dt>Photos</dt><dd>${escapeHtml(r.photos)} found · ${escapeHtml(r.newPhotos)} new · ${escapeHtml(r.duplicates)} already imported${dry ? "" : ` · ${escapeHtml(r.imported)} imported`}</dd></div>
-                    <div><dt>Recent Project Updates</dt><dd>${escapeHtml(r.recent)} photo(s)</dd></div>
-                    <div><dt>Errors</dt><dd><strong>${escapeHtml(r.failed.length)}</strong></dd></div>
-                </dl>
-                ${galleries.length ? `<h3 class="fb-subheading">${dry ? "Proposed galleries" : "Galleries"}</h3>
-                <div class="table-wrap"><table class="fb-table"><thead><tr><th>Gallery</th><th>Action</th><th>Posts</th><th>New photos</th></tr></thead><tbody>
-                ${galleries.map((g) => `<tr><td>${escapeHtml(g.name)}</td><td>${escapeHtml(actionLabel[g.action] || g.action)} <span class="hint">(${escapeHtml(g.reason)})</span></td><td>${escapeHtml(g.posts)}</td><td>${escapeHtml(g.photos)}</td></tr>`).join("")}
-                </tbody></table></div>` : ""}
-                ${r.failed.length ? `<h3 class="fb-subheading">Errors</h3><ul class="fb-failures">${r.failed.slice(0, 50).map((f) => `<li class="fb-failure"><code>${escapeHtml(f.postId)}</code><div class="fb-failure-error">${escapeHtml(f.error)}</div></li>`).join("")}</ul>` : ""}`;
-        }
-
-        async function runBackfill(dry: boolean) {
-            if (!dryBtn || !runBtn || !stopBtn) return;
-            if (!dry && !window.confirm("Import and publish historical Facebook photos to the website now? Hidden photos stay hidden; existing galleries are not changed.")) return;
-            stopRequested = false;
-            dryBtn.disabled = runBtn.disabled = true;
-            stopBtn.hidden = false;
-            const report = emptyReport();
-            let after: string | null = null;
-            let first = true;
-            try {
-                // A dry run walks with explicit cursors; an import resumes from the cursor stored in D1.
-                while (!stopRequested) {
-                    const body: Record<string, unknown> = dry ? { dryRun: true, limit: 10, ...(after ? { after } : {}) } : { dryRun: false, limit: 10, resume: true };
-                    const b: BackfillBatch = await apiUrl<BackfillBatch>(`${adminApiBase}/facebook/backfill`, body);
-                    if (dry || b.complete) addBatch(report, b);
-                    else {
-                        // Batch ran out of time; the same posts are re-read next call.
-                        report.batches++;
-                        report.imported += b.imported || 0;
-                    }
-                    renderReport(report, dry);
-                    if (!b.next && b.complete) {
-                        report.done = true;
-                        break;
-                    }
-                    if (dry) after = b.next;
-                    first = false;
-                }
-            } catch (err) {
-                flashStatus(`${dry ? "Preview" : "Import"} stopped: ${errMsg(err)}`, "error", 0);
-            } finally {
-                renderReport(report, dry);
-                dryBtn.disabled = runBtn.disabled = false;
-                stopBtn.hidden = true;
-                if (!dry && !first) await loadOverview();
-            }
-        }
-
-        dryBtn?.addEventListener("click", () => void runBackfill(true));
-        runBtn?.addEventListener("click", () => void runBackfill(false));
-        stopBtn?.addEventListener("click", () => {
-            stopRequested = true;
-            flashStatus("Stopping after the current batch…", "info", 3000);
+        initCompleteDiscoveryUI({
+            request: (body) => apiUrl(`${adminApiBase}/facebook/backfill`, body,
+                (body as { dryRun?: boolean }).dryRun ? AbortSignal.timeout(25000) : undefined),
+            targets: () => overview?.albumTargets ?? [],
+            importEnabled: () => overview?.historicalImportEnabled === true,
+            refreshed: loadOverview,
+            status: (message) => flashStatus(message, "info", 0),
         });
 
         void loadOverview().then(() => {

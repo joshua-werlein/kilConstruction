@@ -21,6 +21,9 @@
 //
 // Secrets (never logged): FB_APP_SECRET, FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN
 
+import { classifyAlbum } from './facebook-album-matching.js';
+import { initialDiscovery, validateDiscovery, discoveryBatch, DISCOVERY_POST_FIELDS } from './facebook-discovery.js';
+
 export const FACEBOOK_PREFIX = "Facebook/";
 export const RECENT_SLUG = "recent-project-updates";
 const RECENT_NAME = "Recent Project Updates";
@@ -424,13 +427,13 @@ async function recordEvents(db, events) {
 
 // removalsOnly: with FB_AUTO_IMPORT off, remove/hide events are still acted
 // on (they only ever take content down); imports wait for the switch.
-export async function processPendingEvents(env, { limit = CRON_BATCH, removalsOnly = false } = {}) {
+export async function processPendingEvents(env, { limit = CRON_BATCH, removalsOnly = false, budget = newBudget() } = {}) {
   const db = env.DB;
   if (!db) throw new Error("Missing DB binding");
 
   const { results = [] } = await db
     .prepare(
-      `SELECT id, page_id, item, verb, post_id, photo_id, payload, attempts
+      `SELECT id, page_id, item, verb, post_id, photo_id, payload, attempts, discovery_state
          FROM facebook_webhook_events
         WHERE status IN ('pending','retry') AND attempts < ?
           ${removalsOnly ? "AND verb IN ('remove','hide')" : ""}
@@ -441,8 +444,6 @@ export async function processPendingEvents(env, { limit = CRON_BATCH, removalsOn
     .all();
 
   const summary = { processed: 0, done: 0, ignored: 0, retry: 0, failed: 0, deferred: 0 };
-  const budget = newBudget();
-
   for (const row of results) {
     // Leave the rest for the next run rather than starting an event we can't finish.
     if (budget.remaining < 3) {
@@ -535,6 +536,32 @@ async function processEvent(env, row, budget) {
     hintPhotoIds.push(...value.photo_ids.map(cleanId).filter(Boolean).slice(0, 100));
   }
 
+  if (env.FB_DISCOVERY_ENABLED === 'true') {
+    let state;
+    if (row.discovery_state) state = validateDiscovery(JSON.parse(row.discovery_state), pageId);
+    else {
+      state = initialDiscovery(pageId);
+      state.tasks = hintPhotoIds.map(id => ({ edge: 'photo', id, origin: 'post' }));
+      if (row.post_id) {
+        const post = await graphGet(env, row.post_id, { fields: `${DISCOVERY_POST_FIELDS},is_published,is_hidden` }, budget).catch(e => {
+          if (e instanceof BudgetExhausted || !hintPhotoIds.length) throw e;
+          return null;
+        });
+        if (post?.is_published === false || post?.is_hidden === true) return { status: 'ignored', note: 'unpublished or hidden post' };
+        if (post?.from?.id === pageId) {
+          state.tasks.push({ edge: 'attachments', id: row.post_id, post: { id: post.id, message: post.message || '', created_time: post.created_time || null, permalink_url: post.permalink_url || null, from: post.from, is_published: post.is_published ?? null, is_hidden: post.is_hidden ?? null } });
+          // Give the hints the same post context; photo-only events still work.
+          for (const task of state.tasks) if (task.edge === 'photo') task.post = state.tasks.at(-1).post;
+        } else if (post) return { status: 'ignored', note: 'not posted by page' };
+      }
+    }
+    const report = await runDiscoveryBatch(env, state, { dryRun: false, source: 'webhook', budget });
+    await env.DB.prepare(`UPDATE facebook_webhook_events SET discovery_state = ? WHERE id = ?`).bind(JSON.stringify(state), row.id).run();
+    if (report.errors.length) throw new Error(report.errors[0].error);
+    if (!report.complete) throw new BudgetExhausted();
+    return { status: 'done', note: `complete discovery: ${report.photos.length} photos processed` };
+  }
+
   const r = await ingestPost(env, {
     postId: row.post_id,
     hintPhotoIds,
@@ -571,7 +598,7 @@ async function handleRemoval(env, row, budget) {
   ).all();
   if (!results.length) return { status: "ignored", note: `${row.verb}: nothing imported` };
 
-  const gone = await confirmUnavailable(env, byPhoto ? row.photo_id : row.post_id, byPhoto ? "photo" : "post", budget);
+  const gone = await confirmUnavailable(env, byPhoto ? row.photo_id : row.post_id, byPhoto ? "photo" : "post", budget, row.source !== 'reconcile');
   if (!gone) return { status: "ignored", note: `${row.verb} not confirmed; still on Facebook` };
 
   const days = removedRetentionDays(env);
@@ -599,14 +626,15 @@ async function handleRemoval(env, row, budget) {
   return { status: "done", note: `hid ${results.length} photo(s) removed on Facebook; deleting in ${days} days` };
 }
 
-async function confirmUnavailable(env, id, kind, budget) {
+async function confirmUnavailable(env, id, kind, budget, hasRemovalEvent) {
   if (!cleanId(id)) return false;
   try {
     const obj = await graphGet(env, id, { fields: kind === "post" ? "id,is_published,is_hidden" : "id" }, budget);
     return kind === "post" && (obj?.is_published === false || obj?.is_hidden === true);
   } catch (e) {
-    // 100/33: "object does not exist, cannot be loaded due to missing permissions".
-    if (e?.graphCode === 100 && e?.graphSubcode === 33) return true;
+    // 100/33 also means permissions changed. A periodic scan alone may
+    // not use it to hide photos or start the permanent-deletion timer.
+    if (e?.graphCode === 100 && e?.graphSubcode === 33) return hasRemovalEvent;
     throw e;
   }
 }
@@ -824,8 +852,9 @@ async function refreshPostText(db, post) {
   await db.batch([
     db
       .prepare(
-        `UPDATE facebook_photos SET caption = ?, updated_at = ${NOW_SQL}
-          WHERE fb_post_id = ? AND caption IS ? AND master_key IS NOT NULL`
+        `UPDATE facebook_photos SET caption = ?, caption_from_post = 1, updated_at = ${NOW_SQL}
+          WHERE fb_post_id = ? AND master_key IS NOT NULL
+            AND (caption_from_post = 1 OR (caption_from_post IS NULL AND caption IS ?))`
       )
       .bind(message || null, postId, old.message || null),
     db
@@ -889,7 +918,7 @@ async function assignProject(env, { context, photos, photoCount = photos.length,
     const m = matches[0];
     if (m.id) return { id: m.id, slug: m.slug, name: m.name, reason: "caption", action: "reuse" };
     // Manual R2 gallery: reuse (or create once) a link row pointing at it.
-    if (dryRun) return { id: null, slug: null, name: m.name, reason: "caption", action: "link" };
+    if (dryRun) return { id: null, slug: null, name: m.name, reason: "caption", action: "link", destination: `manual:${m.prefix}` };
     const linked = await getOrCreateLinkedProject(env, m.prefix, m.name, "auto");
     return { ...linked, reason: "caption", action: "link" };
   }
@@ -1049,7 +1078,7 @@ async function listManualProjects(env) {
 
 async function getPhotoRow(db, photoId) {
   return await db
-    .prepare(`SELECT fb_photo_id, status, hidden, project_id, project_locked FROM facebook_photos WHERE fb_photo_id = ?`)
+    .prepare(`SELECT fb_photo_id, status, hidden, project_id, project_locked, master_key, fb_post_id, removed_on_facebook_at FROM facebook_photos WHERE fb_photo_id = ?`)
     .bind(photoId)
     .first();
 }
@@ -1127,7 +1156,7 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
 
     if (!masterKey) {
       budget?.take();
-      const resp = await fetch(src, { redirect: "manual" });
+      const resp = await fetch(src, { redirect: "manual", signal: AbortSignal.timeout(30000) });
       if (!resp.ok) throw new Error(`Image download failed (${resp.status})`);
 
       contentType = (resp.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
@@ -1147,18 +1176,16 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
       });
     }
 
-    const caption =
-      typeof photo.name === "string" && photo.name.trim()
-        ? photo.name
-        : context.message || null;
+    const photoCaption = typeof photo.name === "string" && photo.name.trim() ? photo.name : null;
+    const caption = photoCaption ?? (context.postId ? context.message || null : null);
 
-    await db
+    const committed = await db
       .prepare(
         `UPDATE facebook_photos
             SET status = 'imported', master_key = ?, content_type = ?, bytes = ?, width = ?, height = ?,
-                caption = ?, fb_created_time = ?, permalink = ?, album_id = ?, album_name = ?,
+                caption = ?, caption_from_post = ?, fb_created_time = ?, permalink = ?, album_id = ?, album_name = ?,
                 fb_post_id = COALESCE(fb_post_id, ?), last_error = NULL, updated_at = ${NOW_SQL}
-          WHERE fb_photo_id = ?`
+          WHERE fb_photo_id = ? AND status = 'importing'`
       )
       .bind(
         masterKey,
@@ -1167,6 +1194,7 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
         Number(best.width) || null,
         Number(best.height) || null,
         caption ? caption.slice(0, 5000) : null,
+        photoCaption && (!context.postId || comparableCaption(photoCaption) !== comparableCaption(context.message)) ? 0 : 1,
         toIso(photo.created_time) || context.createdTime || null,
         typeof photo.link === "string" ? photo.link.slice(0, 500) : context.permalink,
         cleanId(photo?.album?.id),
@@ -1176,6 +1204,12 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
       )
       .run();
 
+    if (!committed.meta.changes) {
+      const current = await getPhotoRow(db, photoId);
+      if (isPurged(current)) await env.PRIVATE_BUCKET.delete(masterKey);
+      return { imported: false, reason: 'suppressed-during-import' };
+    }
+
     await reconcilePhoto(env, photoId);
     return { imported: true, key: masterKey };
   } catch (e) {
@@ -1183,7 +1217,7 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
     await db
       .prepare(
         `UPDATE facebook_photos SET status = 'failed', last_error = ?, updated_at = ${NOW_SQL}
-          WHERE fb_photo_id = ?`
+          WHERE fb_photo_id = ? AND NOT (status = 'imported' AND master_key IS NULL)`
       )
       .bind(msg, photoId)
       .run();
@@ -1224,6 +1258,12 @@ export async function reconcilePhoto(env, photoId) {
         customMetadata: { source: "facebook", fbPhotoId: row.fb_photo_id },
       });
     }
+    const fresh = await db.prepare(`SELECT ph.status,ph.hidden,ph.master_key,p.hidden AS project_hidden FROM facebook_photos ph LEFT JOIN facebook_projects p ON p.id=ph.project_id WHERE ph.fb_photo_id=?`).bind(photoId).first();
+    if (!fresh?.master_key || fresh.status !== 'imported' || fresh.hidden || fresh.project_hidden === null || fresh.project_hidden) {
+      const stray = await env.GALLERY_BUCKET.head(publicKey);
+      if (stray?.customMetadata?.source === 'facebook') await env.GALLERY_BUCKET.delete(publicKey);
+      return { visible: false };
+    }
     if (row.public_key !== publicKey) {
       await db
         .prepare(`UPDATE facebook_photos SET public_key = ?, updated_at = ${NOW_SQL} WHERE fb_photo_id = ?`)
@@ -1259,11 +1299,15 @@ async function reconcileProject(env, projectId) {
 // These fail soft: if D1 is unbound or the migration hasn't been applied, the
 // existing R2 gallery keeps working with no Facebook content.
 
-function formatPosted(iso) {
-  if (!iso) return "Project photo";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "Project photo";
-  return `Posted ${d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })}`;
+function comparableCaption(text) {
+  return typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+}
+
+function uniquePhotoCaption(row) {
+  const caption = comparableCaption(row.caption);
+  return caption && row.caption_from_post !== 1 && caption !== comparableCaption(row.post_message)
+    ? row.caption.trim()
+    : null;
 }
 
 function toItem(row, urls) {
@@ -1275,7 +1319,7 @@ function toItem(row, urls) {
     name: `${date}_${row.fb_photo_id}.${ext}`,
     full,
     thumb: urls.thumbUrl(full),
-    description: firstLine(row.caption) || formatPosted(row.fb_created_time),
+    description: uniquePhotoCaption(row),
     createdTime: row.fb_created_time || null,
     id: row.fb_photo_id,
     source: "facebook",
@@ -1331,6 +1375,37 @@ export async function listFacebookProjects(env, category, urls) {
   }
 }
 
+// Choose the first eligible post recorded for this gallery, not the newest
+// upload or the oldest Facebook date. A later historical backfill cannot
+// replace it simply by discovering older posts. Only visible photo sources
+// contribute text; never republish a removed or hidden source's description.
+async function publicProjectDescription(db, project) {
+  if (project.description_override !== null) return project.description_override ?? "";
+  if (project.kind === "recent") return "";
+  const post = await db.prepare(
+    `SELECT fp.message FROM facebook_posts fp
+      WHERE fp.removed_on_facebook_at IS NULL AND NULLIF(TRIM(fp.message), '') IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM facebook_photos ph WHERE ph.project_id = ? AND ph.fb_post_id = fp.fb_post_id
+            AND ph.status = 'imported' AND ph.hidden = 0 AND ph.public_key IS NOT NULL
+        )
+      ORDER BY fp.rowid LIMIT 1`
+  ).bind(project.id).first();
+  return post?.message?.trim() || "";
+}
+
+async function publicProjectPhotos(db, projectId, urls) {
+  const { results = [] } = await db.prepare(
+    `SELECT ph.fb_photo_id, ph.public_key, ph.fb_created_time, ph.caption,
+            ph.caption_from_post, fp.message AS post_message
+       FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id
+       LEFT JOIN facebook_posts fp ON fp.fb_post_id = ph.fb_post_id
+      WHERE p.id = ? AND ${VISIBLE_PHOTO_SQL}
+      ORDER BY ph.fb_created_time`
+  ).bind(projectId).all();
+  return results.map(row => toItem(row, urls));
+}
+
 // key: "slug" or "category/slug" (as accepted by ?project=)
 export async function getFacebookProject(env, key, urls) {
   if (!env.DB) return null;
@@ -1342,25 +1417,16 @@ export async function getFacebookProject(env, key, urls) {
   try {
     const project = await env.DB
       .prepare(
-        `SELECT id, slug, name, category FROM facebook_projects
+        `SELECT id, slug, name, category, kind, description_override FROM facebook_projects
           WHERE slug = ? AND hidden = 0 AND linked_prefix IS NULL`
       )
       .bind(slug)
       .first();
     if (!project || (category && project.category !== category)) return null;
 
-    const { results = [] } = await env.DB
-      .prepare(
-        `SELECT ph.fb_photo_id, ph.public_key, ph.fb_created_time, ph.caption
-           FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id
-          WHERE p.id = ? AND ${VISIBLE_PHOTO_SQL}
-          ORDER BY ph.fb_created_time`
-      )
-      .bind(project.id)
-      .all();
-    if (!results.length) return null;
-
-    return { project: { name: project.name, description: "" }, items: results.map((r) => toItem(r, urls)) };
+    const items = await publicProjectPhotos(env.DB, project.id, urls);
+    if (!items.length) return null;
+    return { project: { name: project.name, description: await publicProjectDescription(env.DB, project) }, items };
   } catch (e) {
     console.error("[facebook] getFacebookProject error:", e?.message || e);
     return null;
@@ -1368,22 +1434,20 @@ export async function getFacebookProject(env, key, urls) {
 }
 
 // Facebook photos merged into an existing manual gallery (R2 prefix).
-export async function getLinkedFacebookItems(env, prefix, urls) {
-  if (!env.DB || !prefix) return [];
+export async function getLinkedFacebookGallery(env, prefix, urls) {
+  if (!env.DB || !prefix) return { items: [], description: "" };
   try {
-    const { results = [] } = await env.DB
-      .prepare(
-        `SELECT ph.fb_photo_id, ph.public_key, ph.fb_created_time, ph.caption
-           FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id
-          WHERE p.linked_prefix = ? AND ${VISIBLE_PHOTO_SQL}
-          ORDER BY ph.fb_created_time`
-      )
-      .bind(prefix)
-      .all();
-    return results.map((r) => toItem(r, urls));
+    const project = await env.DB.prepare(
+      "SELECT id, kind, description_override FROM facebook_projects WHERE linked_prefix = ? AND hidden = 0"
+    ).bind(prefix).first();
+    if (!project) return { items: [], description: "" };
+    return {
+      items: await publicProjectPhotos(env.DB, project.id, urls),
+      description: await publicProjectDescription(env.DB, project),
+    };
   } catch (e) {
-    console.error("[facebook] getLinkedFacebookItems error:", e?.message || e);
-    return [];
+    console.error("[facebook] getLinkedFacebookGallery error:", e?.message || e);
+    return { items: [], description: "" };
   }
 }
 
@@ -1393,13 +1457,13 @@ function graphGet(env, path, params = {}, budget = null) {
   return graphRequest(env, "GET", path, params, budget);
 }
 
-async function graphRequest(env, method, path, params = {}, budget = null) {
+async function graphRequest(env, method, path, params = {}, budget = null, signal = null) {
   const token = env.FB_PAGE_ACCESS_TOKEN;
   if (!token) throw new Error("FB_PAGE_ACCESS_TOKEN is not configured");
 
   const version = env.FB_GRAPH_VERSION;
   if (!GRAPH_VERSION_RE.test(version || "")) throw new Error("FB_GRAPH_VERSION is invalid");
-  if (!/^(me|[0-9_]{1,64}(\/(photos|posts|subscribed_apps))?)$/.test(path)) throw new Error("Invalid Graph path");
+  if (!/^(me|[0-9_]{1,64}(\/(albums|photos|posts|attachments|subattachments|subscribed_apps))?)$/.test(path)) throw new Error("Invalid Graph path");
 
   budget?.take();
 
@@ -1413,8 +1477,11 @@ async function graphRequest(env, method, path, params = {}, budget = null) {
   }
 
   // Token goes in a header so it never appears in URLs or logs.
-  const resp = await fetch(url.toString(), { method, headers: { Authorization: `Bearer ${token}` } });
-  const data = await resp.json().catch(() => null);
+  const resp = await fetch(url.toString(), { method, headers: { Authorization: `Bearer ${token}` }, signal: signal || AbortSignal.timeout(20000) });
+  const data = await resp.json().catch(() => {
+    signal?.throwIfAborted();
+    return null;
+  });
   if (!resp.ok || data?.error) {
     const code = data?.error?.code ?? "?";
     const err = new Error(`Graph API error ${resp.status}/${code}: ${redact(data?.error?.message || "", env)}`);
@@ -1435,11 +1502,15 @@ async function graphRequest(env, method, path, params = {}, budget = null) {
 // finished photos are skipped cheaply via D1.
 
 export async function runFacebookBackfill(request, env) {
+  const input = (await request.json().catch(() => ({}))) ?? {};
+  if (input.dryRun === false && env.FB_HISTORICAL_IMPORT_ENABLED !== "true") {
+    return jsonResult({ error: "Historical importing is disabled. Preview is available." }, 403);
+  }
+  if (input.discovery === true) return await runFacebookDiscovery(env, input);
   const pageId = configuredPageId(env);
   if (!pageId) return { status: 500, body: { error: "FB_PAGE_ID is not configured" } };
   if (!env.DB) return { status: 500, body: { error: "Missing DB binding" } };
 
-  const input = await request.json().catch(() => ({}));
   const dryRun = input?.dryRun !== false;
   let limit = Math.floor(Number(input?.limit) || 5);
   limit = Math.min(Math.max(limit, 1), MAX_BACKFILL_POSTS);
@@ -1539,6 +1610,7 @@ function projectOut(r) {
     hidden: !!r.hidden,
     linkedPrefix: r.linked_prefix || null,
     nameLocked: !!r.name_locked,
+    descriptionOverride: r.description_override ?? null,
     photoCount: r.photo_count || 0,
     visibleCount: r.visible_count || 0,
     publicPath,
@@ -1619,11 +1691,20 @@ async function adminOverview(env) {
   ]);
 
   const st = Object.fromEntries((state.results || []).map((r) => [r.key, r.value]));
+  let discovery = [];
+  if (env.FB_DISCOVERY_ENABLED === 'true') {
+    discovery = (await db.prepare('SELECT mode,status,attempts,next_attempt_at,last_error,updated_at FROM facebook_discovery_jobs').all()).results || [];
+    for (const job of discovery) if (job.last_error) failures.results.push({ kind: 'discovery', ref: job.mode, attempts: job.attempts, error: job.last_error, updated_at: job.updated_at });
+  }
   const counts = { pending: 0, processing: 0, retry: 0, done: 0, ignored: 0, failed: 0 };
   for (const r of events.results || []) counts[r.status] = r.n;
 
+  const manualProjects = await listManualProjects(env);
   return jsonResult({
     autoImport: autoImportEnabled(env),
+    historicalImportEnabled: env.FB_HISTORICAL_IMPORT_ENABLED === "true",
+    discovery,
+    albumTargets: albumTargets(projects.results || [], manualProjects),
     sync: {
       lastEventReceivedAt: st.last_event_received_at || null,
       lastSuccessAt: st.last_success_at || null,
@@ -1647,7 +1728,7 @@ async function adminOverview(env) {
       })),
     },
     projects: (projects.results || []).map(projectOut),
-    manualProjects: await listManualProjects(env),
+    manualProjects,
   });
 }
 
@@ -1732,6 +1813,13 @@ async function adminProjectUpdate(env, body) {
     if (!FB_CATEGORIES.includes(body.category)) return jsonResult({ error: "Invalid category" }, 400);
     sets.push("category = ?");
     binds.push(body.category);
+  }
+  if (body.description !== undefined) {
+    if (body.description !== null && (typeof body.description !== "string" || body.description.length > 5000)) {
+      return jsonResult({ error: "Description must be text of at most 5000 characters or null" }, 400);
+    }
+    sets.push("description_override = ?");
+    binds.push(body.description?.trim() ?? null);
   }
   if (!sets.length) return jsonResult({ error: "Nothing to update" }, 400);
 
@@ -1854,6 +1942,20 @@ async function adminHealth(env) {
   } catch (e) {
     out.errors.push(redact(e?.message || e, env));
   }
+  if (env.FB_DISCOVERY_ENABLED === 'true') {
+    out.albumAccess = 'untested';
+    out.albumPhotoAccess = 'untested';
+    try {
+      const albums = await graphGet(env, `${pageId}/albums`, { fields: 'id', limit: 1 });
+      if (!Array.isArray(albums.data)) throw new Error('Albums response missing data');
+      out.albumAccess = 'ok';
+      if (cleanId(albums.data[0]?.id)) {
+        const photos = await graphGet(env, `${albums.data[0].id}/photos`, { fields: PHOTO_FIELDS, limit: 1 });
+        if (!Array.isArray(photos.data)) throw new Error('Album photos response missing data');
+        out.albumPhotoAccess = 'ok';
+      } else out.albumPhotoAccess = 'no-album-to-test';
+    } catch (e) { out.errors.push(redact(e.message, env)); }
+  }
   return jsonResult(out);
 }
 
@@ -1964,17 +2066,28 @@ async function purgePhotos(env, results, extraPostIds = [], reason = "deleted on
   }
 
   const ids = results.map((r) => r.fb_photo_id);
+  // A paused traversal must not retain a deleted post's captions or links.
+  // Invalidate its writer lease before replacing its checkpoint, so an older
+  // in-flight response cannot put the scrubbed text back into the queue.
+  const jobs = (await db.prepare('SELECT mode,state FROM facebook_discovery_jobs').all()).results || [];
+  for (const job of jobs) {
+    const state = JSON.parse(job.state);
+    state.tasks = state.tasks.filter(task => !(task.edge === 'photo' && ids.includes(task.id)));
+    for (const task of state.tasks) if (posts.has(task.post?.id)) task.post = { ...task.post, message: '', permalink_url: null };
+    for (const postId of posts) if (state.contexts?.[postId]) state.contexts[postId] = { ...state.contexts[postId], message: '', permalink_url: null };
+    if (JSON.stringify(state) !== job.state) await db.prepare('UPDATE facebook_discovery_jobs SET state=?,lease_token=NULL,lease_until=0 WHERE mode=?').bind(JSON.stringify(state), job.mode).run();
+  }
   for (const postId of posts) {
     await db.batch([
       db
         .prepare(`UPDATE facebook_posts SET message = NULL, permalink = NULL, updated_at = ${NOW_SQL} WHERE fb_post_id = ?`)
         .bind(postId),
-      db.prepare(`UPDATE facebook_webhook_events SET payload = '{}', updated_at = ${NOW_SQL} WHERE post_id = ?`).bind(postId),
+      db.prepare(`UPDATE facebook_webhook_events SET payload = '{}', discovery_state = NULL, updated_at = ${NOW_SQL} WHERE post_id = ?`).bind(postId),
     ]);
   }
   for (const id of ids) {
     await db
-      .prepare(`UPDATE facebook_webhook_events SET payload = '{}', updated_at = ${NOW_SQL} WHERE photo_id = ?`)
+      .prepare(`UPDATE facebook_webhook_events SET payload = '{}', discovery_state = NULL, updated_at = ${NOW_SQL} WHERE photo_id = ?`)
       .bind(id)
       .run();
   }
@@ -1985,6 +2098,7 @@ async function purgePhotos(env, results, extraPostIds = [], reason = "deleted on
 // Re-queue failed events and retry a few failed photos right away.
 async function adminRetry(env) {
   const db = env.DB;
+  if (env.FB_DISCOVERY_ENABLED === 'true') await db.prepare("UPDATE facebook_discovery_jobs SET status='pending',attempts=0,next_attempt_at=0 WHERE last_error IS NOT NULL AND lease_until < ?").bind(Date.now()).run();
   const ev = await db
     .prepare(
       `UPDATE facebook_webhook_events SET status = 'retry', attempts = 0, updated_at = ${NOW_SQL}
@@ -2018,6 +2132,293 @@ async function adminRetry(env) {
 
 // --- cron sweeper ---------------------------------------------------------
 
+// Album/post discovery uses the existing photo claim, storage and visibility
+// functions. Nothing in preview calls importPhoto, restoreReturned or setState.
+function albumTargets(projects, manuals) {
+  const byIdentity = new Map();
+  for (const manual of manuals) {
+    byIdentity.set(manual.prefix, { value: `manual:${manual.prefix}`, name: manual.name,
+      category: manual.prefix.split('/')[0], prefix: manual.prefix, source: 'manual' });
+  }
+  for (const project of projects) {
+    if (project.kind !== 'project') continue;
+    const prefix = project.linked_prefix || null;
+    const identity = prefix || `project:${project.id}`;
+    if (project.hidden) { if (prefix) byIdentity.delete(prefix); continue; }
+    byIdentity.set(identity, { value: `project:${project.id}`, name: project.name, id: project.id,
+      slug: project.slug, category: prefix?.split('/')[0] || project.category, prefix, source: prefix ? 'linked' : 'facebook' });
+  }
+  return [...byIdentity.values()];
+}
+
+async function readAlbumTargets(env) {
+  const projects = await env.DB.prepare("SELECT id,slug,name,kind,category,linked_prefix,hidden FROM facebook_projects WHERE kind='project'").all();
+  return albumTargets(projects.results || [], await listManualProjects(env));
+}
+
+async function discoveryProject(env, photo, task, context, dryRun, mappings, targets) {
+  const album = task.album || photo.album;
+  const albumId = cleanId(album?.id);
+  const mapping = albumId ? mappings?.[albumId] : undefined;
+  if (mapping === 'exclude') return { action: 'exclude', name: 'Excluded', reason: 'admin' };
+  if (mapping === 'recent') {
+    if (dryRun) return { id: null, name: RECENT_NAME, reason: 'admin', action: 'recent' };
+    const recent = await getRecentProject(env);
+    await env.DB.prepare('INSERT INTO facebook_album_mappings(album_id,project_id,locked) VALUES (?,?,1) ON CONFLICT(album_id) DO UPDATE SET project_id=excluded.project_id,locked=1').bind(albumId, recent.id).run();
+    return { ...recent, reason: 'admin', action: 'recent' };
+  }
+  if (mapping !== undefined) {
+    let project;
+    if (/^project:\d+$/.test(mapping)) project = await env.DB.prepare('SELECT id,slug,name FROM facebook_projects WHERE id = ?').bind(Number(mapping.slice(8))).first();
+    else if (mapping.startsWith('manual:')) {
+      const manual = (await listManualProjects(env)).find(p => p.prefix === mapping.slice(7));
+      if (manual) project = dryRun ? { id: null, name: manual.name } : await getOrCreateLinkedProject(env, manual.prefix, manual.name, 'admin');
+    }
+    if (!project) throw new Error('Album mapping target no longer exists');
+    if (!dryRun) await env.DB.prepare('INSERT INTO facebook_album_mappings(album_id,project_id,locked) VALUES (?,?,1) ON CONFLICT(album_id) DO UPDATE SET project_id=excluded.project_id, locked=1').bind(albumId, project.id).run();
+    return { ...project, reason: 'admin', action: 'reuse', destination: mapping };
+  }
+  if (albumId) {
+    const mapped = await env.DB.prepare('SELECT p.id,p.slug,p.name FROM facebook_album_mappings m JOIN facebook_projects p ON p.id=m.project_id WHERE m.album_id=?').bind(albumId).first();
+    if (mapped) return { ...mapped, reason: 'album', action: 'reuse' };
+    const prior = await env.DB.prepare('SELECT id,slug,name FROM facebook_projects WHERE fb_album_id=?').bind(albumId).first();
+    if (prior) return { ...prior, reason: 'album', action: 'reuse' };
+    const name = String(album?.name || '').trim();
+    const match = classifyAlbum(name, await targets(), GENERIC_WORDS);
+    const fallback = async (reason, candidates = []) => dryRun
+      ? { id: null, name: RECENT_NAME, reason, action: 'recent', candidates }
+      : { ...(await getRecentProject(env)), reason, action: 'recent' };
+    if (match.kind === 'branding' && mappings !== null) {
+      // Branding albums are inappropriate for a construction portfolio.
+      return { action: 'exclude', name: 'Excluded', reason: 'branding-album' };
+    }
+    if (match.kind === 'exact') {
+      const m = match.candidates[0];
+      const p = m.id ? m : dryRun ? { id: null, name: m.name } : await getOrCreateLinkedProject(env, m.prefix, m.name, 'auto');
+      if (!dryRun) await env.DB.prepare('INSERT OR IGNORE INTO facebook_album_mappings(album_id,project_id) VALUES (?,?)').bind(albumId, p.id).run();
+      return { ...p, reason: 'album-match', action: m.id ? 'reuse' : 'link', destination: m.value };
+    }
+    if (match.kind === 'review') return await fallback('review-album', match.candidates);
+    if (match.kind === 'unmatched' && significantName(name) && /\b(deck|kitchen|bath|bathroom|remodel|garage|addition|porch|roof|basement|house|home|barn|build|construction|cabinets|furniture)\b/i.test(name)) {
+      return dryRun ? { id: null, name, reason: 'album', action: 'create' }
+        : { ...(await createProject(env, { name, albumId, reason: 'album' })), reason: 'album', action: 'create' };
+    }
+    if (match.kind === 'unmatched') return await fallback('ambiguous-album');
+  }
+  return await assignProject(env, { context, photos: [], photoCount: 1, dryRun });
+}
+
+const PREVIEW_STEPS = 4;
+const PREVIEW_GRAPH_MS = 8000;
+const PREVIEW_INVENTORY_PAGE_SIZE = 200;
+
+// Inventory is a separate read-only phase. Each request lists at most one R2
+// page so gallery size cannot add unbounded subrequests to a Graph batch.
+async function previewInventoryPage(env, state) {
+  const report = { albums: [], posts: [], photos: [], errors: [], duplicateCandidates: [], complete: false, nextState: state };
+  const { root, cursor } = state.previewInventory;
+  if (!Number.isInteger(root) || root < 0 || root >= MANUAL_PROJECT_ROOTS.length ||
+      !(cursor === null || (typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 4096))) {
+    throw new Error('Invalid preview inventory continuation');
+  }
+  try {
+    const page = await env.GALLERY_BUCKET.list({
+      prefix: MANUAL_PROJECT_ROOTS[root], cursor: cursor ?? undefined,
+      limit: PREVIEW_INVENTORY_PAGE_SIZE, include: ['customMetadata'],
+    });
+    if (page.truncated && (!page.cursor || page.cursor === cursor)) throw new Error('R2 inventory cursor did not advance');
+    for (const object of page.objects) {
+      const ids = new Set([cleanId(object.customMetadata?.fbPhotoId), cleanId(object.key.split('/').pop()?.replace(/\.[^.]+$/, ''))]);
+      ids.delete(null);
+      for (const id of ids) if (id) report.duplicateCandidates.push({ id, key: object.key });
+    }
+    state.previewInventory = page.truncated ? { root, cursor: page.cursor } : { root: root + 1, cursor: null };
+    report.complete = state.previewInventory.root === MANUAL_PROJECT_ROOTS.length;
+    report.coveragePhase = report.complete ? 'complete' : 'manual-inventory';
+    if (report.complete) {
+      // Keep coverage warnings attached to the final batch, even if the caller
+      // paused and resumed during the manual gallery inventory.
+      report.warnings = Array.isArray(state.previewWarnings)
+        ? state.previewWarnings.filter(w => typeof w === 'string').map(w => redact(w, env))
+        : [];
+      report.partial = report.warnings.length > 0;
+    }
+  } catch {
+    report.coveragePhase = 'manual-inventory';
+    report.partial = true;
+    report.errors.push({ task: 'Manual gallery inventory', error: 'R2 listing failed. Resume to retry the same page.' });
+  }
+  return report;
+}
+
+const previewProposal = project => ({
+  name: project.name, reason: project.reason, action: project.action, candidates: project.candidates || [],
+  destination: project.destination || (project.id ? `project:${project.id}` : null),
+});
+
+async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew, maxSteps = PREVIEW_STEPS }) {
+  if (dryRun && !state.tasks.length && state.previewInventory) return previewInventoryPage(env, state);
+  const signal = dryRun ? AbortSignal.timeout(PREVIEW_GRAPH_MS) : null;
+  const deadline = dryRun ? Date.now() + PREVIEW_GRAPH_MS : Infinity;
+  const graph = (path, params, b) => graphRequest(env, 'GET', path, params, b, signal);
+  let availableTargets;
+  // A write batch can create a project; later albums must see that project
+  // before proposing another one with the same name.
+  const targets = () => dryRun ? (availableTargets ||= readAlbumTargets(env)) : readAlbumTargets(env);
+  const report = await discoveryBatch(state, {
+    graph, version: env.FB_GRAPH_VERSION, budget, renew,
+    ...(dryRun ? { maxSteps, canContinue: () => Date.now() < deadline, review: true } : {}),
+    visit: async (photo, task, cutoff, b) => {
+      let existing = await getPhotoRow(env.DB, photo.id);
+      const context = { postId: cleanId(task.post?.id), message: task.post?.message || photo.name || task.album?.description || '', createdTime: toIso(task.post?.created_time) || toIso(photo.created_time), permalink: task.post?.permalink_url || photo.link || null };
+      const date = toIso(photo.created_time);
+      if (cutoff && (!date || date < cutoff)) return { outcome: 'outside-cutoff', project: null };
+      if (!dryRun && source === 'webhook' && existing?.removed_on_facebook_at && task.post?.is_published === true && task.post?.is_hidden !== true) {
+        await restoreReturned(env, [photo.id]);
+        existing = await getPhotoRow(env.DB, photo.id);
+      }
+      // Discovery alone cannot undo admin suppression or a Facebook removal.
+      // The existing explicit republish webhook path remains authoritative.
+      if (existing && (existing.hidden || existing.removed_on_facebook_at || isPurged(existing))) return { outcome: 'suppressed', project: null };
+      if (existing?.status === 'importing') throw new Error('Photo is claimed by an unfinished import; retry after stale-claim recovery');
+      if (existing && existing.status !== 'failed') {
+        let improved = null;
+        if (!existing.project_locked && task.post) {
+          const current = await loadProject(env.DB, existing.project_id);
+          if (current?.kind === 'recent') {
+            const proposal = await discoveryProject(env, photo, task, context, true, mappings, targets);
+            if (proposal.action !== 'recent' && proposal.action !== 'exclude') {
+              improved = dryRun ? proposal : await discoveryProject(env, photo, task, context, false, mappings, targets);
+              if (!dryRun) {
+                await env.DB.prepare('UPDATE facebook_photos SET project_id=? WHERE fb_photo_id=? AND project_locked=0').bind(improved.id, photo.id).run();
+                existing.project_id = improved.id;
+                await reconcilePhoto(env, photo.id);
+              }
+            }
+          }
+        }
+        if (!dryRun && context.postId) {
+          if (!existing.fb_post_id) await env.DB.prepare('UPDATE facebook_photos SET fb_post_id=? WHERE fb_photo_id=? AND fb_post_id IS NULL').bind(context.postId, photo.id).run();
+          await refreshPostText(env.DB, task.post);
+          await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message,permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, existing.project_id, 'existing-photo', source).run();
+        }
+        return { outcome: 'existing', project: improved ? previewProposal(improved) : null };
+      }
+      const albumIds = [task.album?.id, photo.album?.id].filter(Boolean);
+      if (albumIds.some(id => mappings?.[id] === 'exclude')) return { outcome: 'excluded', project: { name: 'Excluded', reason: 'admin', action: 'exclude' } };
+      const locked = existing?.project_locked && existing.project_id ? await loadProject(env.DB, existing.project_id) : null;
+      const project = locked ? { ...locked, reason: 'admin', action: 'reuse' } : await discoveryProject(env, photo, task, context, dryRun, mappings, targets);
+      if (project.action === 'exclude') return { outcome: 'excluded', project };
+      const best = pickLargestImage(photo.images);
+      if (!best) throw new Error('Photo has no downloadable image');
+      assertFacebookCdnUrl(best.source);
+      if (dryRun) return { outcome: 'new', project: previewProposal(project), createdTime: date };
+      if (context.postId) await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message, permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, project.id, project.reason, source).run();
+      await renew?.();
+      const result = await importPhoto(env, { ...photo, album: photo.album || task.album }, { context: { ...context, message: task.post?.message || "" }, projectId: project.id, source, budget: b });
+      return { outcome: result.imported ? 'imported' : 'existing', project: { name: project.name, reason: project.reason, action: project.action } };
+    },
+  });
+  if (dryRun) {
+    const previous = state.previewCoverage;
+    const progress = { postPages: 0, postsReturned: 0, postsUnknownAuthor: 0, postsVerified: 0 };
+    for (const key of Object.keys(progress)) {
+      const count = previous?.[key];
+      progress[key] = (Number.isSafeInteger(count) && count >= 0 ? count : 0)
+        + (key === 'postsVerified' ? report.posts.length : report.coverage[key]);
+    }
+    state.previewCoverage = progress;
+    report.warnings = [];
+    if (report.complete) {
+      if (!progress.postPages) report.warnings.push('No post pages were verified.');
+      else if (!progress.postsVerified && !progress.postsUnknownAuthor) {
+        const known = await env.DB.prepare('SELECT 1 FROM facebook_posts WHERE page_id=? LIMIT 1').bind(state.pageId).first();
+        if (known) report.warnings.push('Meta returned no verified Page posts, but the website has a previously imported post. Post coverage is unverified.');
+      }
+      if (progress.postsUnknownAuthor) report.warnings.push(`${progress.postsUnknownAuthor} post observation(s) did not have a verifiable author and were skipped.`);
+    }
+    report.partial = report.errors.length > 0 || report.warnings.length > 0;
+    report.coveragePhase = 'facebook';
+    if (report.complete) {
+      state.previewInventory = { root: 0, cursor: null };
+      state.previewWarnings = report.warnings;
+      report.complete = false;
+      report.coveragePhase = 'manual-inventory';
+    }
+  }
+  report.errors = report.errors.map(e => ({ ...e, error: redact(e.error, env) }));
+  return report;
+}
+
+export async function runFacebookDiscovery(env, input = {}, { mode = 'history', now = new Date(), budget = newBudget(24) } = {}) {
+  const pageId = configuredPageId(env);
+  if (!pageId || !env.DB) return jsonResult({ error: 'Missing Facebook discovery configuration' }, 500);
+  const dryRun = input.dryRun !== false;
+  try {
+    if (JSON.stringify(input).length > 240000) throw new Error('Discovery request too large');
+    const mappings = input.mappings || {};
+    if (typeof mappings !== 'object' || Array.isArray(mappings) || Object.keys(mappings).length > 500) throw new Error('Invalid album mappings');
+    for (const [id, target] of Object.entries(mappings)) if (!ID_RE.test(id) || typeof target !== 'string' || target.length > 300 || !((target === 'recent' || target === 'exclude') || /^project:\d+$/.test(target) || target.startsWith('manual:'))) throw new Error('Invalid album mapping');
+    if (dryRun) {
+      const state = input.state ? validateDiscovery(input.state, pageId) : initialDiscovery(pageId);
+      return jsonResult(await runDiscoveryBatch(env, state, { dryRun: true, mappings, maxSteps: input.singleStep === true ? 1 : PREVIEW_STEPS }));
+    }
+    if (mode === 'history' && input.authorizeHistorical !== true) return jsonResult({ error: 'Historical import requires explicit authorization' }, 400);
+    const stamp = now.toISOString();
+    const time = now.getTime();
+    const token = crypto.randomUUID();
+    const initial = initialDiscovery(pageId, mode === 'reconcile' ? stamp : null);
+    await env.DB.prepare(`INSERT OR IGNORE INTO facebook_discovery_jobs(mode,state,updated_at) VALUES (?,?,?)`).bind(mode, JSON.stringify(initial), stamp).run();
+    const claim = await env.DB.prepare(`UPDATE facebook_discovery_jobs SET lease_token=?,lease_until=? WHERE mode=? AND lease_until < ? AND next_attempt_at <= ?`).bind(token, time + 300000, mode, time, time).run();
+    if (!claim.meta.changes) return jsonResult({ busy: true, complete: false, photos: [], albums: [], posts: [], errors: [] });
+    const renew = async () => {
+      const changed = await env.DB.prepare('UPDATE facebook_discovery_jobs SET lease_until=? WHERE mode=? AND lease_token=?').bind(Date.now() + 300000, mode, token).run();
+      if (!changed.meta.changes) throw new Error('Discovery lease lost');
+    };
+    try {
+      const job = await env.DB.prepare('SELECT * FROM facebook_discovery_jobs WHERE mode=? AND lease_token=?').bind(mode, token).first();
+      await env.DB.prepare(`UPDATE facebook_photos SET status='failed',last_error='stale import' WHERE status='importing' AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ','now','-15 minutes')`).run();
+      let state = validateDiscovery(JSON.parse(job.state), pageId);
+      if (input.restart === true || job.status === 'complete') {
+        // The reconciliation cutoff is permanent; resetting a scan never widens
+        // the authorized time range to include historical archive content.
+        state = initialDiscovery(pageId, state.cutoff);
+      }
+      if (job.status === 'failed' && !input.retry) return jsonResult({ error: 'Discovery failed; review the error and explicitly retry', lastError: job.last_error }, 409);
+      // An album-discovered photo may later appear on a hidden post. Check a
+      // bounded rotating set of already imported objects as well as new uploads.
+      let verificationError = null;
+      if (mode === 'reconcile') {
+        try { await verifyDiscoveredPhotos(env, budget); }
+        catch (e) { verificationError = { task: 'verify-existing-photos', error: redact(e.message, env) }; }
+      }
+      const report = await runDiscoveryBatch(env, state, { dryRun: false, mappings: mode === 'history' ? mappings : null, renew, budget });
+      if (verificationError) report.errors.push(verificationError);
+      for (const album of report.albums) await env.DB.prepare('INSERT INTO facebook_albums(album_id,name,description,created_time,updated_time) VALUES (?,?,?,?,?) ON CONFLICT(album_id) DO UPDATE SET name=excluded.name,description=excluded.description,updated_time=excluded.updated_time').bind(album.id, album.name, album.description, album.created_time, album.updated_time).run();
+      const attempts = report.errors.length ? job.attempts + 1 : 0;
+      const delay = report.errors.length ? Math.min(21600000, 60000 * 2 ** Math.min(attempts, 8)) + Math.floor(Math.random() * 10000) : mode === 'reconcile' && report.complete ? 21600000 : 0;
+      await env.DB.prepare(`UPDATE facebook_discovery_jobs SET state=?, status=?, attempts=?, next_attempt_at=?, last_error=?, updated_at=? WHERE mode=? AND lease_token=?`).bind(JSON.stringify(state), attempts >= 5 ? 'failed' : report.complete ? 'complete' : 'pending', attempts, time + delay, report.errors[0]?.error || null, stamp, mode, token).run();
+      if (mode === 'history') await setState(env.DB, 'last_backfill_at', stamp);
+      if (report.photos.some(p => p.outcome === 'imported')) await setState(env.DB, 'last_success_at', stamp);
+      return jsonResult(report);
+    } finally {
+      await env.DB.prepare('UPDATE facebook_discovery_jobs SET lease_token=NULL,lease_until=0 WHERE mode=? AND lease_token=?').bind(mode, token).run();
+    }
+  } catch (e) { return jsonResult({ error: redact(e.message, env) }, 400); }
+}
+
+async function verifyDiscoveredPhotos(env, budget) {
+  const after = await getState(env.DB, 'discovery_verify_after') || '';
+  const { results = [] } = await env.DB.prepare(`SELECT fb_photo_id,fb_post_id FROM facebook_photos WHERE status='imported' AND master_key IS NOT NULL AND removed_on_facebook_at IS NULL AND fb_photo_id > ? ORDER BY fb_photo_id LIMIT 2`).bind(after).all();
+  for (const row of results) {
+    if (budget.remaining < 5) break;
+    const target = row.fb_post_id ? { item: 'post', post_id: row.fb_post_id } : { item: 'photo', photo_id: row.fb_photo_id };
+    await handleRemoval(env, { ...target, verb: 'remove', source: 'reconcile' }, budget);
+    await setState(env.DB, 'discovery_verify_after', row.fb_photo_id);
+  }
+  if (!results.length) await setState(env.DB, 'discovery_verify_after', '');
+}
+
 export async function handleFacebookScheduled(env, { now = new Date() } = {}) {
   if (!env.DB) return null;
   await runRetention(env, { now });
@@ -2042,7 +2443,8 @@ export async function handleFacebookScheduled(env, { now = new Date() } = {}) {
     ),
   ]);
 
-  const summary = await processPendingEvents(env, { limit: CRON_BATCH });
+  const summary = await processPendingEvents(env, { limit: CRON_BATCH, budget: newBudget(20) });
   if (summary.processed) console.log("[facebook] cron processed", summary);
+  if (env.FB_DISCOVERY_ENABLED === 'true') await runFacebookDiscovery(env, { dryRun: false }, { mode: 'reconcile', now, budget: newBudget(20) });
   return summary;
 }
