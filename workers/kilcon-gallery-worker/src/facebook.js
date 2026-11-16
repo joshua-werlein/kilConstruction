@@ -21,6 +21,7 @@
 //
 // Secrets (never logged): FB_APP_SECRET, FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN
 
+import { classifyAlbum } from './facebook-album-matching.js';
 import { initialDiscovery, validateDiscovery, discoveryBatch, DISCOVERY_POST_FIELDS } from './facebook-discovery.js';
 
 export const FACEBOOK_PREFIX = "Facebook/";
@@ -1498,13 +1499,15 @@ async function graphRequest(env, method, path, params = {}, budget = null) {
 // finished photos are skipped cheaply via D1.
 
 export async function runFacebookBackfill(request, env) {
-  const options = await request.clone().json().catch(() => ({}));
-  if (options.discovery === true) return await runFacebookDiscovery(env, options);
+  const input = (await request.json().catch(() => ({}))) ?? {};
+  if (input.dryRun === false && env.FB_HISTORICAL_IMPORT_ENABLED !== "true") {
+    return jsonResult({ error: "Historical importing is disabled. Preview is available." }, 403);
+  }
+  if (input.discovery === true) return await runFacebookDiscovery(env, input);
   const pageId = configuredPageId(env);
   if (!pageId) return { status: 500, body: { error: "FB_PAGE_ID is not configured" } };
   if (!env.DB) return { status: 500, body: { error: "Missing DB binding" } };
 
-  const input = await request.json().catch(() => ({}));
   const dryRun = input?.dryRun !== false;
   let limit = Math.floor(Number(input?.limit) || 5);
   limit = Math.min(Math.max(limit, 1), MAX_BACKFILL_POSTS);
@@ -1693,9 +1696,12 @@ async function adminOverview(env) {
   const counts = { pending: 0, processing: 0, retry: 0, done: 0, ignored: 0, failed: 0 };
   for (const r of events.results || []) counts[r.status] = r.n;
 
+  const manualProjects = await listManualProjects(env);
   return jsonResult({
     autoImport: autoImportEnabled(env),
+    historicalImportEnabled: env.FB_HISTORICAL_IMPORT_ENABLED === "true",
     discovery,
+    albumTargets: albumTargets(projects.results || [], manualProjects),
     sync: {
       lastEventReceivedAt: st.last_event_received_at || null,
       lastSuccessAt: st.last_success_at || null,
@@ -1719,7 +1725,7 @@ async function adminOverview(env) {
       })),
     },
     projects: (projects.results || []).map(projectOut),
-    manualProjects: await listManualProjects(env),
+    manualProjects,
   });
 }
 
@@ -2125,10 +2131,33 @@ async function adminRetry(env) {
 
 // Album/post discovery uses the existing photo claim, storage and visibility
 // functions. Nothing in preview calls importPhoto, restoreReturned or setState.
-async function discoveryProject(env, photo, task, context, dryRun, mappings) {
-  const album = photo.album || task.album;
+function albumTargets(projects, manuals) {
+  const byIdentity = new Map();
+  for (const manual of manuals) {
+    byIdentity.set(manual.prefix, { value: `manual:${manual.prefix}`, name: manual.name,
+      category: manual.prefix.split('/')[0], prefix: manual.prefix, source: 'manual' });
+  }
+  for (const project of projects) {
+    if (project.kind !== 'project') continue;
+    const prefix = project.linked_prefix || null;
+    const identity = prefix || `project:${project.id}`;
+    if (project.hidden) { if (prefix) byIdentity.delete(prefix); continue; }
+    byIdentity.set(identity, { value: `project:${project.id}`, name: project.name, id: project.id,
+      slug: project.slug, category: prefix?.split('/')[0] || project.category, prefix, source: prefix ? 'linked' : 'facebook' });
+  }
+  return [...byIdentity.values()];
+}
+
+async function readAlbumTargets(env) {
+  const projects = await env.DB.prepare("SELECT id,slug,name,kind,category,linked_prefix,hidden FROM facebook_projects WHERE kind='project'").all();
+  return albumTargets(projects.results || [], await listManualProjects(env));
+}
+
+async function discoveryProject(env, photo, task, context, dryRun, mappings, targets) {
+  const album = task.album || photo.album;
   const albumId = cleanId(album?.id);
   const mapping = albumId ? mappings?.[albumId] : undefined;
+  if (mapping === 'exclude') return { action: 'exclude', name: 'Excluded', reason: 'admin' };
   if (mapping === 'recent') {
     if (dryRun) return { id: null, name: RECENT_NAME, reason: 'admin', action: 'recent' };
     const recent = await getRecentProject(env);
@@ -2152,34 +2181,37 @@ async function discoveryProject(env, photo, task, context, dryRun, mappings) {
     const prior = await env.DB.prepare('SELECT id,slug,name FROM facebook_projects WHERE fb_album_id=?').bind(albumId).first();
     if (prior) return { ...prior, reason: 'album', action: 'reuse' };
     const name = String(album?.name || '').trim();
-    if (name && !GENERIC_ALBUM_RE.test(name)) {
-      // Punctuation/spacing and common progress suffixes must not fork a gallery.
-      const normalized = name.replace(/\s*[-–:(]\s*(photos|progress|updates)\)?\s*$/i, '');
-      const matches = await matchExistingProjects(env, normalized);
-      if (matches.length === 1) {
-        const m = matches[0];
-        const p = m.id ? m : dryRun ? { id: null, name: m.name } : await getOrCreateLinkedProject(env, m.prefix, m.name, 'auto');
-        if (!dryRun) await env.DB.prepare('INSERT OR IGNORE INTO facebook_album_mappings(album_id,project_id) VALUES (?,?)').bind(albumId, p.id).run();
-        return { ...p, reason: 'album-match', action: m.id ? 'reuse' : 'link' };
-      }
-      const distinctive = normalizeWords(normalized).split(' ').filter(w => w.length >= 3 && !GENERIC_WORDS.has(w));
-      const candidates = [...(await listManualProjects(env)), ...((await env.DB.prepare("SELECT name FROM facebook_projects WHERE kind='project'").all()).results || [])];
-      const possiblyExisting = candidates.some(p => distinctive.some(w => normalizeWords(p.name).split(' ').includes(w)));
-      if (!matches.length && !possiblyExisting && significantName(name) && /\b(deck|kitchen|bath|bathroom|remodel|garage|addition|porch|roof|basement|house|home|barn|build|construction|cabinets|furniture)\b/i.test(name)) {
-        return dryRun ? { id: null, name, reason: 'album', action: 'create' }
-          : { ...(await createProject(env, { name, albumId, reason: 'album' })), reason: 'album', action: 'create' };
-      }
-      // A conflicting or vague album name is not evidence of a new build.
-      return dryRun ? { id: null, name: RECENT_NAME, reason: 'ambiguous-album', action: 'recent' }
-        : { ...(await getRecentProject(env)), reason: 'ambiguous-album', action: 'recent' };
+    const match = classifyAlbum(name, await targets(), GENERIC_WORDS);
+    const fallback = async (reason, candidates = []) => dryRun
+      ? { id: null, name: RECENT_NAME, reason, action: 'recent', candidates }
+      : { ...(await getRecentProject(env)), reason, action: 'recent' };
+    if (match.kind === 'branding' && mappings !== null) {
+      // Branding albums are inappropriate for a construction portfolio.
+      return { action: 'exclude', name: 'Excluded', reason: 'branding-album' };
     }
+    if (match.kind === 'exact') {
+      const m = match.candidates[0];
+      const p = m.id ? m : dryRun ? { id: null, name: m.name } : await getOrCreateLinkedProject(env, m.prefix, m.name, 'auto');
+      if (!dryRun) await env.DB.prepare('INSERT OR IGNORE INTO facebook_album_mappings(album_id,project_id) VALUES (?,?)').bind(albumId, p.id).run();
+      return { ...p, reason: 'album-match', action: m.id ? 'reuse' : 'link', destination: m.value };
+    }
+    if (match.kind === 'review') return await fallback('review-album', match.candidates);
+    if (match.kind === 'unmatched' && significantName(name) && /\b(deck|kitchen|bath|bathroom|remodel|garage|addition|porch|roof|basement|house|home|barn|build|construction|cabinets|furniture)\b/i.test(name)) {
+      return dryRun ? { id: null, name, reason: 'album', action: 'create' }
+        : { ...(await createProject(env, { name, albumId, reason: 'album' })), reason: 'album', action: 'create' };
+    }
+    if (match.kind === 'unmatched') return await fallback('ambiguous-album');
   }
   return await assignProject(env, { context, photos: [], photoCount: 1, dryRun });
 }
 
-async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = {}, budget = newBudget(24), renew }) {
+async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew }) {
   const graph = (path, params, b) => graphGet(env, path, params, b);
   let manualPhotos;
+  let availableTargets;
+  // A write batch can create a project; later albums must see that project
+  // before proposing another one with the same name.
+  const targets = () => dryRun ? (availableTargets ||= readAlbumTargets(env)) : readAlbumTargets(env);
   const duplicateCandidates = async photo => {
     if (!manualPhotos) {
       manualPhotos = [];
@@ -2214,9 +2246,9 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
         if (!existing.project_locked && task.post) {
           const current = await loadProject(env.DB, existing.project_id);
           if (current?.kind === 'recent') {
-            const proposal = await discoveryProject(env, photo, task, context, true, mappings);
-            if (proposal.action !== 'recent') {
-              improved = dryRun ? proposal : await discoveryProject(env, photo, task, context, false, mappings);
+            const proposal = await discoveryProject(env, photo, task, context, true, mappings, targets);
+            if (proposal.action !== 'recent' && proposal.action !== 'exclude') {
+              improved = dryRun ? proposal : await discoveryProject(env, photo, task, context, false, mappings, targets);
               if (!dryRun) {
                 await env.DB.prepare('UPDATE facebook_photos SET project_id=? WHERE fb_photo_id=? AND project_locked=0').bind(improved.id, photo.id).run();
                 existing.project_id = improved.id;
@@ -2232,18 +2264,41 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
         }
         return { outcome: 'existing', project: improved ? { name: improved.name, reason: improved.reason, action: improved.action } : null };
       }
+      const albumIds = [task.album?.id, photo.album?.id].filter(Boolean);
+      if (albumIds.some(id => mappings?.[id] === 'exclude')) return { outcome: 'excluded', project: { name: 'Excluded', reason: 'admin', action: 'exclude' } };
       const locked = existing?.project_locked && existing.project_id ? await loadProject(env.DB, existing.project_id) : null;
-      const project = locked ? { ...locked, reason: 'admin', action: 'reuse' } : await discoveryProject(env, photo, task, context, dryRun, mappings);
+      const project = locked ? { ...locked, reason: 'admin', action: 'reuse' } : await discoveryProject(env, photo, task, context, dryRun, mappings, targets);
+      if (project.action === 'exclude') return { outcome: 'excluded', project };
       const best = pickLargestImage(photo.images);
       if (!best) throw new Error('Photo has no downloadable image');
       assertFacebookCdnUrl(best.source);
-      if (dryRun) return { outcome: 'new', project: { name: project.name, reason: project.reason, action: project.action }, caption: String(photo.name || context.message).slice(0, 200), createdTime: date, potentialManualDuplicates: await duplicateCandidates(photo), visualDuplicatesChecked: false };
+      if (dryRun) return { outcome: 'new', project: { name: project.name, reason: project.reason, action: project.action, candidates: project.candidates || [], destination: project.destination || null }, caption: String(photo.name || context.message).slice(0, 200), createdTime: date, potentialManualDuplicates: await duplicateCandidates(photo), visualDuplicatesChecked: false };
       if (context.postId) await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message, permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, project.id, project.reason, source).run();
       await renew?.();
       const result = await importPhoto(env, { ...photo, album: photo.album || task.album }, { context: { ...context, message: task.post?.message || "" }, projectId: project.id, source, budget: b });
       return { outcome: result.imported ? 'imported' : 'existing', project: { name: project.name, reason: project.reason, action: project.action } };
     },
   });
+  if (dryRun) {
+    const previous = state.previewCoverage;
+    const progress = { postPages: 0, postsReturned: 0, postsUnknownAuthor: 0, postsVerified: 0 };
+    for (const key of Object.keys(progress)) {
+      const count = previous?.[key];
+      progress[key] = (Number.isSafeInteger(count) && count >= 0 ? count : 0)
+        + (key === 'postsVerified' ? report.posts.length : report.coverage[key]);
+    }
+    state.previewCoverage = progress;
+    report.warnings = [];
+    if (report.complete) {
+      if (!progress.postPages) report.warnings.push('No post pages were verified.');
+      else if (!progress.postsVerified && !progress.postsUnknownAuthor) {
+        const known = await env.DB.prepare('SELECT 1 FROM facebook_posts WHERE page_id=? LIMIT 1').bind(state.pageId).first();
+        if (known) report.warnings.push('Meta returned no verified Page posts, but the website has a previously imported post. Post coverage is unverified.');
+      }
+      if (progress.postsUnknownAuthor) report.warnings.push(`${progress.postsUnknownAuthor} post observation(s) did not have a verifiable author and were skipped.`);
+    }
+    report.partial = report.errors.length > 0 || report.warnings.length > 0;
+  }
   report.errors = report.errors.map(e => ({ ...e, error: redact(e.error, env) }));
   return report;
 }
@@ -2256,7 +2311,7 @@ export async function runFacebookDiscovery(env, input = {}, { mode = 'history', 
     if (JSON.stringify(input).length > 240000) throw new Error('Discovery request too large');
     const mappings = input.mappings || {};
     if (typeof mappings !== 'object' || Array.isArray(mappings) || Object.keys(mappings).length > 500) throw new Error('Invalid album mappings');
-    for (const [id, target] of Object.entries(mappings)) if (!ID_RE.test(id) || typeof target !== 'string' || target.length > 300 || !(target === 'recent' || /^project:\d+$/.test(target) || target.startsWith('manual:'))) throw new Error('Invalid album mapping');
+    for (const [id, target] of Object.entries(mappings)) if (!ID_RE.test(id) || typeof target !== 'string' || target.length > 300 || !((target === 'recent' || target === 'exclude') || /^project:\d+$/.test(target) || target.startsWith('manual:'))) throw new Error('Invalid album mapping');
     if (dryRun) {
       const state = input.state ? validateDiscovery(input.state, pageId) : initialDiscovery(pageId);
       return jsonResult(await runDiscoveryBatch(env, state, { dryRun: true, mappings }));
@@ -2290,7 +2345,7 @@ export async function runFacebookDiscovery(env, input = {}, { mode = 'history', 
         try { await verifyDiscoveredPhotos(env, budget); }
         catch (e) { verificationError = { task: 'verify-existing-photos', error: redact(e.message, env) }; }
       }
-      const report = await runDiscoveryBatch(env, state, { dryRun: false, mappings, renew, budget });
+      const report = await runDiscoveryBatch(env, state, { dryRun: false, mappings: mode === 'history' ? mappings : null, renew, budget });
       if (verificationError) report.errors.push(verificationError);
       for (const album of report.albums) await env.DB.prepare('INSERT INTO facebook_albums(album_id,name,description,created_time,updated_time) VALUES (?,?,?,?,?) ON CONFLICT(album_id) DO UPDATE SET name=excluded.name,description=excluded.description,updated_time=excluded.updated_time').bind(album.id, album.name, album.description, album.created_time, album.updated_time).run();
       const attempts = report.errors.length ? job.attempts + 1 : 0;

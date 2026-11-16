@@ -1,6 +1,7 @@
 // Shared bounded traversal. No storage, credentials, downloads or publication
 // live here. Preview keeps this continuation in the browser; imports keep it
 // in D1. Never follow a Graph-provided URL (it may include an access token).
+import { albumCollectionKind } from './facebook-album-matching.js';
 const ID = /^[0-9_]{1,64}$/;
 const CURSOR = /^[A-Za-z0-9_=-]{1,2048}$/;
 const EDGES = /^(albums|photos|posts|attachments|subattachments)$/;
@@ -52,7 +53,8 @@ function attachments(page, post, tasks, version, edge = 'attachments', id = post
 }
 
 export async function discoveryBatch(state, { graph, visit, version, budget, renew = async () => {}, maxSteps = 12 }) {
-  const report = { albums: [], posts: [], photos: [], errors: [], complete: false };
+  const report = { albums: [], posts: [], photos: [], errors: [], complete: false,
+    coverage: { albumPages: 0, postPages: 0, postsReturned: 0, postsUnknownAuthor: 0, postsOtherAuthor: 0 } };
   state.contexts ||= {};
   // Store a post caption once, not on every photo task in a large post.
   for (const task of state.tasks) if (task.post && Object.hasOwn(task.post, 'message')) {
@@ -70,7 +72,7 @@ export async function discoveryBatch(state, { graph, visit, version, budget, ren
         // Absence of ownership information is not permission to import visitor content.
         if (photo.from?.id !== state.pageId) throw new Error('Photo ownership could not be verified');
         const result = await visit(photo, task, state.cutoff, budget);
-        report.photos.push({ id: photo.id, origin: task.origin, albumId: photo.album?.id || task.album?.id || null, ...result });
+        report.photos.push({ id: photo.id, origin: task.origin, sourceAlbumId: task.album?.id || null, albumId: photo.album?.id || task.album?.id || null, ...result });
         state.tasks.shift();
         continue;
       }
@@ -79,12 +81,14 @@ export async function discoveryBatch(state, { graph, visit, version, budget, ren
       if (!Array.isArray(page?.data)) throw new Error('Graph edge returned no data array; coverage incomplete');
       const children = [];
       const next = continuation(page, task, version);
+      if (task.edge === 'albums') report.coverage.albumPages++;
+      if (task.edge === 'posts') report.coverage.postPages++;
       for (const item of page.data) {
         if (task.edge === 'albums') {
           if (!ID.test(item.id || '')) throw new Error('Invalid album ID');
           if (item.from?.id && item.from.id !== state.pageId) continue;
           const album = { id: item.id, name: String(item.name || '').slice(0, 200), description: String(item.description || '').slice(0, 5000), created_time: item.created_time || null, updated_time: item.updated_time || null };
-          report.albums.push(album);
+          report.albums.push({ ...album, collection: albumCollectionKind(album.name) });
           children.push({ edge: 'photos', id: item.id, album });
         } else if (task.edge === 'photos') {
           if (!ID.test(item.id || '')) throw new Error('Invalid photo ID');
@@ -93,7 +97,10 @@ export async function discoveryBatch(state, { graph, visit, version, budget, ren
           if (state.cutoff && item.created_time && Number.isFinite(Date.parse(item.created_time)) && Date.parse(item.created_time) < Date.parse(state.cutoff)) continue;
           children.push({ edge: 'photo', id: item.id, album: task.album, origin: 'album' });
         } else if (task.edge === 'posts') {
-          if (item.from?.id !== state.pageId) continue;
+          report.coverage.postsReturned++;
+          const author = item.from?.id == null ? '' : String(item.from.id);
+          if (!author) { report.coverage.postsUnknownAuthor++; continue; }
+          if (author !== state.pageId) { report.coverage.postsOtherAuthor++; continue; }
           const post = { id: item.id, message: String(item.message || '').slice(0, 5000), created_time: item.created_time || null, permalink_url: item.permalink_url || null, from: item.from };
           if (!ID.test(post.id || '')) throw new Error('Invalid post ID');
           state.contexts[post.id] = post;

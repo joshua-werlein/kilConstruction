@@ -1,4 +1,4 @@
-import { initCompleteDiscoveryUI } from "./facebook-discovery-ui";
+import { initCompleteDiscoveryUI, type AlbumTarget } from "./facebook-discovery-ui";
 
 type EventCounts = {
     pending: number;
@@ -36,6 +36,8 @@ type ManualProject = { prefix: string; name: string };
 
 type Overview = {
     autoImport: boolean;
+    historicalImportEnabled?: boolean;
+    albumTargets?: AlbumTarget[];
     discovery?: { mode: string; status: string; attempts: number; next_attempt_at: number }[];
     sync: {
         lastEventReceivedAt: string | null;
@@ -790,10 +792,8 @@ export default function initFacebookPage() {
 
         initCompleteDiscoveryUI({
             request: (body) => apiUrl(`${adminApiBase}/facebook/backfill`, body),
-            targets: () => [
-                ...(overview?.projects || []).map(p => ({ value: `project:${p.id}`, name: p.name })),
-                ...(overview?.manualProjects || []).map(p => ({ value: `manual:${p.prefix}`, name: p.name })),
-            ],
+            targets: () => overview?.albumTargets ?? [],
+            importEnabled: () => overview?.historicalImportEnabled === true,
             refreshed: loadOverview,
             status: (message) => flashStatus(message, "info", 0),
         });

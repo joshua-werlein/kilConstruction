@@ -41,6 +41,7 @@ function makeEnv(overrides = {}) {
     FB_PAGE_ID: PAGE_ID,
     FB_GRAPH_VERSION: "v26.0",
     FB_AUTO_IMPORT: "false",
+    FB_HISTORICAL_IMPORT_ENABLED: "true",
     FB_INTEGRATION_ENABLED: "true",
     // Real limiters (3 writes/min) would throttle the suite; limits aren't under test.
     READ_LIMITER: { limit: async () => ({ success: true }) },
@@ -2017,4 +2018,91 @@ test("project descriptions: manual, blank and automatic choices work for linked 
   assert.equal(page.project.description, "", "hidden Facebook source never contributes text");
   assert.equal(page.items.length, 1);
   assert.equal(await (await baseEnv.GALLERY_BUCKET.get("Projects/Miller Garage/manual.jpg")).text(), "manual");
+});
+
+test("album review: same names remain distinguishable but a linked project and its folder share one target", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Projects/Wheelman_Performance/one.jpg", "manual");
+  await baseEnv.GALLERY_BUCKET.put("Remodels/Wheelman_Performance/two.jpg", "manual");
+  const response = await adminPost("project-create", { name: "Wheelman Performance", category: "projects", linkedPrefix: "Projects/Wheelman_Performance/" });
+  const overview = await getJson(`${BASE}/admin/overview`, { admin: true });
+  const targets = overview.albumTargets.filter(t => t.name === "Wheelman Performance");
+  assert.equal(targets.length, 2);
+  assert.deepEqual(new Set(targets.map(t => t.value)), new Set([`project:${response.project.id}`, "manual:Remodels/Wheelman_Performance/"]));
+  assert.deepEqual(new Set(targets.map(t => t.prefix)), new Set(["Projects/Wheelman_Performance/", "Remodels/Wheelman_Performance/"]));
+});
+
+test("album review: short names and near spellings are suggestions while exact unique destinations can be linked", async () => {
+  for (const name of ["Kiley Enclosed Porch", "Kiley Lean-to", "D. Dahl Porch", "Pfaffe House"]) {
+    await baseEnv.GALLERY_BUCKET.put(`Projects/${name}/old.jpg`, "manual");
+  }
+  await baseEnv.GALLERY_BUCKET.put("Remodels/J&A_Dahl/old.jpg", "manual");
+  for (const [name, expected, choices] of [
+    ["Kiley porch", "review-album", ["Kiley Enclosed Porch", "Kiley Lean-to"]],
+    ["Dahl", "review-album", ["D. Dahl Porch", "J&A Dahl"]],
+    ["Pfafe", "review-album", ["Pfaffe House"]],
+    ["D.Dahl Porch", "album-match", []],
+  ]) {
+    discoveryFixtures(["9701"], { name });
+    const scan = await scanAll();
+    const project = scan.photos[0].project;
+    assert.equal(project.reason, expected);
+    assert.deepEqual(new Set(project.candidates.map(p => p.name)), new Set(choices));
+    assert.equal(project.action, expected === "album-match" ? "link" : "recent");
+  }
+  assert.equal((await rows("SELECT * FROM facebook_projects")).length, 0);
+});
+
+test("album review: exclusions are visible in preview and honored across album and post discovery without downloads", async () => {
+  const album = discoveryFixtures(["9701"]);
+  const post = stubPost(`${PAGE_ID}_998`, ["9701"], { album, message: "Project update" });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  const mappings = { "970": "exclude" };
+  const preview = await scanAll({ mappings });
+  assert.ok(preview.photos.every(p => p.outcome === "excluded"));
+  assert.equal(preview.photos.find(p => p.origin === "album").sourceAlbumId, "970");
+  const run = await scanAll({ mappings, dry: false });
+  assert.ok(run.photos.every(p => p.outcome === "excluded"));
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
+  assert.equal((await rows("SELECT * FROM facebook_album_mappings")).length, 0);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith("fbcdn.net")));
+});
+
+test("preview coverage: Meta returned posts without author IDs; report partial instead of empty success", async () => {
+  discoveryFixtures([]);
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [{ id: `${PAGE_ID}_1` }, { id: "9_1", from: { id: "9" } }] });
+  const result = await getJson(`${BASE}/backfill`, { method:"POST", admin:true, body:{ discovery:true, dryRun:true } });
+  assert.equal(result.complete, true, "traversal finished");
+  assert.equal(result.partial, true, "coverage is incomplete");
+  assert.deepEqual(result.coverage, { albumPages:1, postPages:1, postsReturned:2, postsUnknownAuthor:1, postsOtherAuthor:1 });
+  assert.deepEqual(result.posts, []);
+  assert.match(result.warnings[0], /verifiable author/);
+  assert.equal((await rows("SELECT * FROM facebook_discovery_jobs")).length,0);
+});
+
+test("preview coverage: posts edge unexpectedly empty despite an existing imported post", async () => {
+  const p = stubPost(`${PAGE_ID}_999`, ["99801"], { message:"Known Page post" });
+  await postWebhook(autoEnv(), feedPayload([postAdd(p.id)]));
+  discoveryFixtures([]);
+  const result = await getJson(`${BASE}/backfill`, { method:"POST", admin:true, body:{ discovery:true, dryRun:true } });
+  assert.equal(result.partial, true);
+  assert.equal(result.coverage.postPages, 1);
+  assert.equal(result.coverage.postsReturned, 0);
+  assert.match(result.warnings[0], /previously imported post/);
+});
+
+test("preview-only production gate: even authenticated writes fail on both historical paths", async () => {
+  discoveryFixtures(["9701"]);
+  const env = makeEnv({ FB_HISTORICAL_IMPORT_ENABLED: "false" });
+  for (const discovery of [false, true]) {
+    const response = await call(`${BASE}/backfill`, {
+      method: "POST", admin: true, env, body: { discovery, dryRun: false, authorizeHistorical: true },
+    });
+    assert.equal(response.status, 403);
+  }
+  assert.equal(graphCalls().length, 0);
+  const report = await scanAll({ env });
+  assert.equal(report.photos[0].id, "9701");
+  assert.equal((await rows("SELECT * FROM facebook_discovery_jobs")).length, 0);
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET), []);
 });

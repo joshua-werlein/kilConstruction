@@ -25,6 +25,7 @@ FB_AUTO_IMPORT   = "true"    # owner-approved 2026-10-19; "false" pauses imports
 # and the owner's deployment approval. First reconciliation establishes a
 # future-only cutoff; historical import always requires a separate admin action.
 FB_DISCOVERY_ENABLED = "false"
+FB_HISTORICAL_IMPORT_ENABLED = "false" # preview-only rollout; blocks both historical import routes
 # Days a photo confirmed deleted/unpublished on Facebook stays recoverable
 # (hidden, private master kept) before permanent deletion. OWNER DECISION.
 FB_REMOVED_RETENTION_DAYS = "30"
