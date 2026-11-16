@@ -39,6 +39,7 @@ function continuation(page, task, version) {
   if (!after || !CURSOR.test(after)) throw new Error('Missing or unsupported Graph cursor; coverage incomplete');
   // A nested subattachment edge can use an attachment node ID instead of a post ID.
   if (match[2] !== task.edge || (task.edge !== 'subattachments' && match[1] !== task.id)) throw new Error('Unexpected Graph pagination edge');
+  if (match[1] === task.id && after === task.after) throw new Error('Graph pagination cursor did not advance; coverage incomplete');
   return { ...task, id: match[1], after };
 }
 
@@ -52,7 +53,7 @@ function attachments(page, post, tasks, version, edge = 'attachments', id = post
   }
 }
 
-export async function discoveryBatch(state, { graph, visit, version, budget, renew = async () => {}, maxSteps = 12 }) {
+export async function discoveryBatch(state, { graph, visit, version, budget, renew = async () => {}, maxSteps = 12, canContinue = () => true, review = false }) {
   const report = { albums: [], posts: [], photos: [], errors: [], complete: false,
     coverage: { albumPages: 0, postPages: 0, postsReturned: 0, postsUnknownAuthor: 0, postsOtherAuthor: 0 } };
   state.contexts ||= {};
@@ -61,9 +62,11 @@ export async function discoveryBatch(state, { graph, visit, version, budget, ren
     state.contexts[task.post.id] = task.post;
     task.post = { id: task.post.id };
   }
-  for (let n = 0; n < maxSteps && state.tasks.length && budget.remaining >= 4; n++) {
+  if (review) report.discoveredPhotos = [];
+  for (let n = 0; n < maxSteps && state.tasks.length && budget.remaining >= 4 && canContinue(); n++) {
     const queued = state.tasks[0];
     const task = { ...queued, post: state.contexts[queued.post?.id] || queued.post };
+    const coverageBeforeTask = review ? { ...report.coverage } : null;
     try {
       await renew();
       if (task.edge === 'photo') {
@@ -73,6 +76,7 @@ export async function discoveryBatch(state, { graph, visit, version, budget, ren
         if (photo.from?.id !== state.pageId) throw new Error('Photo ownership could not be verified');
         const result = await visit(photo, task, state.cutoff, budget);
         report.photos.push({ id: photo.id, origin: task.origin, sourceAlbumId: task.album?.id || null, albumId: photo.album?.id || task.album?.id || null, ...result });
+        if (review) report.photos.at(-1).sourcePostId = task.post?.id || null;
         state.tasks.shift();
         continue;
       }
@@ -92,6 +96,7 @@ export async function discoveryBatch(state, { graph, visit, version, budget, ren
           children.push({ edge: 'photos', id: item.id, album });
         } else if (task.edge === 'photos') {
           if (!ID.test(item.id || '')) throw new Error('Invalid photo ID');
+          if (review) report.discoveredPhotos.push({ id: item.id, origin: 'album', sourceAlbumId: task.id });
           // Old album pages are cheap ID/date inventories. No need to fetch
           // full metadata for photos outside reconciliation's approved range.
           if (state.cutoff && item.created_time && Number.isFinite(Date.parse(item.created_time)) && Date.parse(item.created_time) < Date.parse(state.cutoff)) continue;
@@ -113,12 +118,25 @@ export async function discoveryBatch(state, { graph, visit, version, budget, ren
         // continuation already added below; process this page's nested items once.
         attachments({ data: page.data }, task.post, children, version, task.edge, task.id);
       }
+      if (review && task.edge !== 'photos') {
+        for (const photo of children) if (photo.edge === 'photo') {
+          report.discoveredPhotos.push({ id: photo.id, origin: 'post', sourcePostId: photo.post.id });
+        }
+      }
       // Depth-first traversal bounds pending tasks to a few pages, even for huge albums.
       if (next) children.push(next.post ? { ...next, post: { id: next.post.id } } : next);
       state.tasks.splice(0, 1, ...children);
     } catch (e) {
       if (e.name === 'BudgetExhausted') break;
-      report.errors.push({ task: `${task.id}/${task.edge}`, error: e.message });
+      if (coverageBeforeTask) report.coverage = coverageBeforeTask;
+      const failure = { task: `${task.id}/${task.edge}`, error: e.message };
+      if (review) {
+        if (Number.isInteger(e.graphStatus)) failure.httpStatus = e.graphStatus;
+        if (Number.isInteger(e.graphCode)) failure.graphCode = e.graphCode;
+        if (Number.isInteger(e.graphSubcode)) failure.graphSubcode = e.graphSubcode;
+        if (e.name === 'TimeoutError') failure.timedOut = true;
+      }
+      report.errors.push(failure);
       // Retain the exact failed task. No cursor advances over missing content.
       break;
     }

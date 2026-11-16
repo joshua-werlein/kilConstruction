@@ -1624,13 +1624,14 @@ function discoveryFixtures(ids = ['9701'], { albumId = '970', name = 'Harper Bar
   });
   return album;
 }
-async function scanAll({ dry = true, env = makeEnv(), mappings = {} } = {}) {
-  let state;
-  const report = { albums: [], posts: [], photos: [], errors: [], complete: false };
-  for (let n = 0; n < 100; n++) {
+async function scanAll({ dry = true, env = makeEnv(), mappings = {}, state, onBatch = () => {} } = {}) {
+  const report = { albums: [], posts: [], photos: [], errors: [], discoveredPhotos: [], duplicateCandidates: [], warnings: [], complete: false, partial: false };
+  for (let n = 0; n < 500; n++) {
     const batch = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, env, body: { discovery: true, dryRun: dry, authorizeHistorical: !dry, mappings, ...(state ? { state } : {}) } });
     assert.equal(batch.busy, undefined, 'no unexpected lease or retry delay');
-    for (const key of ['albums', 'posts', 'photos', 'errors']) report[key].push(...batch[key]);
+    for (const key of ['albums', 'posts', 'photos', 'errors', 'discoveredPhotos', 'duplicateCandidates', 'warnings']) report[key].push(...(batch[key] || []));
+    report.partial ||= !!batch.partial;
+    onBatch(batch);
     state = batch.nextState;
     if (batch.complete || batch.errors.length) { report.complete = batch.complete; return report; }
   }
@@ -1852,10 +1853,73 @@ test('complete discovery: preview identifies metadata duplicate candidates witho
   discoveryFixtures();
   await baseEnv.GALLERY_BUCKET.put('Projects/Existing/9701.jpg', 'manual');
   const r = await scanAll();
-  assert.deepEqual(r.photos[0].potentialManualDuplicates, ['Projects/Existing/9701.jpg']);
-  assert.equal(r.photos[0].visualDuplicatesChecked, false);
+  assert.deepEqual(r.duplicateCandidates, [{ id: '9701', key: 'Projects/Existing/9701.jpg' }]);
   assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith('fbcdn.net')));
   assert.equal(await (await baseEnv.GALLERY_BUCKET.get('Projects/Existing/9701.jpg')).text(), 'manual');
+});
+
+test('historical preview bounds Graph and paginated R2 reads across a large scan', async () => {
+  const ids = Array.from({ length: 399 }, (_, n) => String(n + 80000));
+  const album = discoveryFixtures(ids);
+  const post = stubPost(`${PAGE_ID}_800`, [ids[0], '89999'], { album, message: 'Harper Barn update' });
+  graphFixtures.set(`${PAGE_ID}/posts`, { data: [post] });
+  let inventoryReads = 0;
+  const gallery = {
+    async list(options) {
+      if (!options.include) return baseEnv.GALLERY_BUCKET.list(options);
+      inventoryReads++;
+      assert.equal(options.limit, 200);
+      if (options.prefix === 'Projects/' && !options.cursor) return { objects: [], truncated: true, cursor: 'page-two' };
+      if (options.cursor === 'page-two') return { objects: [{ key: 'Projects/Harper Barn/cover.jpg', customMetadata: { fbPhotoId: ids[0] } }] };
+      return { objects: [] };
+    },
+  };
+  let previousGraphReads = 0;
+  let previousInventoryReads = 0;
+  const report = await scanAll({
+    env: makeEnv({ GALLERY_BUCKET: gallery, FB_HISTORICAL_IMPORT_ENABLED: 'false' }),
+    onBatch(batch) {
+      const graphReads = fetchCalls.length - previousGraphReads;
+      const r2Reads = inventoryReads - previousInventoryReads;
+      assert.ok(graphReads <= 4);
+      assert.ok(r2Reads <= 1);
+      assert.ok(!graphReads || !r2Reads, 'Graph and inventory stay in separate requests');
+      assert.ok(batch.complete || batch.nextState);
+      previousGraphReads = fetchCalls.length;
+      previousInventoryReads = inventoryReads;
+    },
+  });
+  assert.equal(report.complete, true);
+  assert.equal(report.partial, false);
+  assert.equal(inventoryReads, 5);
+  assert.equal(new Set(report.discoveredPhotos.map(p => p.id)).size, 400);
+  assert.equal(report.photos.find(p => p.id === '89999').sourcePostId, post.id);
+  assert.deepEqual(report.duplicateCandidates, [{ id: ids[0], key: 'Projects/Harper Barn/cover.jpg' }]);
+  assert.ok(!fetchCalls.some(c => c.url.hostname.endsWith('fbcdn.net')));
+  assert.deepEqual(await rows('SELECT * FROM facebook_photos'), []);
+  assert.deepEqual(await rows('SELECT * FROM facebook_discovery_jobs'), []);
+});
+
+test('historical preview reports Graph 503 separately and retries from the exact failed photo', async () => {
+  discoveryFixtures(['9701', '9702']);
+  graphFixtures.set('9701', { status: 503, body: { error: { code: 2, message: `access_token=${PAGE_TOKEN}` } } });
+  const payload = { discovery: true, dryRun: true };
+  const failed = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, body: payload });
+  assert.equal(failed.complete, false);
+  assert.equal(failed.partial, true);
+  assert.equal(failed.errors[0].httpStatus, 503);
+  assert.equal(failed.errors[0].graphCode, 2);
+  assert.deepEqual(failed.discoveredPhotos.map(p => p.id), ['9701', '9702']);
+  assert.equal(failed.nextState.tasks[0].id, '9701');
+  assert.ok(!JSON.stringify(failed).includes(PAGE_TOKEN));
+  stubPhoto('9701', { album: { id: '970', name: 'Harper Barn' } });
+  const start = fetchCalls.length;
+  const single = await getJson(`${BASE}/backfill`, { method: 'POST', admin: true, body: { ...payload, state: failed.nextState, singleStep: true } });
+  assert.equal(fetchCalls.length - start, 1);
+  assert.deepEqual(single.photos.map(p => p.id), ['9701']);
+  const resumed = await scanAll({ state: single.nextState });
+  assert.equal(resumed.complete, true);
+  assert.deepEqual(resumed.photos.map(p => p.id), ['9702']);
 });
 
 test('complete discovery: unsupported cursors and forged task paths fail closed', async () => {
@@ -2071,7 +2135,8 @@ test("preview coverage: Meta returned posts without author IDs; report partial i
   discoveryFixtures([]);
   graphFixtures.set(`${PAGE_ID}/posts`, { data: [{ id: `${PAGE_ID}_1` }, { id: "9_1", from: { id: "9" } }] });
   const result = await getJson(`${BASE}/backfill`, { method:"POST", admin:true, body:{ discovery:true, dryRun:true } });
-  assert.equal(result.complete, true, "traversal finished");
+  assert.equal(result.complete, false, "manual duplicate inventory is still pending");
+  assert.equal(result.coveragePhase, 'manual-inventory');
   assert.equal(result.partial, true, "coverage is incomplete");
   assert.deepEqual(result.coverage, { albumPages:1, postPages:1, postsReturned:2, postsUnknownAuthor:1, postsOtherAuthor:1 });
   assert.deepEqual(result.posts, []);

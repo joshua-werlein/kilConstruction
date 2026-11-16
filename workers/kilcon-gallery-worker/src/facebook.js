@@ -918,7 +918,7 @@ async function assignProject(env, { context, photos, photoCount = photos.length,
     const m = matches[0];
     if (m.id) return { id: m.id, slug: m.slug, name: m.name, reason: "caption", action: "reuse" };
     // Manual R2 gallery: reuse (or create once) a link row pointing at it.
-    if (dryRun) return { id: null, slug: null, name: m.name, reason: "caption", action: "link" };
+    if (dryRun) return { id: null, slug: null, name: m.name, reason: "caption", action: "link", destination: `manual:${m.prefix}` };
     const linked = await getOrCreateLinkedProject(env, m.prefix, m.name, "auto");
     return { ...linked, reason: "caption", action: "link" };
   }
@@ -1457,7 +1457,7 @@ function graphGet(env, path, params = {}, budget = null) {
   return graphRequest(env, "GET", path, params, budget);
 }
 
-async function graphRequest(env, method, path, params = {}, budget = null) {
+async function graphRequest(env, method, path, params = {}, budget = null, signal = null) {
   const token = env.FB_PAGE_ACCESS_TOKEN;
   if (!token) throw new Error("FB_PAGE_ACCESS_TOKEN is not configured");
 
@@ -1477,8 +1477,11 @@ async function graphRequest(env, method, path, params = {}, budget = null) {
   }
 
   // Token goes in a header so it never appears in URLs or logs.
-  const resp = await fetch(url.toString(), { method, headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20000) });
-  const data = await resp.json().catch(() => null);
+  const resp = await fetch(url.toString(), { method, headers: { Authorization: `Bearer ${token}` }, signal: signal || AbortSignal.timeout(20000) });
+  const data = await resp.json().catch(() => {
+    signal?.throwIfAborted();
+    return null;
+  });
   if (!resp.ok || data?.error) {
     const code = data?.error?.code ?? "?";
     const err = new Error(`Graph API error ${resp.status}/${code}: ${redact(data?.error?.message || "", env)}`);
@@ -2173,7 +2176,7 @@ async function discoveryProject(env, photo, task, context, dryRun, mappings, tar
     }
     if (!project) throw new Error('Album mapping target no longer exists');
     if (!dryRun) await env.DB.prepare('INSERT INTO facebook_album_mappings(album_id,project_id,locked) VALUES (?,?,1) ON CONFLICT(album_id) DO UPDATE SET project_id=excluded.project_id, locked=1').bind(albumId, project.id).run();
-    return { ...project, reason: 'admin', action: 'reuse' };
+    return { ...project, reason: 'admin', action: 'reuse', destination: mapping };
   }
   if (albumId) {
     const mapped = await env.DB.prepare('SELECT p.id,p.slug,p.name FROM facebook_album_mappings m JOIN facebook_projects p ON p.id=m.project_id WHERE m.album_id=?').bind(albumId).first();
@@ -2205,29 +2208,66 @@ async function discoveryProject(env, photo, task, context, dryRun, mappings, tar
   return await assignProject(env, { context, photos: [], photoCount: 1, dryRun });
 }
 
-async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew }) {
-  const graph = (path, params, b) => graphGet(env, path, params, b);
-  let manualPhotos;
+const PREVIEW_STEPS = 4;
+const PREVIEW_GRAPH_MS = 8000;
+const PREVIEW_INVENTORY_PAGE_SIZE = 200;
+
+// Inventory is a separate read-only phase. Each request lists at most one R2
+// page so gallery size cannot add unbounded subrequests to a Graph batch.
+async function previewInventoryPage(env, state) {
+  const report = { albums: [], posts: [], photos: [], errors: [], duplicateCandidates: [], complete: false, nextState: state };
+  const { root, cursor } = state.previewInventory;
+  if (!Number.isInteger(root) || root < 0 || root >= MANUAL_PROJECT_ROOTS.length ||
+      !(cursor === null || (typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 4096))) {
+    throw new Error('Invalid preview inventory continuation');
+  }
+  try {
+    const page = await env.GALLERY_BUCKET.list({
+      prefix: MANUAL_PROJECT_ROOTS[root], cursor: cursor ?? undefined,
+      limit: PREVIEW_INVENTORY_PAGE_SIZE, include: ['customMetadata'],
+    });
+    if (page.truncated && (!page.cursor || page.cursor === cursor)) throw new Error('R2 inventory cursor did not advance');
+    for (const object of page.objects) {
+      const ids = new Set([cleanId(object.customMetadata?.fbPhotoId), cleanId(object.key.split('/').pop()?.replace(/\.[^.]+$/, ''))]);
+      ids.delete(null);
+      for (const id of ids) if (id) report.duplicateCandidates.push({ id, key: object.key });
+    }
+    state.previewInventory = page.truncated ? { root, cursor: page.cursor } : { root: root + 1, cursor: null };
+    report.complete = state.previewInventory.root === MANUAL_PROJECT_ROOTS.length;
+    report.coveragePhase = report.complete ? 'complete' : 'manual-inventory';
+    if (report.complete) {
+      // Keep coverage warnings attached to the final batch, even if the caller
+      // paused and resumed during the manual gallery inventory.
+      report.warnings = Array.isArray(state.previewWarnings)
+        ? state.previewWarnings.filter(w => typeof w === 'string').map(w => redact(w, env))
+        : [];
+      report.partial = report.warnings.length > 0;
+    }
+  } catch {
+    report.coveragePhase = 'manual-inventory';
+    report.partial = true;
+    report.errors.push({ task: 'Manual gallery inventory', error: 'R2 listing failed. Resume to retry the same page.' });
+  }
+  return report;
+}
+
+const previewProposal = project => ({
+  name: project.name, reason: project.reason, action: project.action, candidates: project.candidates || [],
+  destination: project.destination || (project.id ? `project:${project.id}` : null),
+});
+
+async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew, maxSteps = PREVIEW_STEPS }) {
+  if (dryRun && !state.tasks.length && state.previewInventory) return previewInventoryPage(env, state);
+  const signal = dryRun ? AbortSignal.timeout(PREVIEW_GRAPH_MS) : null;
+  const deadline = dryRun ? Date.now() + PREVIEW_GRAPH_MS : Infinity;
+  const graph = (path, params, b) => graphRequest(env, 'GET', path, params, b, signal);
   let availableTargets;
   // A write batch can create a project; later albums must see that project
   // before proposing another one with the same name.
   const targets = () => dryRun ? (availableTargets ||= readAlbumTargets(env)) : readAlbumTargets(env);
-  const duplicateCandidates = async photo => {
-    if (!manualPhotos) {
-      manualPhotos = [];
-      for (const root of MANUAL_PROJECT_ROOTS) {
-        let cursor;
-        do {
-          const page = await env.GALLERY_BUCKET.list({ prefix: root, cursor, include: ['customMetadata'] });
-          manualPhotos.push(...page.objects);
-          cursor = page.truncated ? page.cursor : null;
-        } while (cursor);
-      }
-    }
-    return manualPhotos.filter(p => p.customMetadata?.fbPhotoId === photo.id || p.key.split('/').pop()?.replace(/\.[^.]+$/, '') === photo.id).map(p => p.key).slice(0, 20);
-  };
   const report = await discoveryBatch(state, {
     graph, version: env.FB_GRAPH_VERSION, budget, renew,
+    ...(dryRun ? { maxSteps, canContinue: () => Date.now() < deadline, review: true } : {}),
     visit: async (photo, task, cutoff, b) => {
       let existing = await getPhotoRow(env.DB, photo.id);
       const context = { postId: cleanId(task.post?.id), message: task.post?.message || photo.name || task.album?.description || '', createdTime: toIso(task.post?.created_time) || toIso(photo.created_time), permalink: task.post?.permalink_url || photo.link || null };
@@ -2262,7 +2302,7 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
           await refreshPostText(env.DB, task.post);
           await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message,permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, existing.project_id, 'existing-photo', source).run();
         }
-        return { outcome: 'existing', project: improved ? { name: improved.name, reason: improved.reason, action: improved.action } : null };
+        return { outcome: 'existing', project: improved ? previewProposal(improved) : null };
       }
       const albumIds = [task.album?.id, photo.album?.id].filter(Boolean);
       if (albumIds.some(id => mappings?.[id] === 'exclude')) return { outcome: 'excluded', project: { name: 'Excluded', reason: 'admin', action: 'exclude' } };
@@ -2272,7 +2312,7 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       const best = pickLargestImage(photo.images);
       if (!best) throw new Error('Photo has no downloadable image');
       assertFacebookCdnUrl(best.source);
-      if (dryRun) return { outcome: 'new', project: { name: project.name, reason: project.reason, action: project.action, candidates: project.candidates || [], destination: project.destination || null }, caption: String(photo.name || context.message).slice(0, 200), createdTime: date, potentialManualDuplicates: await duplicateCandidates(photo), visualDuplicatesChecked: false };
+      if (dryRun) return { outcome: 'new', project: previewProposal(project), createdTime: date };
       if (context.postId) await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message, permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, project.id, project.reason, source).run();
       await renew?.();
       const result = await importPhoto(env, { ...photo, album: photo.album || task.album }, { context: { ...context, message: task.post?.message || "" }, projectId: project.id, source, budget: b });
@@ -2298,6 +2338,13 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       if (progress.postsUnknownAuthor) report.warnings.push(`${progress.postsUnknownAuthor} post observation(s) did not have a verifiable author and were skipped.`);
     }
     report.partial = report.errors.length > 0 || report.warnings.length > 0;
+    report.coveragePhase = 'facebook';
+    if (report.complete) {
+      state.previewInventory = { root: 0, cursor: null };
+      state.previewWarnings = report.warnings;
+      report.complete = false;
+      report.coveragePhase = 'manual-inventory';
+    }
   }
   report.errors = report.errors.map(e => ({ ...e, error: redact(e.error, env) }));
   return report;
@@ -2314,7 +2361,7 @@ export async function runFacebookDiscovery(env, input = {}, { mode = 'history', 
     for (const [id, target] of Object.entries(mappings)) if (!ID_RE.test(id) || typeof target !== 'string' || target.length > 300 || !((target === 'recent' || target === 'exclude') || /^project:\d+$/.test(target) || target.startsWith('manual:'))) throw new Error('Invalid album mapping');
     if (dryRun) {
       const state = input.state ? validateDiscovery(input.state, pageId) : initialDiscovery(pageId);
-      return jsonResult(await runDiscoveryBatch(env, state, { dryRun: true, mappings }));
+      return jsonResult(await runDiscoveryBatch(env, state, { dryRun: true, mappings, maxSteps: input.singleStep === true ? 1 : PREVIEW_STEPS }));
     }
     if (mode === 'history' && input.authorizeHistorical !== true) return jsonResult({ error: 'Historical import requires explicit authorization' }, 400);
     const stamp = now.toISOString();

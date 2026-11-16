@@ -196,8 +196,8 @@ export default function initFacebookPage() {
             return apiUrl<T>(`${fbBase}${path}`, body);
         }
 
-        async function apiUrl<T>(url: string, body?: unknown): Promise<T> {
-            const init: RequestInit = { credentials: "include" };
+        async function apiUrl<T>(url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+            const init: RequestInit = { credentials: "include", signal };
             if (body !== undefined) {
                 init.method = "POST";
                 init.headers = { "Content-Type": "application/json" };
@@ -207,7 +207,8 @@ export default function initFacebookPage() {
             const data = (await res.json().catch(() => ({}))) as any;
             if (!res.ok) {
                 const msg = typeof data?.error === "string" ? data.error : `HTTP ${res.status}`;
-                throw new Error(msg);
+                const ray = res.headers.get("cf-ray");
+                throw Object.assign(new Error(msg), { status: res.status, rayId: ray && /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(ray) ? ray : undefined });
             }
             return data as T;
         }
@@ -791,7 +792,8 @@ export default function initFacebookPage() {
         // ---------- Historical import ----------
 
         initCompleteDiscoveryUI({
-            request: (body) => apiUrl(`${adminApiBase}/facebook/backfill`, body),
+            request: (body) => apiUrl(`${adminApiBase}/facebook/backfill`, body,
+                (body as { dryRun?: boolean }).dryRun ? AbortSignal.timeout(25000) : undefined),
             targets: () => overview?.albumTargets ?? [],
             importEnabled: () => overview?.historicalImportEnabled === true,
             refreshed: loadOverview,

@@ -1,11 +1,10 @@
-export type AlbumTarget = { value: string; name: string; category: string; source: string; prefix?: string | null; slug?: string };
-type Proposal = { name: string; reason: string; action: string; candidates?: AlbumTarget[]; destination?: string | null };
-type Coverage = { albumPages: number; postPages: number; postsReturned: number; postsUnknownAuthor: number; postsOtherAuthor: number };
+import { buildReviewReport, isRetryablePreviewStatus } from '../../utils/facebook-review-report';
+import type { Album, AlbumTarget, Coverage, CoverageError, Photo, ReviewedPhoto } from '../../utils/facebook-review-report';
+export type { AlbumTarget } from '../../utils/facebook-review-report';
 const emptyCoverage = (): Coverage => ({ albumPages: 0, postPages: 0, postsReturned: 0, postsUnknownAuthor: 0, postsOtherAuthor: 0 });
 const targetLabel = (t: AlbumTarget) => `${t.name} — ${t.prefix || `${t.category} / ${t.slug} (Facebook)`}`;
-type Photo = { id: string; origin: string; albumId: string | null; outcome: string; sourceAlbumId?: string | null; project?: Proposal | null; potentialManualDuplicates?: string[] };
-type Album = { id: string; name: string; collection?: 'branding' | 'generic' | 'project' };
-type Batch = { albums: Album[]; posts: { id: string }[]; photos: Photo[]; errors: { task: string; error: string }[]; warnings?: string[]; coverage?: Coverage; partial?: boolean; complete: boolean; nextState?: unknown; busy?: boolean };
+type Batch = { albums: Album[]; posts: { id: string }[]; photos: Photo[]; discoveredPhotos?: Photo[]; errors: CoverageError[]; warnings?: string[]; coverage?: Coverage; partial?: boolean; complete: boolean; nextState?: unknown; busy?: boolean; coveragePhase?: string; duplicateCandidates?: { id: string; key: string }[] };
+type RequestFailure = Error & { status?: number; rayId?: string };
 const escape = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 export function initCompleteDiscoveryUI(options: {
@@ -29,10 +28,15 @@ export function initCompleteDiscoveryUI(options: {
   const byAlbum = new Map<string, Map<string, Photo>>();
   let stopped = false;
   let previewComplete = false;
+  let draftChanged = false;
+  let phase = 'facebook';
+  let isPreview = false;
   let state: unknown = null;
   let albums = new Map<string, Album>();
   let posts = new Set<string>();
-  let photos = new Map<string, Photo & { origins: Set<string> }>();
+  let photos = new Map<string, ReviewedPhoto>();
+  const duplicates = new Map<string, Set<string>>();
+  const duplicateKeys = (id: string) => [...(duplicates.get(id) || [])];
   let errors: Batch['errors'] = [];
   const mappings: Record<string, string> = Object.create(null);
   try {
@@ -66,9 +70,13 @@ export function initCompleteDiscoveryUI(options: {
       <div><dt>Already imported</dt><dd>${rows.filter(p => p.outcome === 'existing').length}</dd></div>
       <div><dt>Suppressed</dt><dd>${rows.filter(p => p.outcome === 'suppressed').length}</dd></div>
       <div><dt>Imported this run</dt><dd>${rows.filter(p => p.outcome === 'imported').length}</dd></div>
-      <div><dt>Possible manual duplicates</dt><dd>${rows.filter(p => p.potentialManualDuplicates?.length).length}</dd></div>
+      <div><dt>Possible manual duplicates</dt><dd>${rows.filter(p => duplicates.has(p.id)).length}</dd></div>
       <div><dt>Albums needing a decision</dt><dd>${unresolvedAlbums().length}</dd></div>
     </dl><p class="hint">Counts cover accessible content scanned so far. Duplicate candidates use stored Facebook IDs or filenames; visually identical or recompressed images are not compared. Preview does not download or publish originals.</p>
+    ${isPreview ? `<div class="actions fb-review-actions">
+      <button type="button" class="btn-small" data-export-review aria-describedby="fb-export-status" ${active ? 'disabled' : ''}>Download review report (JSON)</button>
+      <span id="fb-export-status" class="hint">${previewComplete ? 'Complete scan' : 'Incomplete scan'}${draftChanged ? ' · Destination drafts changed since scanning' : ''}</span>
+    </div>` : ''}
     <h3>Proposed galleries</h3><ul>${[...groups].map(([name, count]) => `<li>${escape(name)}: ${count} photo(s)</li>`).join('')}</ul>
     <div id="fb-album-review"></div>
     ${warnings.length ? `<h3>Coverage warnings</h3><ul>${warnings.map(w => `<li>${escape(w)}</li>`).join('')}</ul>` : ''}
@@ -112,7 +120,6 @@ export function initCompleteDiscoveryUI(options: {
       <p class="hint">Selection is a draft in this tab. It does not change any gallery. Re-run the preview after editing.</p>
       <button type="button" data-close-editor>Done</button></fieldset>` : '';
     section.innerHTML = `<h3>Album review</h3><label>Filter albums <input type="search" data-album-filter value="${escape(filter)}"></label>
-      <button type="button" data-export-review ${active ? 'disabled' : ''}>Download review report</button>
       ${edit}
       <div class="table-wrap"><table class="fb-table"><thead><tr><th scope="col">Album</th><th scope="col">Unique photos</th><th scope="col">Proposed destination</th><th scope="col">Review</th><th scope="col">Action</th></tr></thead><tbody>
       ${visible.map(([id,album])=>{
@@ -140,17 +147,16 @@ export function initCompleteDiscoveryUI(options: {
     const button = (event.target as HTMLElement).closest('button');
     if (active || !button) return;
     if (button.hasAttribute('data-export-review')) {
-      const report = { complete: previewComplete, coverage, warnings, errors,
-        albums: [...albums].map(([id, album]) => ({ id, name: album.name, collection: album.collection, draft: mappings[id] || null,
-          photos: [...(byAlbum.get(id)?.values() ?? [])].map(p => ({ id: p.id, outcome: p.outcome, project: p.project,
-            alsoFoundInPosts: photos.get(p.id)?.origins.has('post') ?? false,
-            possibleManualDuplicates: p.potentialManualDuplicates ?? [] })) })) };
+      const report = buildReviewReport({ complete: previewComplete, draftChanged, phase, coverage, warnings, errors,
+        albums, posts, photos, byAlbum, mappings, duplicateKeys, needsDecision });
       const url = URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'kilcon-facebook-album-review.json';
+      link.download = `kilcon-facebook-album-review-${report.status}.json`;
+      document.body.appendChild(link);
       link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30000);
     } else if (button.dataset.editAlbum) {
       selected = button.dataset.editAlbum;
       renderReview();
@@ -168,66 +174,113 @@ export function initCompleteDiscoveryUI(options: {
     if (select.value) mappings[selected] = select.value;
     else delete mappings[selected];
     try { sessionStorage.setItem(draftKey, JSON.stringify(mappings)); } catch { /* in-memory draft still available */ }
-    previewComplete = false;
+    draftChanged = true;
     state = null;
+    preview.textContent = 'Preview (dry run)';
     run.disabled = true;
+    const exportStatus = panel.querySelector('#fb-export-status');
+    if (exportStatus) exportStatus.textContent = `${previewComplete ? 'Complete scan' : 'Incomplete scan'} · Destination drafts changed since scanning`;
     renderReview();
     (panel.querySelector('[data-destination]') as HTMLSelectElement | null)?.focus();
     options.status('Draft updated. Run Preview again before importing.');
   });
 
+  function recordPhoto(p: Photo) {
+    const source = p.sourceAlbumId || (p.origin === 'album' ? p.albumId : null);
+    if (source) {
+      const members = byAlbum.get(source) ?? new Map<string, Photo>();
+      if (p.outcome || !members.has(p.id)) members.set(p.id, p);
+      byAlbum.set(source, members);
+    }
+    const old = photos.get(p.id);
+    const origins = old?.origins || new Set<string>();
+    const postIds = old?.postIds || new Set<string>();
+    const reportedAlbumIds = old?.reportedAlbumIds || new Set<string>();
+    origins.add(p.origin);
+    if (p.sourcePostId) postIds.add(p.sourcePostId);
+    if (p.albumId) reportedAlbumIds.add(p.albumId);
+    const project = old?.project && old.project.action !== 'recent' ? old.project : p.project || old?.project;
+    const outcome = old?.outcome === 'imported' ? 'imported' : p.outcome || old?.outcome;
+    photos.set(p.id, { ...old, ...p, project, outcome, origins, postIds, reportedAlbumIds });
+  }
+
   async function scan(dry: boolean) {
-    if (!dry && (!options.importEnabled() || !previewComplete || unresolvedAlbums().length || !window.confirm('Import and publish the historical album and post photos using the reviewed mappings? Existing manual photos and suppression choices are preserved.'))) return;
+    if (active || (!dry && (!options.importEnabled() || !previewComplete || draftChanged || unresolvedAlbums().length || !window.confirm('Import and publish the historical album and post photos using the reviewed mappings? Existing manual photos and suppression choices are preserved.')))) return;
     stopped = false;
     active = true;
     selected = "";
+    isPreview = dry;
     if (dry) previewComplete = false;
     preview.disabled = run.disabled = true;
     stop.hidden = false;
-    if (!dry || !state) { albums = new Map(); posts = new Set(); photos = new Map(); byAlbum.clear(); coverage = emptyCoverage(); }
+    if (!dry || !state) {
+      albums = new Map(); posts = new Set(); photos = new Map(); byAlbum.clear(); duplicates.clear();
+      coverage = emptyCoverage(); warnings = []; phase = 'facebook'; draftChanged = false;
+    }
     errors = [];
-    warnings = [];
     let first = true;
+    let singleStep = false;
+    let lastRender = performance.now();
+    render('Scanning albums and posts…');
     try {
       while (!stopped) {
-        const batch = await options.request({ discovery: true, dryRun: dry, ...(dry && state ? { state } : {}), mappings, ...(!dry ? { authorizeHistorical: true, retry: first } : {}) });
+        const body = { discovery: true, dryRun: dry, ...(dry && state ? { state } : {}), mappings, ...(!dry ? { authorizeHistorical: true, retry: first } : {}) };
+        let batch: Batch;
+        try {
+          batch = await options.request({ ...body, ...(singleStep ? { singleStep: true } : {}) });
+        } catch (e) {
+          if (!dry || stopped || !isRetryablePreviewStatus((e as RequestFailure).status)) throw e;
+          singleStep = true;
+          options.status('Preview request interrupted. Retrying the same checkpoint with a smaller batch.');
+          await new Promise(resolve => window.setTimeout(resolve, 1000));
+          if (stopped) break;
+          batch = await options.request({ ...body, singleStep: true });
+        }
         if (batch.busy) { options.status('Another scan is running, or a retry is waiting for its backoff. Try again later.'); break; }
+        if (!Array.isArray(batch.albums) || !Array.isArray(batch.posts) || !Array.isArray(batch.photos) ||
+            !Array.isArray(batch.errors) || (dry && !batch.complete && !batch.nextState)) {
+          throw new Error('The preview response was incomplete. Resume to retry the last checkpoint.');
+        }
         if (batch.coverage) for (const key of Object.keys(coverage) as (keyof Coverage)[]) coverage[key] += batch.coverage[key] || 0;
         for (const a of batch.albums) albums.set(a.id, a);
         for (const p of batch.posts) posts.add(p.id);
-        for (const p of batch.photos) {
-          const source = p.sourceAlbumId || (p.origin === 'album' ? p.albumId : null);
-          if (source) {
-            const members = byAlbum.get(source) ?? new Map<string, Photo>();
-            members.set(p.id, p);
-            byAlbum.set(source, members);
-          }
-          const old = photos.get(p.id);
-          const origins = old?.origins || new Set<string>();
-          origins.add(p.origin);
-          // Reencountering a photo must not inflate counts or erase its proposal.
-          const project = old?.project && old.project.action !== 'recent' ? old.project : p.project || old?.project;
-          photos.set(p.id, { ...old, ...p, project, outcome: old?.outcome === 'imported' ? 'imported' : p.outcome, origins });
+        for (const p of batch.discoveredPhotos || []) recordPhoto(p);
+        for (const p of batch.photos) recordPhoto(p);
+        for (const candidate of batch.duplicateCandidates || []) {
+          if (!photos.has(candidate.id)) continue;
+          const matches = duplicates.get(candidate.id) ?? new Set<string>();
+          if (matches.size < 20) matches.add(candidate.key);
+          duplicates.set(candidate.id, matches);
         }
+        phase = batch.coveragePhase || phase;
         errors.push(...batch.errors);
-        warnings.push(...(batch.warnings || []));
+        warnings = [...new Set([...warnings, ...(batch.warnings || [])])];
         if (dry) state = batch.complete ? null : batch.nextState;
-        render(batch.partial || errors.length ? 'Partial — review coverage' : batch.complete ? 'Complete' : 'Scanning albums and posts…');
+        if (dry && batch.complete) previewComplete = !batch.partial && !errors.length && !warnings.length;
+        if (batch.complete || errors.length || performance.now() - lastRender >= 250) {
+          render(errors.length || (batch.complete && warnings.length) ? 'Partial — review coverage'
+            : batch.complete ? 'Complete' : phase === 'manual-inventory' ? 'Checking for possible manual duplicates…' : 'Scanning albums and posts…');
+          lastRender = performance.now();
+        }
         if (errors.length) break;
-        if (batch.complete) { if (dry) previewComplete = !batch.partial && !warnings.length; break; }
+        if (batch.complete) break;
         first = false;
       }
-      if (stopped) render('Stopped after the current batch; preview can resume');
+      if (stopped && !previewComplete) render('Stopped after the current batch; preview can resume');
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
-      errors.push({ task: 'Preview request', error });
+      const failure = e as RequestFailure;
+      errors.push({ task: 'Preview request', error, httpStatus: failure.status, rayId: failure.rayId, timedOut: failure.name === 'TimeoutError' });
       render('Partial — request failed');
       options.status(`${dry ? 'Preview' : 'Import'} stopped: ${error}`);
     } finally {
       active = false;
       renderReview();
+      const download = panel!.querySelector<HTMLButtonElement>('[data-export-review]');
+      if (download) download.disabled = false;
       preview.disabled = false;
-      run.disabled = !options.importEnabled() || !previewComplete || unresolvedAlbums().length > 0;
+      preview.textContent = state ? 'Resume preview (dry run)' : 'Preview (dry run)';
+      run.disabled = !options.importEnabled() || !previewComplete || draftChanged || unresolvedAlbums().length > 0;
       stop.hidden = true;
       if (!dry) await options.refreshed();
     }
