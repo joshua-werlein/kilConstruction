@@ -39,18 +39,6 @@ export function photoContentType(key) {
   return TYPE_BY_EXT[extOf(key)] || null;
 }
 
-// Identify the real format from magic bytes (JPEG, PNG, WebP, AVIF).
-export function sniffImageType(bytes) {
-  const b = new Uint8Array(bytes.slice(0, 16));
-  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
-  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
-      b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a) return "image/png";
-  const ascii = (from, to) => String.fromCharCode(...b.slice(from, to));
-  if (b.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp";
-  if (b.length >= 12 && ascii(4, 8) === "ftyp" && ["avif", "avis"].includes(ascii(8, 12))) return "image/avif";
-  return null;
-}
-
 export function dataKey(id) {
   return `${REVIEWS_DATA_PREFIX}${id}.json`;
 }
@@ -177,26 +165,56 @@ export async function savePhoto(env, key, bytes) {
   await requirePrivate(env).put(key, bytes, { httpMetadata: { contentType } });
 }
 
+// Approved photos: the browser may keep a copy but must revalidate on every
+// use (no shared/CDN caching, no max-age), so withdrawal is immediate.
+// Pending/hidden photos (admin view): never stored.
+export const REVIEW_PHOTO_CACHE_APPROVED = "private, no-cache";
+export const REVIEW_PHOTO_CACHE_PRIVATE = "private, no-store";
+
+function etagMatches(ifNoneMatch, etag) {
+  if (!ifNoneMatch || !etag) return false;
+  const bare = (t) => t.trim().replace(/^W\//, "");
+  return ifNoneMatch.split(",").some((t) => t.trim() === "*" || bare(t) === bare(etag));
+}
+
 // Response for an authorized photo request. Type comes from the extension and
 // the response is sandboxed, so a disguised file can't run as a document.
-export async function photoResponse(env, key, { publicCache }) {
+// The caller has already checked access; a 304 is only ever sent after that.
+export async function photoResponse(env, key, { revalidate = false, ifNoneMatch = null } = {}) {
   const contentType = photoContentType(key);
   if (!contentType) return null;
-  let obj = env.PRIVATE_BUCKET ? await env.PRIVATE_BUCKET.get(key) : null;
-  if (!obj) obj = await env.GALLERY_BUCKET.get(key);
+  // Private copy first; the public bucket is only a legacy read-only fallback.
+  let bucket = null;
+  let head = null;
+  for (const b of [env.PRIVATE_BUCKET, env.GALLERY_BUCKET]) {
+    head = b ? await b.head(key) : null;
+    if (head) {
+      bucket = b;
+      break;
+    }
+  }
+  if (!bucket) return null;
+
+  const headers = {
+    "Content-Type": contentType,
+    "Content-Disposition": `inline; filename="photo.${extOf(key)}"`,
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Cache-Control": revalidate ? REVIEW_PHOTO_CACHE_APPROVED : REVIEW_PHOTO_CACHE_PRIVATE,
+  };
+
+  if (revalidate) {
+    if (head.httpEtag) headers.ETag = head.httpEtag;
+    if (etagMatches(ifNoneMatch, head.httpEtag)) {
+      return new Response(null, { status: 304, headers });
+    }
+  }
+
+  const obj = await bucket.get(key);
   if (!obj) return null;
-  return new Response(obj.body, {
-    status: 200,
-    headers: {
-      "Content-Type": contentType,
-      "Content-Disposition": `inline; filename="photo.${extOf(key)}"`,
-      "Content-Security-Policy": "default-src 'none'; sandbox",
-      "X-Content-Type-Options": "nosniff",
-      "Referrer-Policy": "no-referrer",
-      "Cross-Origin-Resource-Policy": "same-origin",
-      "Cache-Control": publicCache ? "public, max-age=300" : "private, no-store",
-    },
-  });
+  return new Response(obj.body, { status: 200, headers });
 }
 
 // --- migration of legacy public objects --------------------------------

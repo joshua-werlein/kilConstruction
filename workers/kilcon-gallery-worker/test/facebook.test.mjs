@@ -10,6 +10,7 @@ import path from "node:path";
 import { getPlatformProxy } from "wrangler";
 
 import worker from "../src/index.js";
+import { JPEG, PNG, SVG } from "./imageFixtures.mjs";
 import { processPendingEvents, handleFacebookScheduled, purgeExpiredRemovals, runRetention, redact, runFacebookDiscovery } from "../src/facebook.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -297,7 +298,8 @@ test("SECURITY: review photo endpoint serves approved photos only (admins see al
   const ok = await photo("r_appr_3");
   assert.equal(ok.status, 200);
   assert.equal(await ok.text(), "IMG-r_appr_3");
-  assert.match(ok.headers.get("Cache-Control"), /public/);
+  // Revocation-safe: no shared caching and no max-age; every reuse revalidates.
+  assert.equal(ok.headers.get("Cache-Control"), "private, no-cache");
 
   assert.equal(await (await photo("r_priv_3")).text(), "IMG-r_priv_3", "private-bucket photo served");
 
@@ -329,10 +331,6 @@ test("SECURITY: images.kilcon.work/Reviews/* is blocked by the worker route", as
   }
 });
 
-// Minimal valid file headers for magic-byte checks
-const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1]);
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
-const SVG = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
 
 async function submitReview(file, { env = makeEnv(), accept } = {}) {
   const form = new FormData();

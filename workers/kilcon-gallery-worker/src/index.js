@@ -21,8 +21,6 @@ import {
 import {
   REVIEWS_PHOTO_PREFIX,
   REVIEW_ID_RE,
-  photoContentType,
-  sniffImageType,
   getReview,
   putReview,
   listReviews,
@@ -32,6 +30,7 @@ import {
   reviewPhotoKey,
   runReviewMigration,
 } from "./reviewPrivacy.js";
+import { validateImageFile, readBoundedFormData, isSafeUploadKey } from "./imageValidation.js";
 
 // Facebook sync ships disabled. Until FB_INTEGRATION_ENABLED = "true", every
 // Facebook route 404s, public galleries never query D1, and cron only runs
@@ -175,6 +174,15 @@ function json(obj, status = 200, request) {
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|avif)$/i;
 const MAX_REVIEW_PHOTO_BYTES = 15 * 1024 * 1024;
+// Whole review form (photo + text fields + multipart overhead).
+const MAX_REVIEW_REQUEST_BYTES = 16 * 1024 * 1024;
+// Admin gallery uploads. Per file: same ceiling as Facebook imports
+// (MAX_IMAGE_BYTES in facebook.js), well above phone-camera JPEGs. Per request:
+// two maximum files, which keeps a parsed body well inside the 128 MB isolate
+// limit. The admin upload page batches files to stay under it.
+const MAX_GALLERY_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_GALLERY_UPLOAD_REQUEST_BYTES = 50 * 1024 * 1024;
+const MAX_GALLERY_UPLOAD_FILES = 50;
 const PUBLIC_REVIEW_PHOTO_BASE = "https://kilcon.work/api/reviews/photo";
 // Public R2 custom domain; the images.kilcon.work/Reviews/* route lands here.
 const PUBLIC_IMAGE_HOST = "images.kilcon.work";
@@ -844,38 +852,60 @@ async function handleUpload(request, env) {
     return json({ error: "Something went wrong. Please try again later." }, 500, request);
   }
 
-  const form = await request.formData();
+  const parsed = await readBoundedFormData(request, MAX_GALLERY_UPLOAD_REQUEST_BYTES);
+  if (!parsed.form) {
+    return json({ error: parsed.error, maxRequestBytes: MAX_GALLERY_UPLOAD_REQUEST_BYTES }, parsed.status, request);
+  }
 
-  let uploaded = 0;
-  const urls = [];
+  // Validate everything first, then store only the files that passed.
+  const accepted = [];
+  const rejected = [];
+  let fileCount = 0;
 
-  for (const [fieldName, value] of form.entries()) {
+  for (const [fieldName, value] of parsed.form.entries()) {
     if (fieldName === "notes") continue;
     if (!(value instanceof File)) continue;
 
+    if (++fileCount > MAX_GALLERY_UPLOAD_FILES) {
+      rejected.push({ name: String(fieldName).slice(0, 200), reason: "too-many-files" });
+      continue;
+    }
+
     const key = sanitizeKey(fieldName);
-    if (!key) {
-      console.warn("[upload] rejected key", fieldName);
+    if (!key || !isSafeUploadKey(key)) {
+      console.warn("[upload] rejected key", String(fieldName).slice(0, 200));
+      rejected.push({ name: String(fieldName).slice(0, 200), reason: "invalid-path" });
       continue;
     }
 
-    // enforce MIME starts with image/
-    if (value.type && !value.type.startsWith("image/")) {
-      console.warn("[upload] rejected non-image contentType", value.type, fieldName);
+    const check = await validateImageFile(value, { name: key, maxBytes: MAX_GALLERY_UPLOAD_FILE_BYTES });
+    if (!check.ok) {
+      console.warn("[upload] rejected file", key, check.reason);
+      rejected.push({ name: key, reason: check.reason });
       continue;
     }
+    accepted.push({ key, file: value, contentType: check.contentType });
+  }
 
-    const arrayBuffer = await value.arrayBuffer();
-    await bucket.put(key, arrayBuffer, {
-      httpMetadata: {
-        contentType: value.type || "image/jpeg",
-      },
-    });
-    uploaded++;
+  const urls = [];
+  for (const { key, file, contentType } of accepted) {
+    // The File is handed to R2 as-is (no extra in-memory copy); the type is
+    // the one we sniffed, never the client's.
+    await bucket.put(key, file, { httpMetadata: { contentType } });
     urls.push(publicUrl(key, env));
   }
 
-  return json({ ok: true, uploaded, urls }, 200, request);
+  const body = {
+    ok: rejected.length === 0,
+    uploaded: urls.length,
+    urls,
+    rejected,
+    limits: { maxFileBytes: MAX_GALLERY_UPLOAD_FILE_BYTES, maxRequestBytes: MAX_GALLERY_UPLOAD_REQUEST_BYTES },
+  };
+  if (!urls.length && rejected.length) {
+    return json({ ...body, error: "No valid images were uploaded." }, 400, request);
+  }
+  return json(body, 200, request);
 }
 
 // GET /api/gallery-api/list-images?prefix=Projects/Foo/
@@ -1194,6 +1224,11 @@ async function handleReviewPhoto(request, env, url) {
   const key = rec ? reviewPhotoKey(rec, env) : null;
   if (!key) return notFound();
 
+  // Cloudflare Image Transformations cache their output independently of this
+  // Worker, so a resized copy could outlive a withdrawal. The site never
+  // resizes review photos; refuse every transformation fetch.
+  if (/image-resizing/i.test(request.headers.get("Via") || "")) return notFound();
+
   const approved = rec.status === "approved";
   if (!approved) {
     // Same 404 for non-admins so the response doesn't reveal a private review.
@@ -1201,7 +1236,13 @@ async function handleReviewPhoto(request, env, url) {
     if (authResp) return notFound();
   }
 
-  const resp = await photoResponse(env, key, { publicCache: approved });
+  // Approved photos may be stored by the viewer's browser but must be
+  // revalidated on every use, so hiding or deleting a review takes effect at
+  // once. Revalidation re-runs the approval check above.
+  const resp = await photoResponse(env, key, {
+    revalidate: approved,
+    ifNoneMatch: request.headers.get("If-None-Match"),
+  });
   return resp || notFound();
 }
 
@@ -1329,7 +1370,16 @@ async function handleReviewsSubmit(request, env) {
       return json({ error: "Expected multipart/form-data" }, 400, request);
     }
 
-    const form = await request.formData();
+    // Public endpoint: never buffer more than one maximum review.
+    const parsed = await readBoundedFormData(request, MAX_REVIEW_REQUEST_BYTES);
+    if (!parsed.form) {
+      const accept = request.headers.get("Accept") || "";
+      if (accept.includes("text/html")) {
+        return redirectReviews(request, parsed.status === 413 ? "?err=photo" : "?err=input");
+      }
+      return json({ error: parsed.error }, parsed.status, request);
+    }
+    const form = parsed.form;
 
     const name = (form.get("name") || "").toString().trim();
     const projectType = ((form.get("projectType") || "other").toString().trim()) || "other";
@@ -1393,15 +1443,11 @@ async function handleReviewsSubmit(request, env) {
       const safeName =
         (photo.name || "photo.jpg").replace(/[^a-zA-Z0-9._-]+/g, "_") || "photo.jpg";
       
-        // Enforce allowed image extensions, and check the bytes really are that
-      // format (the client-supplied MIME type is never trusted or stored).
-      const expectedType = photoContentType(safeName);
-      const photoBytes = expectedType && photo.size <= MAX_REVIEW_PHOTO_BYTES
-        ? await photo.arrayBuffer()
-        : null;
-      const typeOk = !!photoBytes && sniffImageType(photoBytes) === expectedType;
+      // Allowed extension, size limit, and the bytes must really be that format.
+      // The stored type is derived server-side; the client MIME type is never stored.
+      const check = await validateImageFile(photo, { name: safeName, maxBytes: MAX_REVIEW_PHOTO_BYTES });
 
-      if (!typeOk) {
+      if (!check.ok) {
         const accept = request.headers.get("Accept") || "";
         if (accept.includes("text/html")) {
           return redirectReviews(request, "?err=photo");
@@ -1410,7 +1456,7 @@ async function handleReviewsSubmit(request, env) {
       }
 
       photoKey = `${REVIEWS_PHOTO_PREFIX}${id}/${safeName}`;
-      await savePhoto(env, photoKey, photoBytes);
+      await savePhoto(env, photoKey, photo);
     }
 
     const rec = {
