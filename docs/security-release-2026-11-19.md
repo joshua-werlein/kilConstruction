@@ -96,9 +96,14 @@ After (`src/imageValidation.js`, used by both upload and review submit):
   - `Reviews/`, `Facebook/` and `Migrations/` are not writable.
 - **Response.** Adds `rejected: [{name, reason}]` and `limits`. Returns 400 if nothing valid was uploaded. Existing fields are unchanged.
 
-Admin page (`src/pages/admin/upload-script.ts`): pre-checks extension, empty and over-25-MB
-files, uploads in batches of **≤ 20 MB / ≤ 20 files**, reports each rejection, and escapes the
-result HTML. Previously server URLs were interpolated raw.
+Admin page (`src/pages/admin/upload-script.ts`, planner in `src/lib/upload-batching.js`):
+pre-checks extension, empty and over-25-MB files, and groups small files into requests of
+**≤ 20 MB / ≤ 20 files**. The 20 MB figure is a grouping target, not a file limit: a valid
+file of 20–25 MB is sent **alone in its own request** (≈25 MB + multipart overhead, half the
+50 MB Worker limit). It reports each rejection and escapes the result HTML. Previously server
+URLs were interpolated raw. `tests/upload-batching.test.mjs` sends the planner's batches to the
+real Worker handler as browser-style requests (serialized body + `Content-Length`): 20 MB ±1 B,
+25 MB −1 B / exact, a single 21 MB and a single 25 MB JPEG, mixed batches, and server-side rejects.
 
 ### C. Review-photo revocation (Worker) — confirmed, fixed
 
@@ -131,7 +136,7 @@ After:
 | Command | Result |
 |---|---|
 | `npm ci` | ok |
-| `npm run test:site` | **19/19** (5 new in `tests/image-endpoint.test.mjs`) |
+| `npm run test:site` | **27/27** (5 new in `tests/image-endpoint.test.mjs`, 8 in `tests/upload-batching.test.mjs`) |
 | `npm run test:gallery-worker` | **125/125** (16 new in `test/upload-security.test.mjs`; all 109 existing pass, including the webhook signature, dedup, auto-import, tombstone and reimport tests) |
 | `npm run build` | ok |
 | `wrangler deploy --dry-run` | ok; bindings and vars unchanged |

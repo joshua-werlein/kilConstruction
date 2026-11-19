@@ -77,17 +77,19 @@ test("the built /_image module (if a build exists) contains no proxy code", asyn
 test("admin upload batching stays within the Gallery Worker limits", async () => {
   const worker = await read("workers/kilcon-gallery-worker/src/index.js");
   const client = await read("src/pages/admin/upload-script.ts");
+  const plan = await import(new URL("src/lib/upload-batching.js", root));
   const mb = (src, name) => {
     const m = new RegExp(`const ${name}\\s*=\\s*(\\d+)\\s*\\*\\s*1024\\s*\\*\\s*1024`).exec(src);
     assert.ok(m, `${name} defined`);
-    return Number(m[1]);
+    return Number(m[1]) * 1024 * 1024;
   };
   const num = (src, name) => Number(new RegExp(`const ${name}\\s*=\\s*(\\d+);`).exec(src)?.[1]);
 
-  assert.equal(mb(client, "MAX_FILE_BYTES"), mb(worker, "MAX_GALLERY_UPLOAD_FILE_BYTES"), "same per-file limit");
-  assert.ok(mb(client, "BATCH_MAX_BYTES") + mb(client, "MAX_FILE_BYTES") <= mb(worker, "MAX_GALLERY_UPLOAD_REQUEST_BYTES"),
-    "a batch plus one oversize file still fits one request");
-  assert.ok(num(client, "BATCH_MAX_FILES") <= num(worker, "MAX_GALLERY_UPLOAD_FILES"));
+  assert.equal(plan.MAX_FILE_BYTES, mb(worker, "MAX_GALLERY_UPLOAD_FILE_BYTES"), "same per-file limit");
+  // Worst case request: a full target batch, or one maximum file alone.
+  assert.ok(Math.max(plan.BATCH_TARGET_BYTES, plan.MAX_FILE_BYTES) < mb(worker, "MAX_GALLERY_UPLOAD_REQUEST_BYTES"));
+  assert.ok(plan.BATCH_MAX_FILES <= num(worker, "MAX_GALLERY_UPLOAD_FILES"));
+  assert.match(client, /planUploadBatches\(/, "the page uses the tested planner");
   // Results are rendered with escaping, not raw server strings.
   assert.match(client, /escapeHtml\(u\)/);
   assert.match(client, /escapeHtml\(r\.name\)/);

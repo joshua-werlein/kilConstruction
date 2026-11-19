@@ -1,3 +1,5 @@
+import { planUploadBatches } from "../../lib/upload-batching.js";
+
 export default function initUploadPage() {
     // Do nothing during SSR
     if (typeof document === "undefined") return;
@@ -247,14 +249,8 @@ export default function initUploadPage() {
                 subfolder = sanitized;
             }
 
-            // Must match the Gallery Worker (MAX_GALLERY_UPLOAD_* in index.js):
-            // 25 MB per file, 50 MB / 50 files per request. Batches stay well
-            // under that so each request is small and a failure only affects
-            // its own batch.
-            const MAX_FILE_BYTES = 25 * 1024 * 1024;
-            const BATCH_MAX_BYTES = 20 * 1024 * 1024;
-            const BATCH_MAX_FILES = 20;
-            const SUPPORTED_EXT = /\.(jpe?g|png|webp|avif)$/i;
+            // Batching and limits live in src/lib/upload-batching.js (tested
+            // against the Gallery Worker's limits).
             const REASONS: Record<string, string> = {
                 "empty": "file is empty",
                 "too-large": "file is larger than 25 MB",
@@ -269,41 +265,12 @@ export default function initUploadPage() {
             const escapeHtml = (s: string) =>
                 s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 
-            const rejected: { name: string; reason: string }[] = [];
-            const batches: { path: string; file: File }[][] = [];
-            let current: { path: string; file: File }[] = [];
-            let currentBytes = 0;
-
-            for (const file of Array.from(files)) {
+            const { batches, rejected } = planUploadBatches(Array.from(files), (file: File) => {
                 const cleanedName = file.name || "image";
-                const fullPath = isHighlights
+                return isHighlights
                     ? `${category}/${cleanedName}`
                     : `${category}/${subfolder}/${cleanedName}`.replace(/\/+/g, "/");
-
-                // Same checks the server enforces, so obvious problems show up
-                // without uploading. The server still validates the bytes.
-                if (!SUPPORTED_EXT.test(cleanedName)) {
-                    rejected.push({ name: cleanedName, reason: "unsupported-extension" });
-                    continue;
-                }
-                if (file.size === 0) {
-                    rejected.push({ name: cleanedName, reason: "empty" });
-                    continue;
-                }
-                if (file.size > MAX_FILE_BYTES) {
-                    rejected.push({ name: cleanedName, reason: "too-large" });
-                    continue;
-                }
-
-                if (current.length && (currentBytes + file.size > BATCH_MAX_BYTES || current.length >= BATCH_MAX_FILES)) {
-                    batches.push(current);
-                    current = [];
-                    currentBytes = 0;
-                }
-                current.push({ path: fullPath, file });
-                currentBytes += file.size;
-            }
-            if (current.length) batches.push(current);
+            });
 
             flashStatus("Uploading…", "info", 0);
             resultEl.innerHTML = "";
