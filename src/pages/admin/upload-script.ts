@@ -247,7 +247,32 @@ export default function initUploadPage() {
                 subfolder = sanitized;
             }
 
-            const formData = new FormData();
+            // Must match the Gallery Worker (MAX_GALLERY_UPLOAD_* in index.js):
+            // 25 MB per file, 50 MB / 50 files per request. Batches stay well
+            // under that so each request is small and a failure only affects
+            // its own batch.
+            const MAX_FILE_BYTES = 25 * 1024 * 1024;
+            const BATCH_MAX_BYTES = 20 * 1024 * 1024;
+            const BATCH_MAX_FILES = 20;
+            const SUPPORTED_EXT = /\.(jpe?g|png|webp|avif)$/i;
+            const REASONS: Record<string, string> = {
+                "empty": "file is empty",
+                "too-large": "file is larger than 25 MB",
+                "unsupported-extension": "only JPG, PNG, WebP and AVIF are supported",
+                "not-an-image": "file is not a valid image",
+                "truncated": "file is incomplete or damaged",
+                "extension-mismatch": "file contents don't match its extension",
+                "mime-mismatch": "file type doesn't match its contents",
+                "invalid-path": "invalid file or folder name",
+                "too-many-files": "too many files in one request",
+            };
+            const escapeHtml = (s: string) =>
+                s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+
+            const rejected: { name: string; reason: string }[] = [];
+            const batches: { path: string; file: File }[][] = [];
+            let current: { path: string; file: File }[] = [];
+            let currentBytes = 0;
 
             for (const file of Array.from(files)) {
                 const cleanedName = file.name || "image";
@@ -255,48 +280,96 @@ export default function initUploadPage() {
                     ? `${category}/${cleanedName}`
                     : `${category}/${subfolder}/${cleanedName}`.replace(/\/+/g, "/");
 
-                formData.append(fullPath, file);
+                // Same checks the server enforces, so obvious problems show up
+                // without uploading. The server still validates the bytes.
+                if (!SUPPORTED_EXT.test(cleanedName)) {
+                    rejected.push({ name: cleanedName, reason: "unsupported-extension" });
+                    continue;
+                }
+                if (file.size === 0) {
+                    rejected.push({ name: cleanedName, reason: "empty" });
+                    continue;
+                }
+                if (file.size > MAX_FILE_BYTES) {
+                    rejected.push({ name: cleanedName, reason: "too-large" });
+                    continue;
+                }
+
+                if (current.length && (currentBytes + file.size > BATCH_MAX_BYTES || current.length >= BATCH_MAX_FILES)) {
+                    batches.push(current);
+                    current = [];
+                    currentBytes = 0;
+                }
+                current.push({ path: fullPath, file });
+                currentBytes += file.size;
             }
+            if (current.length) batches.push(current);
 
             flashStatus("Uploading…", "info", 0);
             resultEl.innerHTML = "";
             submitBtn.disabled = true;
 
+            const urls: string[] = [];
+            let failedRequests = 0;
+            let lastError = "";
+
             try {
-                const res = await fetch(`${API_BASE}/upload`, {
-                    method: "POST",
-                    body: formData,
-                    credentials: "include",
-                });
+                for (let i = 0; i < batches.length; i++) {
+                    if (batches.length > 1) {
+                        flashStatus(`Uploading batch ${i + 1} of ${batches.length}…`, "info", 0);
+                    }
+                    const formData = new FormData();
+                    for (const { path, file } of batches[i]) formData.append(path, file);
 
-                const data: any = await res.json().catch(() => ({}));
+                    try {
+                        const res = await fetch(`${API_BASE}/upload`, {
+                            method: "POST",
+                            body: formData,
+                            credentials: "include",
+                        });
+                        const data: any = await res.json().catch(() => ({}));
+                        if (Array.isArray(data.urls)) urls.push(...data.urls.filter((u: unknown) => typeof u === "string"));
+                        if (Array.isArray(data.rejected)) {
+                            for (const r of data.rejected) {
+                                rejected.push({
+                                    name: String(r?.name || "").split("/").pop() || "file",
+                                    reason: String(r?.reason || ""),
+                                });
+                            }
+                        }
+                        if (!res.ok && !Array.isArray(data.rejected)) {
+                            failedRequests++;
+                            lastError = data?.error || `Server returned ${res.status}.`;
+                        }
+                    } catch (err) {
+                        console.error(err);
+                        failedRequests++;
+                        lastError = "Network error – see console.";
+                    }
+                }
 
-                if (res.ok) {
-                    const urls: string[] = Array.isArray(data.urls) ? data.urls : [];
-                    const list = urls
-                        .map(
-                            (u) =>
-                                `<li><a href="${u}" target="_blank" rel="noreferrer">${u}</a></li>`
-                        )
-                        .join("");
+                const list = urls
+                    .map((u) => `<li><a href="${escapeHtml(u)}" target="_blank" rel="noreferrer">${escapeHtml(u)}</a></li>`)
+                    .join("");
+                const rejectedList = rejected
+                    .map((r) => `<li>${escapeHtml(r.name)}: ${escapeHtml(REASONS[r.reason] || r.reason || "rejected")}</li>`)
+                    .join("");
 
-                    const count =
-                        (typeof data.uploaded === "number" && data.uploaded) ||
-                        urls.length ||
-                        0;
+                let html = `<p>Uploaded ${urls.length} file${urls.length === 1 ? "" : "s"}.</p>`;
+                if (list) html += `<ul>${list}</ul>`;
+                if (rejectedList) html += `<p>Not uploaded (${rejected.length}):</p><ul>${rejectedList}</ul>`;
+                if (failedRequests) html += `<p>${failedRequests} request(s) failed: ${escapeHtml(lastError)}</p>`;
+                resultEl.innerHTML = html;
 
-                    resultEl.innerHTML = `<p>Uploaded ${count} files:</p><ul>${list}</ul>`;
+                if (urls.length && !rejected.length && !failedRequests) {
                     flashStatus("Upload complete.", "success");
                     fileInput.value = "";
-                    void loadAllFolders();
+                } else if (urls.length) {
+                    flashStatus("Some files were not uploaded.", "error", 5000);
                 } else {
-                    flashStatus("Upload failed.", "error", 4000);
-                    resultEl.textContent = data?.error || "Server returned an error.";
+                    flashStatus("Upload failed.", "error", 5000);
                 }
-            } catch (err) {
-                console.error(err);
-                flashStatus("Upload error – see console.", "error", 4000);
-                resultEl.textContent = "";
+                if (urls.length) void loadAllFolders();
             } finally {
                 submitBtn.disabled = false;
             }
