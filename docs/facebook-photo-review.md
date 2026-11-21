@@ -1,7 +1,22 @@
 # Historical Facebook photo review
 
-Status: **built and tested locally on branch `task/historical-photo-review`. NOT deployed.**
-Base commit `25687ff`. It needs migration 017 plus a Worker and a Pages deploy, each with owner approval.
+Status: **deployed 2026-11-21.**
+
+| Component | Version |
+|---|---|
+| Migration 017 | Applied (D1 restore bookmark from before it: `0000069f-00000000-0000512a-70c3e47bc9e5d69d289848bace0ac932`) |
+| Worker | `18177ff4` (tag `780127e`) |
+| Pages | `c9e92942` (`780127e`), then the layout fix `dccbe970` (`47dc2e7`) |
+
+Production checks passed 67/67. Signed-out access is refused, and the hourly cron is verified.
+The owner confirmed the page lists 31 albums.
+
+**Pending:**
+
+- the comparison-UI commit `eca9ad3` (branch `task/review-comparison-ui`, not deployed);
+- the owner's save-and-clear decision test.
+
+See docs/RESUME.md. The sections below describe the design as built.
 
 ## What it does
 
