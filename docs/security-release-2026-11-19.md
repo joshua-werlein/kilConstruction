@@ -1,17 +1,17 @@
 # Security release 2026-11-19: upload validation, review-photo revocation, `/_image`
 
-**Status:** built and tested locally on branch `security/gallery-upload-cache-hardening`
-(base `origin/main` `b5bed1a`). **Nothing here has been deployed.** Each step marked 🔒 changes
-production and needs explicit approval first.
+**Status: DEPLOYED and verified 2026-11-19.** Both components are live (Pages first, then the
+Worker, as planned). No rollback was needed. Sections 1–6 below are the pre-release record; the
+deployment record is in section 7.
 
 Two independent components:
 
-| Component | Commit | Deploys via |
+| Component | Commits | Deployed |
 |---|---|---|
-| **Gallery Worker** (`kilcon-gallery-worker`) | `fix(gallery-worker): …` | `npx wrangler deploy` (manual) |
-| **Pages site** (`kilconstruction`) | `fix(site): …` | Git push to `main` → Pages build |
+| **Pages site** (`kilconstruction`) | `fc7e645`, `b915243` | Git push `b5bed1a..b915243` to `main` → Pages deployment `1030adad-a2ed-406b-856c-e47383a4b140` |
+| **Gallery Worker** (`kilcon-gallery-worker`) | `2812a2d` (from tree `b915243`) | `wrangler versions upload` + `versions deploy` → version `b5ad9617-2324-4aca-962f-2ac1c3e33b76`, deployment `b0feb45b-1d21-4bd2-90d1-d67e50514673` |
 
-Either one can ship without the other (see "Compatibility").
+Either one could ship without the other (see "Compatibility").
 
 ---
 
@@ -226,3 +226,56 @@ The second one also re-transforms gallery thumbnails on their next view.
    - Most of the rest are build-time tooling.
    - A full fix needs Astro 7 / adapter 14, which is out of scope.
 6. **Worker route.** The `images.kilcon.work/Reviews/*` Worker route is defense in depth only. The WAF and the deletion are the real controls.
+
+---
+
+## 7. Deployment record (2026-11-19)
+
+### Pages — 22:02 UTC
+
+- **Preflight:**
+  - No drift: `origin/main` was still `b5bed1a`. Site 27/27, Worker 125/125, build OK.
+  - Only Pages deploys from `main`. There are no GitHub workflows, and the Pages build runs only `npm run build`.
+  - Earlier pushes to `main` never created Worker deployments; every Worker deployment on record is a manual `wrangler` deploy.
+  - Workers Builds trigger settings couldn't be read (permission), so that conclusion rests on the deployment history.
+- **Deploy:** fast-forward push `b5bed1a..b915243` to `main` → deployment `1030adad-a2ed-406b-856c-e47383a4b140` (commit `b915243b8e46cd05ec6450ebfad5566745acb17b`), now canonical. Built with Node 22.23.5. Rollback target `7d46f050` (`6d10a8e`) is still available.
+- **`/_image`:**
+  - Every GET and HEAD variant returns 404 `no-store`: same-origin, absolute, resize-URL and review-photo `href`s, plus case and path variants. Before, `?href=/robots.txt` and `?href=/llms.txt` returned 200.
+  - POSTs get 403 from Astro's origin check.
+  - A protocol-relative `href` (`//…`) gets a 403 "Blocked" from an edge rule before reaching the app.
+- **Rest of the site:** the route snapshot diff shows only the three `/_image` rows changed. Privacy script 47/0. The served upload bundle is byte-identical to the local build. DNS, TLS and Pages bindings are unchanged.
+- **Runtime:** 93 Pages invocations during verification, 0 exceptions, 0 error logs, 0 5xx.
+- **Not tested:** a logged-in admin upload (no credentials).
+
+### Gallery Worker — 22:11 UTC
+
+- **Preflight:**
+  - Worker source on `main` is identical to `2812a2d`, and `wrangler.toml` is unchanged since `b5bed1a`.
+  - The deployed version `1b3a60ec` had bindings, vars and 5 secrets matching `wrangler.toml`.
+  - Routes and the `17 * * * *` cron were as configured, with no concurrent versions.
+  - 125/125 tests and the dry-run (173.41 KiB) passed.
+- **Deploy:** `wrangler deploy` doesn't take `--tag` or `--message` in 4.49. That attempt failed with a usage error before uploading, so nothing changed. Used the established versions flow instead:
+  - `wrangler versions upload --tag b915243` created version `b5ad9617-2324-4aca-962f-2ac1c3e33b76`.
+  - `wrangler versions deploy b5ad9617…@100%` created deployment `b0feb45b-1d21-4bd2-90d1-d67e50514673`.
+  - Routes and cron weren't touched (`versions` doesn't modify triggers), and they're unchanged afterwards.
+- **Verification (read-only; no production uploads, withdrawals or Facebook events):**
+  - Bindings, vars, secret names and handlers are identical between `1b3a60ec` and `b5ad9617`. Facebook flags are unchanged: `FB_INTEGRATION_ENABLED=true`, `FB_AUTO_IMPORT=true`, discovery and historical import `false`.
+  - 15-endpoint snapshot identical to pre-deploy: galleries 200, `?project=photos` 404, `?all=1` 401, admin list 401, anonymous upload 401, webhook bad token 403, non-multipart review submit 400.
+  - Approved review photo: 200 `image/jpeg`, `Cache-Control: private, no-cache`, an `ETag`, the sandbox CSP and `nosniff`.
+    - `If-None-Match` with the matching ETag gets a body-less 304; a mismatched ETag gets 200.
+    - `Via: image-resizing` gets 404. Resize URLs on both hosts get 403 at the edge.
+    - Every photo URL in `/api/reviews` is the gated endpoint.
+  - The public review form refuses a 17 MB body with 413 before parsing.
+  - Privacy script 47/0. R2 r2.dev is still disabled on both buckets, the private bucket has no domain, and DNS and TLS are unchanged.
+  - Facebook data is unchanged (11 events, 8 imported photos; read-only query).
+- **Runtime:**
+  - Tail: 60 invocations, all on `b5ad9617`, all `ok`, 0 exceptions, 0 5xx. The only warnings were 3 webhook rejections caused by the deliberate bad-token and unsigned probes.
+  - Analytics: 0 errors since the deploy; 0 errors in the previous 24 h (550 requests on `1b3a60ec`).
+- **Rollback (not needed):** `npx wrangler rollback 1b3a60ec-ba12-4086-806b-973991fb9b6b`. The version is still available.
+
+### Still open
+
+- WAF, cache-rule, Workers Builds and audit-log configuration haven't been independently audited (missing read permissions; see section 2).
+- Withdrawal was proven by automated tests and by the live headers/304 behaviour, not by hiding a real production review (that wasn't authorized).
+- The Facebook gallery photo TTLs (1 h browser, 4 h edge thumbnails), the importer's content-type trust, and the `npm audit` items in section 6 remain.
+- No cache purge was performed or required.
