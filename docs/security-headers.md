@@ -1,8 +1,30 @@
 # Security headers (report-only CSP)
 
-Status: **implemented on branch `security/headers-report-only`, not deployed.**
-Production rollback point: Pages deployment `1030adad` (`b915243`). The doc-only
-`31ffec1` on `main` was skipped (`[CF-Pages-Skip]`), so `1030adad` is still the live build.
+Status: **deployed 2026-11-21.** Pages deployment `ea36b012-fd57-4c84-b3aa-8bddacc299a8` from
+`main` `f33023e`. The CSP is report-only; enforcement is not enabled.
+
+Rollback point: Pages `1cd87df8-3b6e-4530-99a4-5980f8f86d03` (`ff36da0`, a README-only change).
+It carries the same site code as `1030adad` (`b915243`), which remains available as a fallback.
+
+### Deployment record (2026-11-21)
+
+- **Merge:** the branch was rebased onto `ff36da0` (a README edit pushed to `main` at 10:03, which
+  had deployed as `1cd87df8`). Tests were rerun after the rebase: site 37/37, Worker 125/125, build OK.
+  Pushed `ff36da0..f33023e`, and it was live in about 45 s.
+- **Live headers on `/`:** `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`,
+  `Cross-Origin-Opener-Policy` and `Content-Security-Policy-Report-Only` each appear exactly once.
+  HSTS and nosniff appear once each (from the zone). There is no enforcing `Content-Security-Policy`.
+- **Live checks (read-only):**
+  - 19 pages return their expected status with the CSP: home, contact, reviews, apparel and an apparel item, projects and a project, services, legal pages, `/admin`, protected admin pages (302) and 404.
+  - Turnstile script and site key are present on `/contact` and `/reviews`.
+  - Apparel checkout code is present, and `/api/item` returns 200.
+  - The admin login form renders.
+  - The gallery API, review photos (`private, no-cache`) and Facebook images return 200; `/_image` returns 404.
+- **Not verified:** in-browser behavior (the Turnstile challenge, the console for report-only
+  violations, a real checkout and a real login). The Chrome extension was not connected, and no
+  production login or Stripe session was attempted.
+- **Cleanup:** the branch `security/headers-report-only` was deleted locally after confirming its
+  content was in `main`. It was never pushed.
 
 ## Why middleware, not `public/_headers`
 
