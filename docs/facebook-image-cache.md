@@ -1,7 +1,72 @@
 # Facebook image caching: gated delivery
 
-Status: **implemented and tested on branch `feat/facebook-image-gate`. NOT deployed.**
-No production Cloudflare rule, route, R2 object or D1 row has been changed.
+Status: **deployed 2026-11-21 18:47 UTC.** Gallery Worker version
+`1494935c-6fae-419f-bc87-0b4f66456a93` (tag `e0d3497`) is at 100%.
+
+- **WAF:** custom rule `Block Facebook image bypass (cdn-cgi, encoded paths)` (§4).
+- **Route:** `images.kilcon.work/Facebook/*`, request-limit failure mode **Fail closed**. Both were added in the dashboard by the owner.
+- **Unchanged:** the zone Browser Cache TTL, every R2 object (the public Facebook copies remain), and Pages.
+- **Rollback Worker version:** `b5ad9617-2324-4aca-962f-2ac1c3e33b76` (see §8).
+
+## 0. Deployment record (2026-11-21)
+
+### Cutover
+
+The cutover was automated so that no bypass window existed. A watcher deployed the new
+version only after it saw both changes live.
+
+| Time (UTC) | Event |
+|---|---|
+| 18:44 | **Preflight:** no drift (main `c5e2172`, Worker `b5ad9617`, Pages `ea36b012`). Branch rebased to `e0d3497`; Worker 145/145, site 37/37. A production baseline of 27 checks all passed. |
+| — | `versions upload` → `1494935c`. The account accepted the `IMAGES` binding; no traffic yet. |
+| 18:46:49 | **WAF rule live.** Facebook `/cdn-cgi/image` URLs return 403 on both hosts; manual gallery thumbnails still return 200. |
+| 18:47:24 | **Route live** (Fail closed). The old code answered `/Facebook/*` with 404 `no-store`, so nothing was cached. `versions deploy 1494935c@100%` ran. |
+
+Facebook thumbnails were unavailable for about 35 s, and full images for about 15 s.
+Nothing was cached during that time.
+
+### Production verification: 67/67 checks, run twice
+
+- **All 8 photos, full images:** 200 with `public, max-age=300`, `image/jpeg`, ETag and 304 revalidation. Real 2048×1536 originals of 660–830 KB.
+- **All 8 photos, thumbnails:** 200 with `public, max-age=300`. Real 480×360 resizes of 36–46 KB from the Images binding (no fallback), with ETag `w480-…` and 304 revalidation.
+- **Refused with 404 `no-store`, or 405 for POST:** unknown IDs, `w/600`, `w/0480`, `.png`, POST.
+- **Blocked with 403 by the WAF:** the old `/cdn-cgi/image` thumbnails, arbitrary parameters, `kilcon.work/cdn-cgi/image/.../https://images.kilcon.work/Facebook/...`, `/cdn-cgi/image` of the gated path, `Facebook%2F`, `Facebook%252F` and lower-case `facebook/`.
+- **`%46acebook`:** 404 `no-store` from the Worker's generic image-host 404.
+- **Existing protections unchanged:**
+  - Reviews: 403 on the image host and on `/cdn-cgi/image` from both hosts.
+  - `?project=photos` 404, `?all=1` 401.
+  - Anonymous upload, delete, Facebook health check and backfill: 401.
+  - Webhook: bad verify token 403, unsigned POST 401.
+  - Review photos: `private, no-cache`; a bogus ID gets 404 `no-store`.
+  - `/_image`: 404.
+- **Site:** 9 pages 200, 4 admin pages 302, 4 APIs 200. Manual gallery thumbnails are unchanged (`/cdn-cgi/image`, 200). The gallery API now emits `/Facebook/w/480/…`.
+- **Live tail:** 19 requests, all `ok`, 0 exceptions, no gate warnings.
+
+### Hidden-photo test (owner-approved; D1 only, no R2 change)
+
+Photo `122238483674318503` was set to `hidden = 1` for 7 s, after its thumbnail had been edge-cached.
+
+- **Gate:** full image, thumbnail (the cached one), stale `If-None-Match`, `?width=`, and HEAD all returned 404 `no-store`.
+- **WAF:** the old `/cdn-cgi/image` URLs on both hosts, arbitrary widths, `%2F`, `%252F` and lower-case all returned 403. `%46acebook` returned 404 `no-store`.
+- **Listings:** the photo dropped out of the gallery API and the project page.
+- **Restore:** `hidden = 0` (public key intact) gave 200 for the full image and thumbnail on the next request, and the photo was listed again. **22/22.**
+
+A true deletion was not exercised in production: that would delete R2 objects, which was not
+authorized. Unknown IDs take the same "no visible row" path, and deletion is covered by the
+automated tests and the local runtime test.
+
+### Not verified in production
+
+Signed-in admin flows: gallery upload, rename, delete, and Facebook photo hide/restore through
+`/admin/facebook`. Their routes and auth checks are unchanged and their tests pass, but no
+production login was attempted.
+
+### Caveat for future deploys
+
+The route was created in the dashboard with Fail closed. After any `wrangler deploy` or
+`wrangler triggers deploy`, which re-apply `wrangler.toml` routes, re-check that the
+`images.kilcon.work/Facebook/*` route is still **Fail closed**.
+
 Investigation 2026-11-21; implementation 2026-11-21.
 
 ## 1. Problem (measured live)
@@ -147,7 +212,10 @@ Mitigations, either of which needs approval:
 - **Workers Paid** ($5/month: 10M requests/month included, no daily cliff). Recommended before the historical import of 388+ photos.
 - **A WAF rate-limiting rule** (Free: 1 rule, 10 s period) on `images.kilcon.work/Facebook/*`. It blocks scrapers before they consume Worker requests.
 
-## 7. Deploy runbook (needs approval)
+## 7. Deploy runbook (executed 2026-11-21; see §0)
+
+The route and WAF steps were done in the dashboard, which also satisfies "Fail closed
+before traffic". The planned wrangler commands are kept below for reference.
 
 Current rollback points: Worker version `b5ad9617-2324-4aca-962f-2ac1c3e33b76`; Pages unaffected.
 
@@ -167,12 +235,26 @@ Current rollback points: Worker version `b5ad9617-2324-4aca-962f-2ac1c3e33b76`; 
 
 ## 8. Rollback
 
-1. Disable the WAF rule first; otherwise the old code's `/cdn-cgi/image` Facebook thumbnails are blocked.
-2. `npx wrangler rollback b5ad9617-2324-4aca-962f-2ac1c3e33b76`. The old code emits `/cdn-cgi/image` thumbnails again. Facebook full images return 404 `no-store` until step 3.
-3. **Remove the `images.kilcon.work/Facebook/*` route** in Dashboard → Workers → kilcon-gallery-worker → Domains & Routes. Routes aren't versioned, so a rollback alone keeps the route. Requests then reach the untouched public R2 copies again.
-4. Check with curl that `/Facebook/<id>.jpg` returns 200 from R2.
+**Code-only problem** (the gate misbehaves, but bypass protection is fine): run step 2 only,
+and keep the WAF rule and the route. Facebook images then return 404 `no-store`. That is safe
+but unavailable until you either fix forward or complete steps 1–3.
 
-No D1 or R2 data changes, so nothing else needs undoing.
+**Full rollback,** to the pre-gate behavior:
+
+1. Turn off the WAF rule **`Block Facebook image bypass (cdn-cgi, encoded paths)`** at
+   kilcon.work → Security → WAF → Custom rules. Otherwise the old code's `/cdn-cgi/image`
+   Facebook thumbnails are blocked.
+2. Run `npx wrangler rollback b5ad9617-2324-4aca-962f-2ac1c3e33b76`, with `CLOUDFLARE_ACCOUNT_ID` set.
+   The old code emits `/cdn-cgi/image` thumbnails again. Facebook full images return 404 `no-store` until step 3.
+3. **Delete the `images.kilcon.work/Facebook/*` route** at kilcon.work → Workers Routes.
+   Routes aren't versioned, so a rollback alone keeps the route. Requests then reach the
+   untouched public R2 copies again.
+4. Check with curl that `/Facebook/<id>.jpg` returns 200 from R2 and that the old thumbnails load.
+
+**Security note:** after a full rollback, the pre-gate exposure returns (§1). A hidden photo's
+cached copies stay reachable for hours. Prefer rolling forward.
+
+No D1 or R2 data was changed by this deployment, so nothing else needs undoing.
 
 ## 9. Follow-up (separate approval): private-only storage
 
