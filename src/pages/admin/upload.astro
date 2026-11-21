@@ -40,7 +40,9 @@ if (!isAdmin) {
 
                 <label class="admin-field-label">
                     <span>Category</span>
+                    <!-- No default: the category must be chosen explicitly. -->
                     <select id="category" name="category" class="admin-input" required>
+                        <option value="" selected disabled>Choose a category</option>
                         <option value="Highlights">Highlights</option>
                         <option value="Projects">Projects</option>
                         <option value="New Construction">New Construction</option>
@@ -73,7 +75,7 @@ if (!isAdmin) {
                 <span>Subfolder (project / album name)</span>
 
                 <div class="subfolder-row">
-                    <select id="subfolder-select" class="admin-input">
+                    <select id="subfolder-select" class="admin-input" disabled>
                         <option value="">— Select folder —</option>
                         <option value="__NEW__">➕ Create new folder…</option>
                     </select>
@@ -94,7 +96,7 @@ if (!isAdmin) {
             </label>
 
             <div class="actions-row">
-                <button type="submit" class="btn admin-btn" id="submitBtn">
+                <button type="submit" class="btn admin-btn" id="submitBtn" disabled>
                     📤 Upload
                 </button>
                 <span id="status" class="status-text"></span>

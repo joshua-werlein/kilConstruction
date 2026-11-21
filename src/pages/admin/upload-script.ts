@@ -1,4 +1,5 @@
 import { planUploadBatches } from "../../lib/upload-batching.js";
+import { isValidUploadCategory } from "../../lib/upload-category.js";
 
 export default function initUploadPage() {
     // Do nothing during SSR
@@ -61,6 +62,16 @@ export default function initUploadPage() {
 
         const subfoldersByCategory = new Map<string, Set<string>>();
         const defaultStatusText = statusEl.textContent || "";
+
+        // The category starts blank ("Choose a category"). Upload and folder
+        // selection stay disabled until a valid category is explicitly chosen;
+        // Highlights is flat, so it never takes a subfolder.
+        function syncControls(): void {
+            const valid = isValidUploadCategory(categoryEl.value);
+            submitBtn.disabled = !valid;
+            subfolderSelectEl.disabled = !valid || categoryEl.value === "Highlights";
+        }
+        syncControls();
 
         type StatusVariant = "info" | "success" | "error";
 
@@ -163,8 +174,7 @@ export default function initUploadPage() {
         // reload list when category changes
         categoryEl.addEventListener("change", () => {
             rebuildSubfolderSelect();
-            const isHighlights = categoryEl.value.trim() === "Highlights";
-            subfolderSelectEl.disabled = isHighlights;
+            syncControls();
             subfolderCustomEl.style.display = "none";
             subfolderCustomEl.value = "";
         });
@@ -185,30 +195,17 @@ export default function initUploadPage() {
         formEl.addEventListener("submit", async (e: SubmitEvent) => {
             e.preventDefault();
 
+            // Never fall back to a default category: require an explicit choice.
+            const category = categoryEl.value;
+            if (!isValidUploadCategory(category)) {
+                flashStatus("Please choose a category.", "error", 2600);
+                syncControls();
+                return;
+            }
+
             const files = fileInput.files;
             if (!files || !files.length) {
                 flashStatus("Please choose at least one image.", "error", 2600);
-                return;
-            }
-
-            const ALLOWED_CATEGORIES = new Set([
-                "Projects",
-                "New Construction",
-                "Remodels",
-                "Furniture",
-                "Apparel",
-                "Highlights",
-            ]);
-
-            const category = categoryEl.value.trim();
-            if (!category) {
-                flashStatus("Please choose a category.", "error", 2600);
-                return;
-            }
-
-
-            if (!ALLOWED_CATEGORIES.has(category)) {
-                flashStatus("Invalid category.", "error", 3000);
                 return;
             }
 
@@ -243,7 +240,7 @@ export default function initUploadPage() {
                 const sanitized = sanitizeSubfolderInput(subfolder);
                 if (!sanitized) {
                     flashStatus("Invalid folder name.", "error", 3000);
-                    submitBtn.disabled = false;
+                    syncControls();
                     return;
                 }
                 subfolder = sanitized;
@@ -338,7 +335,7 @@ export default function initUploadPage() {
                 }
                 if (urls.length) void loadAllFolders();
             } finally {
-                submitBtn.disabled = false;
+                syncControls();
             }
         });
     });
