@@ -217,6 +217,7 @@ The second one also re-transforms gallery thumbnails on their next view.
    - Facebook-imported gallery photos are public with `public, max-age=3600`.
    - Thumbnails are edge-cached with `max-age=14400`.
    - So a photo hidden or removed on Facebook can stay visible for up to 1 h in browsers and up to 4 h as a thumbnail.
+   - **Correction (2026-11-21):** live GETs show browsers receive `max-age=14400` for full images too. The zone's 4 h Browser Cache TTL raises the stored 3600, and 404s are cached as well. See `facebook-image-cache.md`.
 
    This is gallery content, not review content, and was left unchanged to avoid disturbing live automation. Follow-up: purge on hide, which needs a Cache Purge token in the Worker, or shorter TTLs.
 4. **Facebook image type.** The Facebook importer takes the image type from fbcdn's `Content-Type` (host allow-list, 25 MB cap) without sniffing the bytes. Low risk.
