@@ -66,5 +66,12 @@ test("duplicate detection uses the shared perceptual hash on same-origin images"
 
 test("the sync page links to the review page and states the import rule", () => {
   assert.match(sync, /href="\/admin\/facebook-review"/);
-  assert.match(sync, /Only photos marked <strong>Import<\/strong>/);
+  assert.match(sync, /only photos marked <strong>Import<\/strong>/);
+  assert.match(sync, /New posts on the Page still import automatically/);
+});
+
+test("rate-limited image requests back off and retry instead of failing the review", () => {
+  assert.match(script, /if \(res\.status === 429\) \{ await sleep\(\(Number\(res\.headers\.get\("Retry-After"\)\) \|\| 10\) \* 1000\); continue; \}/);
+  assert.match(script, /return null; \/\/ not remembered: retried the next time the album is opened/);
+  assert.match(script, /retryingImg\(\{ src: fbImage\(p\.id\)/);
 });

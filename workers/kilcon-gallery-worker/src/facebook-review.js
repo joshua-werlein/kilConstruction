@@ -10,11 +10,13 @@
 //   or deletes a photo.
 //
 // Import gate (reviewGate), applied before any project assignment or D1 claim:
-// - decision "skip"                    -> never imported, by any path
-// - decision "import"                  -> allowed
-// - historical mode (history import)   -> only "import" is allowed
-// - live mode (webhook, reconciliation)-> photos created before
-//   FB_HISTORY_REVIEW_CUTOFF need an "import" decision; newer photos pass.
+// - "skip" or "later"                     -> never imported, by any path
+// - "import"                              -> allowed
+// - historical mode, no decision          -> excluded (history import, legacy
+//   backfill, and webhook edits of posts the site has never seen)
+// - live mode, no decision                -> allowed (new posts and photos)
+// Which mode applies is decided from what happened, never from a date:
+// see webhookReviewMode.
 
 const ID = /^[0-9_]{1,64}$/;
 const CURSOR = /^[A-Za-z0-9_=-]{1,2048}$/;
@@ -46,19 +48,37 @@ export async function reviewDecisionFor(db, photoId) {
 /**
  * null when the photo may be imported; otherwise the exclusion reason
  * ("review-skip" | "review-later" | "review-unreviewed").
- * mode: "historical" (history import) or "live" (webhook / reconciliation).
+ * mode: "live" (new content) or "historical". Anything else counts as
+ * historical, so a caller that forgets the mode fails closed.
  */
-export async function reviewGate(env, photoId, { mode, createdTime } = {}) {
+export async function reviewGate(env, photoId, { mode } = {}) {
   const decision = await reviewDecisionFor(env.DB, photoId);
   if (decision === "skip") return "review-skip";
+  if (decision === "later") return "review-later";
   if (decision === "import") return null;
-  const pending = decision === "later" ? "review-later" : "review-unreviewed";
-  if (mode === "historical") return pending;
-  const cutoff = Date.parse(env.FB_HISTORY_REVIEW_CUTOFF || "");
-  const created = Date.parse(createdTime || "");
-  // Unknown dates pass here; importPhoto re-checks with the photo's own date.
-  if (Number.isFinite(cutoff) && Number.isFinite(created) && created < cutoff) return pending;
-  return null;
+  return mode === "live" ? null : "review-unreviewed";
+}
+
+/**
+ * Review mode for a webhook event, from the event itself rather than a date.
+ * - "add": Meta reports new content (a new post, or a photo newly added to
+ *   any album) -> live.
+ * - "edited": live only for a post the website already knows: imported
+ *   earlier (facebook_posts) or announced by an "add" event (which may still
+ *   be queued). An edit of a post the site never saw is historical content
+ *   and needs an Import decision. A photo edit without a post id is
+ *   historical too.
+ */
+export async function webhookReviewMode(db, row) {
+  if (row?.verb === "add") return "live";
+  const postId = typeof row?.post_id === "string" && ID.test(row.post_id) ? row.post_id : null;
+  if (!postId || !db) return "historical";
+  const known = await db
+    .prepare(`SELECT (SELECT COUNT(*) FROM facebook_posts WHERE fb_post_id = ?1)
+                   + (SELECT COUNT(*) FROM facebook_webhook_events WHERE post_id = ?1 AND verb = 'add') AS n`)
+    .bind(postId)
+    .first();
+  return known?.n ? "live" : "historical";
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -166,7 +186,6 @@ async function reviewAlbums(env, h) {
       imported: imported.get(a.id) || 0,
     })),
     galleries: targets.map((t) => ({ value: t.value, name: t.name, category: t.category, prefix: t.prefix || null, source: t.source, id: t.id ?? null })),
-    cutoff: env.FB_HISTORY_REVIEW_CUTOFF || null,
     historicalImportEnabled: env.FB_HISTORICAL_IMPORT_ENABLED === "true",
   });
 }
@@ -212,9 +231,35 @@ function imageResponse(body, contentType) {
   };
 }
 
-async function reviewImage(env, request, h) {
+// Admin image endpoints cost Graph calls (shared with live webhook imports)
+// and image transformations. One admin key per endpoint; the binding's limit
+// is set in wrangler.toml (REVIEW_LIMITER). A missing binding (local tests)
+// does not block.
+async function limited(env, key) {
+  if (!env.REVIEW_LIMITER) return null;
+  const { success } = await env.REVIEW_LIMITER.limit({ key });
+  if (success) return null;
+  return {
+    response: new Response(JSON.stringify({ error: "Too many image requests; retrying shortly" }), {
+      status: 429,
+      headers: { "Content-Type": "application/json", "Retry-After": "10", "Cache-Control": "no-store" },
+    }),
+  };
+}
+
+// Proxied Facebook previews are cached inside the Worker (Cache API) under a
+// synthetic key that no public route can reach, so repeat views make no
+// Graph calls. The cache is checked only after admin auth (index.js).
+const PREVIEW_CACHE_TTL = 86400;
+const previewCacheKey = (id) => new Request(`https://review-cache.internal/facebook-preview/${id}`);
+
+async function reviewImage(env, request, h, cache) {
   const id = new URL(request.url).searchParams.get("id") || "";
   if (!ID.test(id)) return h.jsonResult({ error: "Invalid photo id" }, 400);
+  const hit = cache ? await cache.match(previewCacheKey(id)) : undefined;
+  if (hit) return imageResponse(hit.body, hit.headers.get("Content-Type") || "image/jpeg");
+  const throttled = await limited(env, "review-image");
+  if (throttled) return throttled;
   const pageId = h.configuredPageId(env);
   const photo = await h.graphGet(env, id, { fields: "id,from,images" }, h.newBudget(3));
   if (photo?.id !== id || String(photo.from?.id || "") !== pageId) return h.jsonResult({ error: "Not found" }, 404);
@@ -228,6 +273,11 @@ async function reviewImage(env, request, h) {
   if (Number(resp.headers.get("Content-Length") || "0") > MAX_PREVIEW_BYTES) return h.jsonResult({ error: "Image too large" }, 502);
   const bytes = await resp.arrayBuffer();
   if (bytes.byteLength > MAX_PREVIEW_BYTES) return h.jsonResult({ error: "Image too large" }, 502);
+  if (cache) {
+    await cache.put(previewCacheKey(id), new Response(bytes.slice(0), {
+      headers: { "Content-Type": type, "Cache-Control": `public, max-age=${PREVIEW_CACHE_TTL}` },
+    })).catch(() => {});
+  }
   return imageResponse(bytes, type);
 }
 
@@ -271,6 +321,8 @@ async function reviewSiteGallery(env, request, h) {
 async function reviewSiteImage(env, request, h) {
   const key = safeKey(new URL(request.url).searchParams.get("key"), h.MANUAL_PROJECT_ROOTS);
   if (!key) return h.jsonResult({ error: "Invalid key" }, 400);
+  const throttled = await limited(env, "review-site-image");
+  if (throttled) return throttled;
   const obj = await env.GALLERY_BUCKET.get(key);
   if (!obj) return h.jsonResult({ error: "Not found" }, 404);
   if (env.IMAGES) {
@@ -352,12 +404,16 @@ async function reviewSummary(env, h) {
   return h.jsonResult({ migrated: true, decisions, readyToImport });
 }
 
-/** Dispatch for /facebook/admin/review-*. Returns a handler result or null. */
-export async function handleReviewAdmin(request, env, sub, h) {
+/**
+ * Dispatch for /facebook/admin/review-*. Returns a handler result or null.
+ * opts.cache defaults to the Workers Cache API (tests inject their own).
+ */
+export async function handleReviewAdmin(request, env, sub, h, opts = {}) {
   const method = request.method;
+  const cache = "cache" in opts ? opts.cache : globalThis.caches?.default;
   if (sub === "review-albums" && method === "GET") return await reviewAlbums(env, h);
   if (sub === "review-album" && method === "GET") return await reviewAlbum(env, request, h);
-  if (sub === "review-image" && method === "GET") return await reviewImage(env, request, h);
+  if (sub === "review-image" && method === "GET") return await reviewImage(env, request, h, cache);
   if (sub === "review-site-gallery" && method === "GET") return await reviewSiteGallery(env, request, h);
   if (sub === "review-site-image" && method === "GET") return await reviewSiteImage(env, request, h);
   if (sub === "review-decisions" && method === "POST") return await reviewDecisions(env, request, h);

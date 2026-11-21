@@ -12,7 +12,7 @@ import { getPlatformProxy } from "wrangler";
 
 import worker from "../src/index.js";
 import { runFacebookDiscovery } from "../src/facebook.js";
-import { reviewGate } from "../src/facebook-review.js";
+import { reviewGate, webhookReviewMode } from "../src/facebook-review.js";
 import { JPEG } from "./imageFixtures.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -23,7 +23,6 @@ const PAGE_ID = "1111111111";
 const ADMIN_SECRET = "test-admin-secret";
 const SITE = "https://kilcon.work";
 const ADMIN = `${SITE}/api/gallery-api/facebook/admin`;
-const CUTOFF = "2026-11-15T00:00:00Z";
 const OLD = "2025-06-01T12:00:00+0000";
 const NEW = "2026-11-20T12:00:00+0000";
 
@@ -35,8 +34,9 @@ const makeEnv = (o = {}) => ({
   ...baseEnv,
   FB_APP_SECRET: APP_SECRET, FB_VERIFY_TOKEN: "vt", FB_PAGE_ACCESS_TOKEN: PAGE_TOKEN, FB_PAGE_ID: PAGE_ID,
   FB_GRAPH_VERSION: "v26.0", FB_INTEGRATION_ENABLED: "true", FB_AUTO_IMPORT: "true",
-  FB_HISTORICAL_IMPORT_ENABLED: "true", FB_HISTORY_REVIEW_CUTOFF: CUTOFF,
+  FB_HISTORICAL_IMPORT_ENABLED: "true",
   READ_LIMITER: { limit: async () => ({ success: true }) }, WRITE_LIMITER: { limit: async () => ({ success: true }) },
+  REVIEW_LIMITER: { limit: async () => ({ success: true }) },
   ADMIN_SECRET, SESSION_VERSION: "3", ...o,
 });
 const makeCtx = () => { const pending = []; return { pending, waitUntil: (p) => pending.push(p), passThroughOnException() {} }; };
@@ -209,47 +209,126 @@ test("concurrent history runs never import a photo twice", async () => {
 
 // --- gate: live paths ----------------------------------------------------------
 
-test("webhook edit of an old post does not import unreviewed historical photos", async () => {
+// --- gate: live webhook paths (no dates involved) --------------------------------
+
+const ganzLike = Array.from({ length: 8 }, (_, i) => String(9800 + i));
+
+test("an edit of a post the site never imported is historical: excluded until approved, replays import only approved photos", async () => {
   stubAlbum("600", "Old Job", ["9201", "9202"], { created: OLD });
   stubPost(`${PAGE_ID}_77`, ["9201", "9202"], OLD);
-  assert.equal((await webhook([{ item: "status", verb: "edited", post_id: `${PAGE_ID}_77`, published: 1, from: { id: PAGE_ID } }])).status, 200);
+  const edit = { item: "status", verb: "edited", post_id: `${PAGE_ID}_77`, published: 1, from: { id: PAGE_ID } };
+  assert.equal((await webhook([edit])).status, 200);
   assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
   assert.equal((await rows("SELECT * FROM facebook_projects")).length, 0, "no empty gallery created");
   assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
 
-  await decide([{ photoId: "9202", decision: "import" }]);
-  await webhook([{ item: "status", verb: "edited", post_id: `${PAGE_ID}_77`, published: 1, from: { id: PAGE_ID }, message: "edit 2" }]);
+  await decide([{ photoId: "9202", decision: "import" }, { photoId: "9201", decision: "later" }]);
+  await webhook([{ ...edit, message: "edit 2" }]);
+  await webhook([{ ...edit, message: "edit 2" }]); // exact replay
   assert.deepEqual((await rows("SELECT fb_photo_id FROM facebook_photos")).map((r) => r.fb_photo_id), ["9202"]);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), ["Facebook/9202.jpg"]);
 });
 
-test("new posts after the cutoff still import automatically; a skip decision still wins", async () => {
-  stubAlbum("700", "New Job", ["9301", "9302"], { created: NEW });
-  stubPost(`${PAGE_ID}_88`, ["9301", "9302"], NEW);
-  await decide([{ photoId: "9302", decision: "skip" }]);
-  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_88`, published: 1, from: { id: PAGE_ID } }]);
+test("new posts (add) import automatically with no review; skip and later still block; replays never duplicate", async () => {
+  stubAlbum("700", "New Job", ["9301", "9302", "9303"], { created: OLD }); // dates are irrelevant now
+  stubPost(`${PAGE_ID}_88`, ["9301", "9302", "9303"], OLD);
+  await decide([{ photoId: "9302", decision: "skip" }, { photoId: "9303", decision: "later" }]);
+  const add = { item: "status", verb: "add", post_id: `${PAGE_ID}_88`, published: 1, from: { id: PAGE_ID } };
+  await webhook([add]);
+  await webhook([add]); // replay of the same delivery
   assert.deepEqual((await rows("SELECT fb_photo_id, status FROM facebook_photos")).map((r) => [r.fb_photo_id, r.status]), [["9301", "imported"]]);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), ["Facebook/9301.jpg"]);
+  assert.equal((await rows("SELECT * FROM facebook_projects")).length, 1);
 });
 
-test("gate rules, including a database without migration 017", async () => {
+test("edits of a known post import newly added photos automatically, even when the add event is in the same delivery", async () => {
+  stubAlbum("710", "Fresh Job", ["9351", "9352"], { created: NEW });
+  stubPost(`${PAGE_ID}_91`, ["9351"], NEW);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_91`, published: 1, from: { id: PAGE_ID } }]);
+  stubPost(`${PAGE_ID}_91`, ["9351", "9352"], NEW); // owner adds a photo to the recent post
+  await webhook([{ item: "status", verb: "edited", post_id: `${PAGE_ID}_91`, published: 1, from: { id: PAGE_ID }, message: "added one" }]);
+  assert.deepEqual((await rows("SELECT fb_photo_id FROM facebook_photos ORDER BY fb_photo_id")).map((r) => r.fb_photo_id), ["9351", "9352"]);
+
+  // Edit listed before its post's add in one delivery: events are stored first,
+  // so the add is visible and the edit counts as live.
+  stubAlbum("720", "Same Delivery", ["9361"], { created: NEW });
+  stubPost(`${PAGE_ID}_92`, ["9361"], NEW);
+  await webhook([
+    { item: "photo", verb: "edited", post_id: `${PAGE_ID}_92`, photo_id: "9361", published: 1, from: { id: PAGE_ID } },
+    { item: "status", verb: "add", post_id: `${PAGE_ID}_92`, published: 1, from: { id: PAGE_ID } },
+  ]);
+  assert.equal((await rows("SELECT 1 FROM facebook_photos WHERE fb_photo_id = '9361'")).length, 1);
+});
+
+test("a photo newly added to an old album (photo add) imports automatically", async () => {
+  stubAlbum("730", "Old Album", ["9371"], { created: OLD });
+  await webhook([{ item: "photo", verb: "add", photo_id: "9371", published: 1, from: { id: PAGE_ID } }]);
+  assert.deepEqual((await rows("SELECT fb_photo_id, status FROM facebook_photos")).map((r) => [r.fb_photo_id, r.status]), [["9371", "imported"]]);
+});
+
+test("the eight already-imported photos are untouched by history runs, edits and replays", async () => {
+  stubPageAlbums([["122234637104318503", "Ganz Garage", 8]]);
+  stubAlbum("122234637104318503", "Ganz Garage", ganzLike, { created: NEW });
+  stubPost(`${PAGE_ID}_95`, ganzLike, NEW);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_95`, published: 1, from: { id: PAGE_ID } }]);
+  const snapshot = async () => ({
+    rows: await rows("SELECT fb_photo_id, status, hidden, project_id, master_key, public_key, updated_at FROM facebook_photos ORDER BY fb_photo_id"),
+    priv: await keys(baseEnv.PRIVATE_BUCKET), pub: await keys(baseEnv.GALLERY_BUCKET),
+    projects: await rows("SELECT id, slug, name, hidden FROM facebook_projects"),
+  });
+  const before = await snapshot();
+  assert.equal(before.rows.length, 8);
+
+  const history = await historyRun();
+  assert.ok(history.photos.every((p) => p.outcome === "existing"), "already imported, not excluded or re-imported");
+  await webhook([{ item: "status", verb: "edited", post_id: `${PAGE_ID}_95`, published: 1, from: { id: PAGE_ID } }]);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_95`, published: 1, from: { id: PAGE_ID } }]);
+  await historyRun(makeEnv(), { restart: true });
+  assert.deepEqual(await snapshot(), before, "rows, objects and projects unchanged");
+});
+
+test("a simultaneous history import and webhook replay import an approved photo exactly once", async () => {
+  stubPageAlbums([["740", "Race Job", 2]]);
+  stubAlbum("740", "Race Job", ["9391", "9392"], { created: OLD });
+  stubPost(`${PAGE_ID}_96`, ["9391", "9392"], OLD);
+  await decide([{ photoId: "9391", decision: "import" }, { photoId: "9392", decision: "import" }]);
+  const edit = { item: "status", verb: "edited", post_id: `${PAGE_ID}_96`, published: 1, from: { id: PAGE_ID } };
+  await Promise.all([historyRun().catch(() => null), webhook([edit]), webhook([{ ...edit, message: "x" }]), historyRun().catch(() => null)]);
+  await historyRun(makeEnv(), { restart: true });
+  assert.deepEqual((await rows("SELECT fb_photo_id, status FROM facebook_photos ORDER BY fb_photo_id")).map((r) => [r.fb_photo_id, r.status]),
+    [["9391", "imported"], ["9392", "imported"]]);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), ["Facebook/9391.jpg", "Facebook/9392.jpg"]);
+});
+
+test("gate rules and webhook review mode, including a database without migration 017", async () => {
   const env = makeEnv();
-  assert.equal(await reviewGate(env, "1", { mode: "historical", createdTime: NEW }), "review-unreviewed");
-  assert.equal(await reviewGate(env, "1", { mode: "live", createdTime: NEW }), null);
-  assert.equal(await reviewGate(env, "1", { mode: "live", createdTime: OLD }), "review-unreviewed");
-  assert.equal(await reviewGate(env, "1", { mode: "live", createdTime: null }), null, "unknown date: importPhoto re-checks");
-  assert.equal(await reviewGate(makeEnv({ FB_HISTORY_REVIEW_CUTOFF: "" }), "1", { mode: "live", createdTime: OLD }), null);
+  assert.equal(await reviewGate(env, "1", { mode: "historical" }), "review-unreviewed");
+  assert.equal(await reviewGate(env, "1", { mode: "live" }), null);
+  assert.equal(await reviewGate(env, "1", {}), "review-unreviewed", "a missing mode fails closed");
+  assert.equal(await reviewGate(env, "1", { mode: "LIVE" }), "review-unreviewed");
   await decide([{ photoId: "1", decision: "later" }]);
-  assert.equal(await reviewGate(env, "1", { mode: "historical" }), "review-later");
+  assert.equal(await reviewGate(env, "1", { mode: "live" }), "review-later", "later never imports");
   await decide([{ photoId: "1", decision: "skip" }]);
-  assert.equal(await reviewGate(env, "1", { mode: "live", createdTime: NEW }), "review-skip");
+  assert.equal(await reviewGate(env, "1", { mode: "live" }), "review-skip");
   await decide([{ photoId: "1", decision: "import" }]);
   assert.equal(await reviewGate(env, "1", { mode: "historical" }), null);
+
+  const db = baseEnv.DB;
+  assert.equal(await webhookReviewMode(db, { verb: "add", post_id: "1_2" }), "live");
+  assert.equal(await webhookReviewMode(db, { verb: "edited", post_id: "1_2" }), "historical");
+  assert.equal(await webhookReviewMode(db, { verb: "edited" }), "historical", "photo edit without a post");
+  await db.prepare("INSERT INTO facebook_posts (fb_post_id, page_id, message, source) VALUES ('1_2', ?, '', 'webhook')").bind(PAGE_ID).run();
+  assert.equal(await webhookReviewMode(db, { verb: "edited", post_id: "1_2" }), "live", "post already on the site");
+  await db.prepare("INSERT INTO facebook_webhook_events (dedupe_key, page_id, field, item, verb, post_id, payload, status) VALUES ('k', ?, 'feed', 'status', 'add', '1_3', '{}', 'pending')").bind(PAGE_ID).run();
+  assert.equal(await webhookReviewMode(db, { verb: "edited", post_id: "1_3" }), "live", "add event still queued");
+  assert.equal(await webhookReviewMode(db, { verb: "edited", post_id: "1_3' OR 1=1 --" }), "historical", "invalid post id");
 
   const noTable = { prepare(sql) {
     if (sql.includes("facebook_photo_reviews")) throw new Error("D1_ERROR: no such table: facebook_photo_reviews: SQLITE_ERROR");
     return baseEnv.DB.prepare(sql);
   } };
-  assert.equal(await reviewGate(makeEnv({ DB: noTable }), "1", { mode: "historical" }), "review-unreviewed", "fails closed for history");
-  assert.equal(await reviewGate(makeEnv({ DB: noTable }), "1", { mode: "live", createdTime: NEW }), null, "live imports unaffected");
+  assert.equal(await reviewGate(makeEnv({ DB: noTable }), "1", { mode: "historical" }), "review-unreviewed", "history fails closed");
+  assert.equal(await reviewGate(makeEnv({ DB: noTable }), "1", { mode: "live" }), null, "live imports unaffected");
 });
 
 // --- endpoints -----------------------------------------------------------------
@@ -274,7 +353,6 @@ test("review-albums lists Page albums with kinds, suggestions, decision and impo
   assert.ok(barn.suggested.some((s) => s.prefix === "Projects/Harper Barn/"));
   assert.ok(barn.suggested.some((s) => s.prefix === "New Construction/Harper_Barn/"), "cross-category twin offered too");
   assert.ok(j.galleries.length >= 2);
-  assert.equal(j.cutoff, CUTOFF);
   assert.doesNotMatch(JSON.stringify(j), new RegExp(`${PAGE_TOKEN}|access_token|fbcdn`));
 });
 
@@ -376,4 +454,41 @@ test("review-decisions validates the whole batch before writing, upserts and cle
     [["1", "500", "import", null], ["2", "500", "skip", "facebook:122238483140318503"]], "album kept, duplicate link dropped, cleared row gone");
   const summary = await (await call(`${ADMIN}/review-summary`)).json();
   assert.deepEqual(summary, { migrated: true, decisions: { import: 1, skip: 1, later: 0 }, readyToImport: 1 });
+});
+
+test("review-image is cached inside the Worker, so repeat views make no Graph calls", async () => {
+  stubPhoto("9701");
+  const store = new Map();
+  const realCaches = globalThis.caches;
+  globalThis.caches = { default: {
+    async match(req) { const e = store.get(req.url); return e ? new Response(e.body.slice(0), { headers: e.headers }) : undefined; },
+    async put(req, res) { store.set(req.url, { body: await res.arrayBuffer(), headers: [...res.headers] }); },
+  } };
+  try {
+    assert.equal((await call(`${ADMIN}/review-image?id=9701`)).status, 200);
+    const graphBefore = fetchCalls.filter((c) => c.url.hostname === "graph.facebook.com").length;
+    const again = await call(`${ADMIN}/review-image?id=9701`);
+    assert.equal(again.status, 200);
+    assert.equal(again.headers.get("Cache-Control"), "private, max-age=3600", "browser copy stays private");
+    assert.equal(fetchCalls.filter((c) => c.url.hostname === "graph.facebook.com").length, graphBefore, "no Graph call on a cache hit");
+    assert.deepEqual([...store.keys()], ["https://review-cache.internal/facebook-preview/9701"], "internal key, not a public URL");
+    assert.equal((await call(`${ADMIN}/review-image?id=9701`, { admin: false })).status, 401, "cache is behind admin auth");
+  } finally {
+    globalThis.caches = realCaches;
+  }
+});
+
+test("image endpoints are rate limited before any Graph call or R2 read", async () => {
+  stubPhoto("9702");
+  await baseEnv.GALLERY_BUCKET.put("Projects/Harper Barn/1.jpg", JPEG);
+  const keysSeen = [];
+  const env = makeEnv({ REVIEW_LIMITER: { limit: async ({ key }) => { keysSeen.push(key); return { success: false }; } } });
+  for (const url of [`${ADMIN}/review-image?id=9702`, `${ADMIN}/review-site-image?key=${encodeURIComponent("Projects/Harper Barn/1.jpg")}`]) {
+    const res = await call(url, { env });
+    assert.equal(res.status, 429, url);
+    assert.equal(res.headers.get("Retry-After"), "10");
+    assert.equal(res.headers.get("Cache-Control"), "no-store");
+  }
+  assert.deepEqual(keysSeen, ["review-image", "review-site-image"], "one key per endpoint");
+  assert.ok(!fetchCalls.some((c) => c.url.hostname === "graph.facebook.com"), "no Graph call when throttled");
 });

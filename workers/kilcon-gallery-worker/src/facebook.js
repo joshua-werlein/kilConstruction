@@ -22,7 +22,7 @@
 // Secrets (never logged): FB_APP_SECRET, FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN
 
 import { classifyAlbum, albumCollectionKind } from './facebook-album-matching.js';
-import { reviewGate, handleReviewAdmin } from './facebook-review.js';
+import { reviewGate, handleReviewAdmin, webhookReviewMode } from './facebook-review.js';
 import { initialDiscovery, validateDiscovery, discoveryBatch, DISCOVERY_POST_FIELDS } from './facebook-discovery.js';
 
 export const FACEBOOK_PREFIX = "Facebook/";
@@ -531,6 +531,10 @@ async function processEvent(env, row, budget) {
 
   // Single photo → photo_id; album additions → photo_ids; multi-photo posts
   // are resolved from the post's attachments.
+  // New content ("add") imports automatically; an edit of a post the site has
+  // never seen is historical and needs an Import decision (facebook-review.js).
+  const reviewMode = await webhookReviewMode(env.DB, row);
+
   const hintPhotoIds = [];
   if (row.photo_id) hintPhotoIds.push(row.photo_id);
   if (Array.isArray(value.photo_ids)) {
@@ -556,7 +560,7 @@ async function processEvent(env, row, budget) {
         } else if (post) return { status: 'ignored', note: 'not posted by page' };
       }
     }
-    const report = await runDiscoveryBatch(env, state, { dryRun: false, source: 'webhook', budget });
+    const report = await runDiscoveryBatch(env, state, { dryRun: false, source: 'webhook', budget, reviewMode });
     await env.DB.prepare(`UPDATE facebook_webhook_events SET discovery_state = ? WHERE id = ?`).bind(JSON.stringify(state), row.id).run();
     if (report.errors.length) throw new Error(report.errors[0].error);
     if (!report.complete) throw new BudgetExhausted();
@@ -568,6 +572,7 @@ async function processEvent(env, row, budget) {
     hintPhotoIds,
     source: "webhook",
     budget,
+    reviewMode,
     // Edits must re-read the post so caption changes are picked up.
     photoEvent: row.item === "photo" && row.verb === "add",
   });
@@ -716,7 +721,7 @@ function attachmentPhotoIds(post) {
   return ids;
 }
 
-async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null, budget, dryRun = false, photoEvent = false }) {
+async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null, budget, dryRun = false, photoEvent = false, reviewMode = "historical" }) {
   const db = env.DB;
   const pageId = configuredPageId(env);
   if (!pageId) throw new Error("FB_PAGE_ID is not configured");
@@ -763,12 +768,10 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
     else pending.push({ id, row });
   }
   // Review gate before grouping, so a post whose photos all need review never
-  // creates or links a project. Uses the post date; importPhoto re-checks each
-  // photo with its own date.
-  const reviewMode = source === "backfill" ? "historical" : "live";
+  // creates or links a project. importPhoto checks again before each claim.
   const allowed = [];
   for (const p of pending) {
-    if (await reviewGate(env, p.id, { mode: reviewMode, createdTime: toIso(post?.created_time) })) skipped++;
+    if (await reviewGate(env, p.id, { mode: reviewMode })) skipped++;
     else allowed.push(p);
   }
   pending = allowed;
@@ -836,7 +839,7 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
       skipped++;
       continue;
     }
-    const r = await importPhoto(env, photo, { context, projectId: project.id, source, budget });
+    const r = await importPhoto(env, photo, { context, projectId: project.id, source, budget, reviewMode });
     if (r.imported) imported++;
     else skipped++;
   }
@@ -1125,10 +1128,8 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
 
   // Per-photo review gate, before any claim: an excluded photo leaves no row,
   // so a later "import" decision can still import it (idempotent re-runs).
-  const excluded = await reviewGate(env, photoId, {
-    mode: reviewMode || (source === "backfill" ? "historical" : "live"),
-    createdTime: toIso(photo?.created_time),
-  });
+  // Callers must say "live" explicitly; anything else counts as historical.
+  const excluded = await reviewGate(env, photoId, { mode: reviewMode });
   if (excluded) return { imported: false, reason: excluded };
 
   // Claim: a new row, or a previously failed one. A failed row keeps any
@@ -1567,7 +1568,7 @@ export async function runFacebookBackfill(request, env) {
         continue;
       }
       try {
-        const r = await ingestPost(env, { postId: post.id, post, source: "backfill", budget, dryRun });
+        const r = await ingestPost(env, { postId: post.id, post, source: "backfill", budget, dryRun, reviewMode: "historical" });
         result.imported += r.imported || 0;
         result.skipped += r.skipped || 0;
         result.posts.push({
@@ -2161,6 +2162,9 @@ async function adminRetry(env) {
         projectId,
         source: "webhook",
         budget,
+        // Retries only re-run photos that were already claimed (they passed the
+        // gate then); skip/later decisions made since still block them.
+        reviewMode: "live",
       });
       if (out.imported) requeuedPhotos++;
     } catch (e) {
@@ -2297,7 +2301,7 @@ const previewProposal = project => ({
   destination: project.destination || (project.id ? `project:${project.id}` : null),
 });
 
-async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew, maxSteps = PREVIEW_STEPS, reviewMode = source === 'webhook' ? 'live' : 'historical' }) {
+async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew, maxSteps = PREVIEW_STEPS, reviewMode = 'historical' }) {
   if (dryRun && !state.tasks.length && state.previewInventory) return previewInventoryPage(env, state);
   const signal = dryRun ? AbortSignal.timeout(PREVIEW_GRAPH_MS) : null;
   const deadline = dryRun ? Date.now() + PREVIEW_GRAPH_MS : Infinity;
@@ -2349,7 +2353,7 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       if (albumIds.some(id => mappings?.[id] === 'exclude')) return { outcome: 'excluded', project: { name: 'Excluded', reason: 'admin', action: 'exclude' } };
       // Per-photo review gate (preview and import alike), before any project
       // is chosen or created: unreviewed, "later" and "skip" photos stay out.
-      const gated = await reviewGate(env, photo.id, { mode: reviewMode, createdTime: date });
+      const gated = await reviewGate(env, photo.id, { mode: reviewMode });
       if (gated) return { outcome: 'excluded', project: { name: 'Excluded', reason: gated, action: 'exclude' } };
       const locked = existing?.project_locked && existing.project_id ? await loadProject(env.DB, existing.project_id) : null;
       const project = locked ? { ...locked, reason: 'admin', action: 'reuse' } : await discoveryProject(env, photo, task, context, dryRun, mappings, targets);

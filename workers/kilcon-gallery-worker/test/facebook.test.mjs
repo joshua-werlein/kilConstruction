@@ -44,9 +44,6 @@ function makeEnv(overrides = {}) {
     FB_AUTO_IMPORT: "false",
     FB_HISTORICAL_IMPORT_ENABLED: "true",
     FB_INTEGRATION_ENABLED: "true",
-    // Fixture photos are dated 2026-10; these tests cover live (post-cutoff) imports.
-    // The review gate and cutoff are tested in facebook-review.test.mjs.
-    FB_HISTORY_REVIEW_CUTOFF: "",
     // Real limiters (3 writes/min) would throttle the suite; limits aren't under test.
     READ_LIMITER: { limit: async () => ({ success: true }) },
     WRITE_LIMITER: { limit: async () => ({ success: true }) },

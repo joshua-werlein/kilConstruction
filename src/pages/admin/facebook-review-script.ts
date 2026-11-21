@@ -75,25 +75,41 @@ async function start() {
     tiny.width = 9; tiny.height = 8;
     const stageCtx = stage.getContext("2d", { willReadFrequently: true })!;
     const tinyCtx = tiny.getContext("2d", { willReadFrequently: true })!;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    // The image endpoints are rate limited (429 + Retry-After); wait and retry.
+    async function fetchImage(url: string): Promise<Blob> {
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const res = await fetch(url, { credentials: "include" });
+            if (res.status === 429) { await sleep((Number(res.headers.get("Retry-After")) || 10) * 1000); continue; }
+            if (!res.ok) throw new Error(`Image request failed (${res.status})`);
+            return await res.blob();
+        }
+        throw new Error("Image requests are rate limited");
+    }
     async function hashUrl(url: string): Promise<string | null> {
         if (hashes.has(url)) return hashes.get(url)!;
         try {
-            const img = new Image();
-            img.decoding = "async";
-            img.src = url;
-            await img.decode();
+            const bitmap = await createImageBitmap(await fetchImage(url));
             // Two-step downscale approximates area averaging.
             stageCtx.imageSmoothingQuality = "high";
-            stageCtx.drawImage(img, 0, 0, 72, 64);
+            stageCtx.drawImage(bitmap, 0, 0, 72, 64);
+            bitmap.close();
             tinyCtx.imageSmoothingQuality = "high";
             tinyCtx.drawImage(stage, 0, 0, 9, 8);
             const h = dHashFromRgba(tinyCtx.getImageData(0, 0, 9, 8).data);
             hashes.set(url, h);
             return h;
         } catch {
-            hashes.set(url, null);
-            return null;
+            return null; // not remembered: retried the next time the album is opened
         }
+    }
+    // Displayed thumbnails: one delayed retry if the first load is refused.
+    function retryingImg(props: Record<string, string>) {
+        const img = el("img", props);
+        img.addEventListener("error", () => {
+            window.setTimeout(() => { img.src = `${props.src}${props.src.includes("?") ? "&" : "?"}retry=1`; }, 10000);
+        }, { once: true });
+        return img;
     }
     async function hashAll(urls: string[], gen: number, label: string) {
         let done = 0;
@@ -155,7 +171,7 @@ async function start() {
 
     function renderPhoto(p: Photo) {
         const li = el("li", { class: "rv-card", "data-photo": p.id, "data-decision": p.decision || "" });
-        put(li, el("img", { src: fbImage(p.id), alt: `Facebook photo ${p.id}`, loading: "lazy" }));
+        put(li, retryingImg({ src: fbImage(p.id), alt: `Facebook photo ${p.id}`, loading: "lazy" }));
         const badges = el("div", { class: "rv-badges" });
         if (p.createdTime) put(badges, badge(p.createdTime.slice(0, 10)));
         if (p.state === "imported") put(badges, badge("Already on website"));
@@ -200,7 +216,7 @@ async function start() {
     function renderSite() {
         siteGrid.replaceChildren(...site.map((s) => {
             const li = el("li", { class: "rv-card", "data-site": s.id });
-            put(li, el("img", { src: s.src, alt: s.label, loading: "lazy" }), el("span", { class: "rv-site-label" }, s.label));
+            put(li, retryingImg({ src: s.src, alt: s.label, loading: "lazy" }), el("span", { class: "rv-site-label" }, s.label));
             return li;
         }));
     }

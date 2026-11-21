@@ -26,11 +26,6 @@ FB_AUTO_IMPORT   = "true"    # owner-approved 2026-10-19; "false" pauses imports
 # future-only cutoff; historical import always requires a separate admin action.
 FB_DISCOVERY_ENABLED = "false"
 FB_HISTORICAL_IMPORT_ENABLED = "false" # preview-only rollout; blocks both historical import routes
-# Photos created before this instant are historical: no path (webhook edits of
-# old posts, reconciliation, retries) imports them without an "import" decision
-# from /admin/facebook-review. The history import requires that decision for
-# every photo regardless of date. Newer photos keep auto-importing as before.
-FB_HISTORY_REVIEW_CUTOFF = "2026-11-15T00:00:00Z"
 # Days a photo confirmed deleted/unpublished on Facebook stays recoverable
 # (hidden, private master kept) before permanent deletion. OWNER DECISION.
 FB_REMOVED_RETENTION_DAYS = "30"
@@ -87,6 +82,16 @@ namespace_id = "1002"
 
   [ratelimits.simple]
   limit = 3
+  period = 60
+
+# Admin photo-review image proxies (src/facebook-review.js): bounds Graph calls
+# (shared with live webhook imports) and image transformations per endpoint.
+[[ratelimits]]
+name = "REVIEW_LIMITER"
+namespace_id = "1003"
+
+  [ratelimits.simple]
+  limit = 300
   period = 60
 
 [[routes]]
