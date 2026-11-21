@@ -1,222 +1,115 @@
-# KIL Construction Platform
-Serverless content platform with secure media management built on **Cloudflare Workers**, **R2**, and **Astro**.
+<div align="center">
 
-<p>
-  <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" />
-  <img src="https://img.shields.io/badge/Cloudflare-R2-0F1E2E?logo=cloudflare&logoColor=white" />
-  <img src="https://img.shields.io/badge/Astro-BC52EE?logo=astro&logoColor=white" />
-  <img src="https://img.shields.io/badge/Status-Active-success" />
-  <img src="https://img.shields.io/badge/License-Proprietary-red" />
-</p>
+# 🏠 KIL Construction
+
+### Serverless construction website · Galleries · Reviews · Custom administration
+
+[![Live Website](https://img.shields.io/badge/Live_Site-kilcon.work-111827?style=for-the-badge)](https://kilcon.work)
+[![Astro](https://img.shields.io/badge/Astro-5-BC52EE?style=flat-square&logo=astro&logoColor=white)](https://astro.build/)
+[![Cloudflare](https://img.shields.io/badge/Cloudflare-Workers_·_D1_·_R2-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://www.cloudflare.com/)
+![Status](https://img.shields.io/badge/Status-Production-2EA44F?style=flat-square)
+[![License](https://img.shields.io/badge/License-Proprietary-5B5B5B?style=flat-square)](LICENSE)
+
+**[🌐 Live Site](https://kilcon.work)** · **[📸 Project Gallery](https://kilcon.work/projects)** · **[👨‍💻 Developer Portfolio](https://joshuawerlein.com)**
+
+</div>
 
 ---
 
-<details>
-  <summary><strong>Table of Contents</strong></summary>
+## ✨ Overview
 
-- [Overview](#overview)
-- [Tech Stack](#tech-stack)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Screenshots](#screenshots)
-- [Development Setup](#development-setup)
-- [Status](#status)
-- [License](#license)
+A production website and custom content platform built for a construction business. Its owner can organize project imagery, manage customer reviews, and maintain public content without editing code or relying on a third-party CMS.
+
+The interesting engineering work is behind the visuals: **signed admin sessions, Cloudflare Worker APIs, D1 data, R2 media, Facebook integration, and privacy-aware customer uploads**.
+
+## 🚀 Features
+
+| Area | What it does |
+| :--- | :--- |
+| 🖼️ **Project galleries** | Categorized project and service pages, uploads, image management, and responsive presentation |
+| 🔐 **Admin dashboard** | Authenticated content administration with signed sessions and protected mutations |
+| ⭐ **Customer reviews** | Review submission, moderation, featured reviews, and private review-photo storage |
+| ☁️ **Cloud media** | R2 public gallery storage alongside separately restricted customer media |
+| 📩 **Contact workflow** | Cloudflare Turnstile checks and Resend delivery through a separate Worker |
+| 📘 **Facebook integration** | Signed Meta webhook handling, deduplication, new-post import tooling, and admin preview/reconciliation workflows |
+| 🛡️ **Security controls** | Input checks, scoped media access, rate limits, and regression tests for path/URL variations |
+
+## 🧩 Architecture
+
+```mermaid
+flowchart TB
+    A[Astro website] --> B[Gallery + Reviews Worker]
+    A --> C[Contact Worker]
+    B --> D[(D1)]
+    B --> E[(R2 public galleries)]
+    B --> F[(R2 private customer media)]
+    C --> G[Turnstile + Resend]
+    H[Meta Page webhook] --> B
+```
+
+This repository contains **all three code areas**, rather than only the frontend:
+
+```text
+src/                                 # Astro site, public pages, and administration
+workers/kilcon-gallery-worker/       # Gallery, reviews, Facebook, D1 and R2 APIs
+workers/kilcon-contact/              # Contact form and email integration
+migrations/                          # Versioned D1 migrations
+docs/                                # Security notes and integration runbooks
+```
+
+> **Deployment boundary:** The Astro site and two Workers deploy separately. A site push does not automatically redeploy the backend Workers.
+
+## 🔎 Selected engineering challenges
+
+**Private customer content:** Review images and data use controlled private storage and access checks. Security work specifically addressed alternate path encodings, image proxy routes, and public-storage exposure.
+
+**Event-driven media imports:** Meta webhook payloads are signature-verified, deduplicated, and reconciled against stored state. Import/discovery workflows include dry-run preview and administrative controls rather than blindly importing every historical photo.
+
+**Safe content changes:** Image deletion, review moderation, and Facebook removal handling distinguish public content from material that must no longer be exposed.
+
+### 📌 Facebook integration status
+
+The production site has new-post import functionality configured, but **historical album reconciliation and broader album-only discovery should not be described as complete**. Their implementation, release gates, and verification requirements are documented separately:
+
+- [Facebook webhook and import operations](docs/facebook-webhook.md)
+- [Album discovery and historical preview](docs/facebook-album-implementation.md)
+- [Security release and rollout notes](docs/security-release-2026-11-19.md)
+
+## 📷 Screenshots
+
+| Homepage | Project gallery |
+| :---: | :---: |
+| <img src="docs/screenshots/homepage.png" alt="KIL Construction homepage" width="420"> | <img src="docs/screenshots/projectsGallery.png" alt="Construction project gallery" width="420"> |
+
+| Admin dashboard | Admin media management |
+| :---: | :---: |
+| <img src="docs/screenshots/adminDashboard.png" alt="Authenticated admin dashboard" width="420"> | <img src="docs/screenshots/manageImages.png" alt="Admin image management" width="420"> |
+
+<details>
+<summary><strong>🖼️ More screenshots</strong></summary>
+
+| Review moderation | Contact page |
+| :---: | :---: |
+| <img src="docs/screenshots/manageReviews.png" alt="Review moderation" width="420"> | <img src="docs/screenshots/contactPage.png" alt="Contact page" width="420"> |
 
 </details>
 
----
+## 💻 Development
 
-## Overview
+This repository currently declares **Astro 5** in `package.json`; do not change the badge to Astro 7 until that upgrade is merged and verified.
 
-KIL Construction's platform delivers a fast, CDN-optimized website paired with secure administrative tools for managing project galleries, rotating images, and structured media categories.
-
-The frontend (Astro) communicates with **two Cloudflare Workers** (Not in this repository):
-
-1. **Gallery + Reviews Worker**  
-   – Handles gallery listing, reviews, admin authentication, and all R2 operations.
-
-2. **Contact Worker (`kilcon-contact`)**  
-   – Handles **POST `/api/contact`**, email forwarding, and Turnstile validation.  
-
-This repo contains **only the Astro frontend** and no backend secrets or Worker code.
-
----
-
-## Tech Stack
-
-### Frontend
-<p>
-  <img height="30" src="https://raw.githubusercontent.com/devicons/devicon/master/icons/astro/astro-original.svg" />
-  <img height="30" src="https://raw.githubusercontent.com/devicons/devicon/master/icons/javascript/javascript-original.svg" />
-  <img height="30" src="https://raw.githubusercontent.com/devicons/devicon/master/icons/html5/html5-original.svg" />
-  <img height="30" src="https://raw.githubusercontent.com/devicons/devicon/master/icons/css3/css3-original.svg" />
-</p>
-
-### Backend
-<p>
-  <img height="30" src="https://raw.githubusercontent.com/devicons/devicon/master/icons/cloudflare/cloudflare-original.svg" />
-  <img height="30" src="https://img.icons8.com/ios-filled/50/000000/server.png" />
-</p>
-
-### Storage
-📦 Cloudflare R2 Object Storage
-
----
-
-## Features
-
-- Serverless backend powered by **Cloudflare Workers**
-- **Gallery + Reviews Worker** (in Cloudflare) for admin operations, R2, and public listing
-- **Contact Worker** (`/api/contact`) for email forwarding + Turnstile verification
-- Dynamic **Astro** frontend with category/project routing
-- Secure cookie-based admin authentication
-- Upload, rename, delete, and organize media in R2
-- Featured review sorting + homepage review rotation
-- Rotating project cards for modern visual previews
-- Zero-downtime deployments + global CDN caching
-
----
-
-## Architecture
-
-<details>
-<summary><strong>Click to expand architecture details</strong></summary>
-
-### Frontend (Astro)
-
-- Static + dynamic hybrid rendering  
-- Responsive gallery layouts  
-- Rotating image card components  
-- Integrates directly with Worker API endpoints  
-
-### Backend (Cloudflare Workers)
-
-- **Gallery + Reviews Worker (`kilcon-gallery-worker`)**  (external repository) 
-  - Handles all media/gallery operations  
-  - Review submission + featured review ordering  
-  - Admin authentication (cookie-based)  
-  - R2 object reading/writing  
-  - Frontend calls it via:  
-    - `/api/gallery-api*`  
-    - `/api/reviews*`
-
-- **Contact Worker (`kilcon-contact`)**  
-  - Handles **POST `/api/contact`**  
-  - Sends emails using Resend  
-  - Validates Turnstile tokens  
-  - Required environment variables:  
-    - `RESEND_API_KEY`  
-    - `FROM_EMAIL`  
-    - `TO_EMAIL`  
-    - `TURNSTILE_SECRET`  
-  - Deployed in Cloudflare, not stored in this repo
-
-### Storage (R2 Object Storage)
-- Category folders: `Projects/`, `Furniture/`, `Remodels/`, etc.  
-- Deterministic numeric prefix ordering  
-- Scalable object storage  
-
-### Security
-- Secret-based admin authentication  
-- Cookie session validation  
-- Domain-level request verification  
-- Admin access is controlled via short-lived signed cookies
-- All secrets and session controls are configured only in Cloudflare.
-
-</details>
-
----
-
-## Screenshots
-📸 Visual overview of the platform:
-
-<table>
-  <tr>
-    <td align="center">
-      <strong>Homepage</strong><br/>
-      <img src="docs/screenshots/homepage.png" width="380" alt="KilCon homepage"/>
-    </td>
-    <td align="center">
-      <strong>Project Gallery View</strong><br/>
-      <img src="docs/screenshots/projectsGallery.png" width="380" alt="Project gallery view"/>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <strong>Service Gallery View</strong><br/>
-      <img src="docs/screenshots/newConstructionGallery.png" width="380" alt="Service gallery view"/>
-    </td>
-    <td align="center">
-      <strong>Contact Page</strong><br/>
-      <img src="docs/screenshots/contactPage.png" width="380" alt="Contact page"/>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <strong>Admin – Dashboard</strong><br/>
-      <img src="docs/screenshots/adminDashboard.png" width="380" alt="Admin project list"/>
-    </td>
-    <td align="center">
-      <strong>Admin – Upload Images</strong><br/>
-      <img src="docs/screenshots/uploadPage.png" width="380" alt="Admin upload and actions"/>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <strong>Admin – Manage Images in Projects/Services</strong><br/>
-      <img src="docs/screenshots/manageImages.png" width="380" alt="Admin image detail"/>
-    </td>
-    <td align="center">
-      <strong>Admin – Approve/Deny/Feature Reviews</strong><br/>
-      <img src="docs/screenshots/manageReviews.png" width="380" alt="Admin status view"/>
-    </td>
-  </tr>
-</table>
-
----
-
-## Development Setup
-Prerequisites
-- Node 18+
-- Cloudflare account with R2 bucket configured
-- Wrangler CLI (optional – only needed if you want to run Workers locally)
-
-Install & Run
+```bash
 npm install
 npm run dev
+npm run build
+npm run test:site
+npm run test:gallery-worker
+```
 
-Deploy
-npm run deploy
+Cloudflare account access, Worker bindings, D1 migrations, R2 buckets, and secrets are required for a fully functional deployment. **Never run production migrations or historical imports as part of README maintenance.**
 
-Environment Variables
+## 📜 License and authorship
 
-This repository contains **only frontend-safe** environment variables:
+The code and client materials are **proprietary**. The repository is available for technical review, not as a grant of permission to copy or reuse it. See [LICENSE](LICENSE).
 
-- PUBLIC_GALLERY_API=
-- PUBLIC_CONTACT_ENDPOINT=
-
-All sensitive values (ADMIN_SECRET, R2 paths, email API keys, Turnstile secret, etc.)  
-are configured directly inside Cloudflare Worker settings and are **not stored in this repo**.
-  
----
-
-## Status
-This platform is actively deployed for a private construction company.
-Source code is provided solely for portfolio/demo purposes.
-
-## License
-
-> **Proprietary Software — KIL Construction**  
-> Unauthorized use, reproduction, or distribution of this code is prohibited. [![License](https://img.shields.io/badge/License-©%20KIL%20Construction-blue)](LICENSE)
-
----
-
-<sub>
-<strong>Legal Notice:</strong> All code and assets within this repository are the confidential and proprietary
-property of KIL Construction. No part of this project may be copied, modified, published, or distributed
-without prior written consent. Access is provided solely for portfolio review and technical evaluation.
-</sub>
-
-
-
+**Developed and maintained by Joshua Werlein** · [Portfolio](https://joshuawerlein.com) · [GitHub](https://github.com/joshua-werlein)
