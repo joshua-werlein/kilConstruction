@@ -21,7 +21,8 @@
 //
 // Secrets (never logged): FB_APP_SECRET, FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN
 
-import { classifyAlbum } from './facebook-album-matching.js';
+import { classifyAlbum, albumCollectionKind } from './facebook-album-matching.js';
+import { reviewGate, handleReviewAdmin } from './facebook-review.js';
 import { initialDiscovery, validateDiscovery, discoveryBatch, DISCOVERY_POST_FIELDS } from './facebook-discovery.js';
 
 export const FACEBOOK_PREFIX = "Facebook/";
@@ -754,13 +755,23 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
 
   // Skip photos we already have (any status but failed); admin decisions on
   // them are never revisited by sync.
-  const pending = [];
+  let pending = [];
   let skipped = 0;
   for (const id of photoIds) {
     const row = await getPhotoRow(db, id);
     if (row && row.status !== "failed") skipped++;
     else pending.push({ id, row });
   }
+  // Review gate before grouping, so a post whose photos all need review never
+  // creates or links a project. Uses the post date; importPhoto re-checks each
+  // photo with its own date.
+  const reviewMode = source === "backfill" ? "historical" : "live";
+  const allowed = [];
+  for (const p of pending) {
+    if (await reviewGate(env, p.id, { mode: reviewMode, createdTime: toIso(post?.created_time) })) skipped++;
+    else allowed.push(p);
+  }
+  pending = allowed;
   if (!pending.length) return { imported: 0, skipped, project: null, photos: photoIds.length };
 
   // Grouping needs one photo's details (album); the rest are fetched one at a
@@ -1102,7 +1113,7 @@ function assertFacebookCdnUrl(raw) {
   return u.toString();
 }
 
-async function importPhoto(env, photo, { context = {}, projectId, source, budget }) {
+async function importPhoto(env, photo, { context = {}, projectId, source, budget, reviewMode }) {
   const db = env.DB;
   if (!db || !env.GALLERY_BUCKET || !env.PRIVATE_BUCKET) {
     throw new Error("Missing DB, GALLERY_BUCKET or PRIVATE_BUCKET binding");
@@ -1111,6 +1122,14 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
   const photoId = cleanId(photo?.id);
   if (!photoId) throw new Error("Photo has no valid id");
   const pageId = configuredPageId(env);
+
+  // Per-photo review gate, before any claim: an excluded photo leaves no row,
+  // so a later "import" decision can still import it (idempotent re-runs).
+  const excluded = await reviewGate(env, photoId, {
+    mode: reviewMode || (source === "backfill" ? "historical" : "live"),
+    createdTime: toIso(photo?.created_time),
+  });
+  if (excluded) return { imported: false, reason: excluded };
 
   // Claim: a new row, or a previously failed one. A failed row keeps any
   // admin-chosen project and hidden flag.
@@ -1631,11 +1650,32 @@ async function loadProject(db, id) {
     .first();
 }
 
+// Helpers the review module needs, injected to avoid a circular import.
+const REVIEW_HELPERS = {
+  graphGet: (...a) => graphGet(...a),
+  jsonResult: (...a) => jsonResult(...a),
+  configuredPageId: (env) => configuredPageId(env),
+  newBudget: (n) => newBudget(n),
+  readAlbumTargets: (env) => readAlbumTargets(env),
+  listManualProjects: (env) => listManualProjects(env),
+  classifyAlbum: (...a) => classifyAlbum(...a),
+  albumCollectionKind: (name) => albumCollectionKind(name),
+  assertFacebookCdnUrl: (url) => assertFacebookCdnUrl(url),
+  redact: (m, env) => redact(m, env),
+  get GENERIC_WORDS() { return GENERIC_WORDS; },
+  get MANUAL_PROJECT_ROOTS() { return MANUAL_PROJECT_ROOTS; },
+};
+
 export async function handleFacebookAdmin(request, env, sub, urls) {
   const db = env.DB;
   if (!db) return jsonResult({ error: "Missing DB binding" }, 500);
 
   try {
+    // Historical photo review (facebook-review.js): read-only Graph/R2 access
+    // plus decision labels. Handled before the generic JSON body parse.
+    if (sub.startsWith("review-")) {
+      return (await handleReviewAdmin(request, env, sub, REVIEW_HELPERS)) || jsonResult({ error: "Not found" }, 404);
+    }
     if (sub === "overview" && request.method === "GET") return await adminOverview(env);
     if (sub === "photos" && request.method === "GET") return await adminPhotos(env, request, urls);
     if (sub === "photo-file" && request.method === "GET") return await adminPhotoFile(env, request);
@@ -2257,7 +2297,7 @@ const previewProposal = project => ({
   destination: project.destination || (project.id ? `project:${project.id}` : null),
 });
 
-async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew, maxSteps = PREVIEW_STEPS }) {
+async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mappings = null, budget = newBudget(24), renew, maxSteps = PREVIEW_STEPS, reviewMode = source === 'webhook' ? 'live' : 'historical' }) {
   if (dryRun && !state.tasks.length && state.previewInventory) return previewInventoryPage(env, state);
   const signal = dryRun ? AbortSignal.timeout(PREVIEW_GRAPH_MS) : null;
   const deadline = dryRun ? Date.now() + PREVIEW_GRAPH_MS : Infinity;
@@ -2307,6 +2347,10 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       }
       const albumIds = [task.album?.id, photo.album?.id].filter(Boolean);
       if (albumIds.some(id => mappings?.[id] === 'exclude')) return { outcome: 'excluded', project: { name: 'Excluded', reason: 'admin', action: 'exclude' } };
+      // Per-photo review gate (preview and import alike), before any project
+      // is chosen or created: unreviewed, "later" and "skip" photos stay out.
+      const gated = await reviewGate(env, photo.id, { mode: reviewMode, createdTime: date });
+      if (gated) return { outcome: 'excluded', project: { name: 'Excluded', reason: gated, action: 'exclude' } };
       const locked = existing?.project_locked && existing.project_id ? await loadProject(env.DB, existing.project_id) : null;
       const project = locked ? { ...locked, reason: 'admin', action: 'reuse' } : await discoveryProject(env, photo, task, context, dryRun, mappings, targets);
       if (project.action === 'exclude') return { outcome: 'excluded', project };
@@ -2316,7 +2360,8 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       if (dryRun) return { outcome: 'new', project: previewProposal(project), createdTime: date };
       if (context.postId) await env.DB.prepare(`INSERT INTO facebook_posts(fb_post_id,page_id,message,created_time,permalink,project_id,grouping_reason,source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(fb_post_id) DO UPDATE SET message=excluded.message, permalink=excluded.permalink`).bind(context.postId, state.pageId, String(task.post?.message || "").slice(0, 5000), context.createdTime, context.permalink, project.id, project.reason, source).run();
       await renew?.();
-      const result = await importPhoto(env, { ...photo, album: photo.album || task.album }, { context: { ...context, message: task.post?.message || "" }, projectId: project.id, source, budget: b });
+      const result = await importPhoto(env, { ...photo, album: photo.album || task.album }, { context: { ...context, message: task.post?.message || "" }, projectId: project.id, source, budget: b, reviewMode });
+      if (!result.imported && String(result.reason || '').startsWith('review-')) return { outcome: 'excluded', project: { name: 'Excluded', reason: result.reason, action: 'exclude' } };
       return { outcome: result.imported ? 'imported' : 'existing', project: { name: project.name, reason: project.reason, action: project.action } };
     },
   });
@@ -2393,7 +2438,9 @@ export async function runFacebookDiscovery(env, input = {}, { mode = 'history', 
         try { await verifyDiscoveredPhotos(env, budget); }
         catch (e) { verificationError = { task: 'verify-existing-photos', error: redact(e.message, env) }; }
       }
-      const report = await runDiscoveryBatch(env, state, { dryRun: false, mappings: mode === 'history' ? mappings : null, renew, budget });
+      // History imports need an explicit "import" decision per photo; scheduled
+      // reconciliation (future uploads after its own cutoff) uses the live rule.
+      const report = await runDiscoveryBatch(env, state, { dryRun: false, mappings: mode === 'history' ? mappings : null, renew, budget, reviewMode: mode === 'reconcile' ? 'live' : 'historical' });
       if (verificationError) report.errors.push(verificationError);
       for (const album of report.albums) await env.DB.prepare('INSERT INTO facebook_albums(album_id,name,description,created_time,updated_time) VALUES (?,?,?,?,?) ON CONFLICT(album_id) DO UPDATE SET name=excluded.name,description=excluded.description,updated_time=excluded.updated_time').bind(album.id, album.name, album.description, album.created_time, album.updated_time).run();
       const attempts = report.errors.length ? job.attempts + 1 : 0;

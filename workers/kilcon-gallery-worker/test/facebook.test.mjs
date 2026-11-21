@@ -44,6 +44,9 @@ function makeEnv(overrides = {}) {
     FB_AUTO_IMPORT: "false",
     FB_HISTORICAL_IMPORT_ENABLED: "true",
     FB_INTEGRATION_ENABLED: "true",
+    // Fixture photos are dated 2026-10; these tests cover live (post-cutoff) imports.
+    // The review gate and cutoff are tested in facebook-review.test.mjs.
+    FB_HISTORY_REVIEW_CUTOFF: "",
     // Real limiters (3 writes/min) would throttle the suite; limits aren't under test.
     READ_LIMITER: { limit: async () => ({ success: true }) },
     WRITE_LIMITER: { limit: async () => ({ success: true }) },
@@ -141,7 +144,20 @@ async function adminCookie() {
   return `admin_auth=${payloadB64}.${b64u(sig)}`;
 }
 
+// The history importer now requires an owner "import" decision per photo
+// (facebook-review.js). These tests exercise the importer's mechanics, so
+// every stubbed photo is approved before a history request, matching the old
+// all-approved behaviour. The gate itself is tested in facebook-review.test.mjs.
+async function approveStubbedPhotos() {
+  const ids = [...graphFixtures.entries()].filter(([, v]) => v && typeof v === "object" && Array.isArray(v.images)).map(([k]) => k);
+  if (!ids.length) return;
+  await baseEnv.DB.batch(ids.map((id) => baseEnv.DB
+    .prepare("INSERT INTO facebook_photo_reviews (fb_photo_id, decision) VALUES (?, 'import') ON CONFLICT(fb_photo_id) DO NOTHING")
+    .bind(id)));
+}
+
 async function call(url, { method = "GET", body, admin = false, env = makeEnv(), headers = {} } = {}) {
+  if (url.includes("/facebook/backfill")) await approveStubbedPhotos();
   const h = { ...headers };
   if (admin) h.Cookie = await adminCookie();
   if (body !== undefined) h["Content-Type"] = "application/json";
@@ -192,7 +208,7 @@ before(async () => {
   });
   baseEnv = proxy.env;
 
-  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql"]) {
+  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql", "017_facebook_photo_reviews.sql"]) {
     const sql = await readFile(path.join(repoRoot, "migrations", file), "utf8");
     const statements = sql
       .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
@@ -237,7 +253,7 @@ beforeEach(async () => {
   };
 
   await baseEnv.DB.batch(
-    ["facebook_discovery_jobs", "facebook_album_mappings", "facebook_albums", "facebook_webhook_events", "facebook_photos", "facebook_posts", "facebook_projects", "facebook_sync_state"]
+    ["facebook_discovery_jobs", "facebook_album_mappings", "facebook_albums", "facebook_webhook_events", "facebook_photos", "facebook_posts", "facebook_projects", "facebook_sync_state", "facebook_photo_reviews"]
       .map((t) => baseEnv.DB.prepare(`DELETE FROM ${t}`))
   );
   for (const b of [baseEnv.GALLERY_BUCKET, baseEnv.PRIVATE_BUCKET]) {
@@ -1758,6 +1774,7 @@ test('complete discovery: reconciliation establishes future-only cutoff and reco
 
 test('complete discovery: a lease prevents concurrent history scans and expires for recovery', async () => {
   discoveryFixtures();
+  await approveStubbedPhotos();
   const [a, b] = await Promise.all([runFacebookDiscovery(makeEnv(), { dryRun: false, authorizeHistorical: true }), runFacebookDiscovery(makeEnv(), { dryRun: false, authorizeHistorical: true })]);
   assert.ok([a, b].some(r => r.body.busy));
   assert.equal((await rows('SELECT * FROM facebook_photos')).length, 1);

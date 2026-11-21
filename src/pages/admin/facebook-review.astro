@@ -1,0 +1,125 @@
+---
+import AdminLayout from "../../layout/AdminLayout.astro";
+import "../../styles/global.css";
+import "../../styles/admin.css";
+import { verifyAdminToken } from "../../utils/adminToken";
+
+const cookies = Astro.cookies;
+const auth = cookies.get("admin_auth")?.value || "";
+const env = (Astro.locals as any).runtime?.env ?? {};
+const ADMIN_SECRET = env.ADMIN_SECRET;
+const SESSION_VERSION = env.SESSION_VERSION ?? "1";
+
+if (!ADMIN_SECRET || !SESSION_VERSION) {
+    console.error("[admin] Missing ADMIN_SECRET or SESSION_VERSION in runtime env");
+    return new Response("Something went wrong. Please try again later.", { status: 500 });
+}
+
+const isAdmin = auth && ADMIN_SECRET && SESSION_VERSION
+    ? await verifyAdminToken(auth, ADMIN_SECRET, SESSION_VERSION)
+    : false;
+
+if (!isAdmin) {
+    return new Response(null, { status: 302, headers: { Location: "/admin" } });
+}
+---
+<AdminLayout title="Review Facebook Photos" description="Compare historical Facebook photos with website galleries before importing.">
+    <h1 class="admin-title">Review historical Facebook photos</h1>
+    <p class="admin-subtitle">
+        Compare each Facebook album with the website gallery for the same project, then mark every photo.
+        Decisions are saved as you click. Nothing is imported or published from this page.
+    </p>
+
+    <div id="rv-root" data-admin-api="/api/gallery-api/facebook/admin">
+        <section class="panel rv-summary" aria-label="Review summary">
+            <div id="rv-status" class="status-row" role="status" aria-live="polite">Loading albums…</div>
+            <dl id="rv-totals" class="rv-totals"></dl>
+            <p class="hint">
+                Only photos marked <strong>Import</strong> can be imported later, through the reviewed import on
+                <a href="/admin/facebook">Facebook Gallery Sync</a>. Unreviewed, <strong>Review later</strong> and
+                <strong>Duplicate / Skip</strong> photos are always left out. Duplicate badges compare image fingerprints;
+                always look before deciding.
+            </p>
+        </section>
+
+        <div class="rv-layout">
+            <nav class="panel rv-albums" aria-label="Facebook albums">
+                <h2 class="fb-heading">Project albums</h2>
+                <ul id="rv-list-project" class="rv-list"></ul>
+                <h2 class="fb-heading">Unsorted uploads</h2>
+                <p class="hint">Mixed albums such as Mobile uploads. Compared with every website gallery.</p>
+                <ul id="rv-list-generic" class="rv-list"></ul>
+                <h2 class="fb-heading">Branding (never imported)</h2>
+                <ul id="rv-list-branding" class="rv-list"></ul>
+            </nav>
+
+            <section id="rv-album" class="panel rv-album" aria-live="polite" hidden>
+                <div class="toolbar">
+                    <h2 id="rv-album-title" class="fb-heading"></h2>
+                    <div class="toolbar-actions">
+                        <label class="rv-compare">
+                            <span>Compare with</span>
+                            <select id="rv-compare" class="admin-input"></select>
+                        </label>
+                    </div>
+                </div>
+                <p id="rv-album-note" class="hint"></p>
+                <div class="rv-bulk toolbar-actions" role="group" aria-label="Bulk decisions for unreviewed photos">
+                    <button id="rv-bulk-dupes" type="button" class="btn-small">Mark likely duplicates as Duplicate</button>
+                    <button id="rv-bulk-import" type="button" class="btn-small">Mark remaining unreviewed as Import</button>
+                    <button id="rv-bulk-later" type="button" class="btn-small">Mark remaining unreviewed as Review later</button>
+                </div>
+                <div id="rv-progress" class="hint" role="status" aria-live="polite"></div>
+                <div class="rv-columns">
+                    <div>
+                        <h3 class="fb-subheading">Facebook photos</h3>
+                        <ul id="rv-fb" class="rv-grid"></ul>
+                    </div>
+                    <div>
+                        <h3 class="fb-subheading">Website gallery</h3>
+                        <ul id="rv-site" class="rv-grid rv-grid--site"></ul>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <style>
+        .rv-totals { display: flex; flex-wrap: wrap; gap: 1rem 2rem; margin: .5rem 0; }
+        .rv-totals div { display: flex; gap: .4rem; align-items: baseline; }
+        .rv-totals dt { font-weight: 600; }
+        .rv-layout { display: grid; grid-template-columns: minmax(220px, 280px) 1fr; gap: 1rem; align-items: start; }
+        @media (max-width: 900px) { .rv-layout { grid-template-columns: 1fr; } }
+        .rv-list { list-style: none; margin: 0 0 1rem; padding: 0; }
+        .rv-list button { width: 100%; text-align: left; padding: .45rem .5rem; border: 1px solid transparent; border-radius: 6px; background: none; color: inherit; cursor: pointer; }
+        .rv-list button[aria-current="true"] { border-color: currentColor; font-weight: 600; }
+        .rv-list .rv-meta { display: block; font-size: .8rem; opacity: .75; }
+        .rv-compare { display: flex; gap: .5rem; align-items: center; }
+        .rv-bulk { margin: .5rem 0; flex-wrap: wrap; }
+        .rv-columns { display: grid; grid-template-columns: 3fr 2fr; gap: 1rem; }
+        @media (max-width: 1100px) { .rv-columns { grid-template-columns: 1fr; } }
+        .rv-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .75rem; }
+        .rv-grid--site { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+        .rv-card { border: 1px solid rgba(128,128,128,.35); border-radius: 8px; padding: .4rem; display: flex; flex-direction: column; gap: .35rem; }
+        .rv-card img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 4px; background: rgba(128,128,128,.15); }
+        .rv-card[data-decision="skip"] { opacity: .55; }
+        .rv-card[data-decision="import"] { outline: 2px solid #2e7d32; }
+        .rv-card[data-decision="later"] { outline: 2px dashed #b26a00; }
+        .rv-card.rv-highlight { outline: 3px solid #1565c0; }
+        .rv-badges { display: flex; flex-wrap: wrap; gap: .25rem; font-size: .75rem; }
+        .rv-badge { padding: .05rem .4rem; border-radius: 999px; border: 1px solid currentColor; }
+        .rv-badge--likely { color: #c62828; font-weight: 600; }
+        .rv-badge--possible { color: #b26a00; }
+        .rv-match { display: flex; gap: .35rem; align-items: center; font-size: .75rem; background: none; border: 0; color: inherit; padding: 0; cursor: pointer; text-align: left; }
+        .rv-match img { width: 48px; aspect-ratio: 4 / 3; }
+        .rv-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: .25rem; }
+        .rv-actions button { font-size: .75rem; padding: .3rem .2rem; }
+        .rv-actions button[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
+        .rv-site-label { font-size: .7rem; word-break: break-all; opacity: .8; }
+    </style>
+
+    <script>
+        import initReviewPage from "./facebook-review-script";
+        initReviewPage();
+    </script>
+</AdminLayout>

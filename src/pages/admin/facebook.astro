@@ -75,12 +75,14 @@ if (!isAdmin) {
             <div class="toolbar">
                 <h2 id="fb-backfill-heading" class="fb-heading">Historical import</h2>
                 <div class="toolbar-actions">
+                    <a href="/admin/facebook-review" class="btn-small">Review photos</a>
                     <button id="fb-backfill-dry" type="button" class="btn-small">Preview (dry run)</button>
                     <button id="fb-backfill-run" type="button" class="btn-small btn-danger" disabled>Import history</button>
                     <button id="fb-backfill-stop" type="button" class="btn-small" hidden>Stop</button>
                 </div>
             </div>
             <p class="hint">Preview scans accessible albums and posts without changing stored data or publishing photos. Review its results and album destinations before importing. Import publishes in small batches and can be stopped and resumed.</p>
+            <p class="hint">Only photos marked <strong>Import</strong> on the <a href="/admin/facebook-review">photo review page</a> are imported. Unreviewed, "Review later" and "Duplicate / Skip" photos are always left out.</p>
             <div id="fb-backfill" class="fb-sync"></div>
         </section>
 

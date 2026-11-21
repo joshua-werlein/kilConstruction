@@ -129,7 +129,7 @@ before(async () => {
     persist: false,
   });
   baseEnv = proxy.env;
-  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql"]) {
+  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql", "017_facebook_photo_reviews.sql"]) {
     const sql = await readFile(path.join(repoRoot, "migrations", file), "utf8");
     const statements = sql
       .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
