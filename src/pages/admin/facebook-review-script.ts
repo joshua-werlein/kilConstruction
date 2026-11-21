@@ -9,7 +9,7 @@ type Target = { value: string; name: string; category: string; prefix: string | 
 type Album = { id: string; name: string; kind: "project" | "generic" | "branding"; count: number; suggested: Target[];
     mapping: { projectId: number; name: string; prefix: string | null } | null; decisions: Record<Decision, number>; imported: number };
 type Photo = { id: string; createdTime: string | null; state: string | null; decision: Decision | null; duplicateOf: string | null; note: string | null };
-type SiteItem = { id: string; label: string; src: string; duplicateOf: string };
+type SiteItem = { id: string; label: string; src: string; duplicateOf: string; gallery: string; file: string; origin: "manual" | "facebook" };
 type Match = { id: string; distance: number; level: "likely" | "possible" };
 
 const CONCURRENCY = 6;
@@ -38,7 +38,9 @@ async function start() {
     const $ = <T = HTMLElement>(id: string) => document.getElementById(id) as unknown as T;
     const statusEl = $("rv-status"), totalsEl = $("rv-totals"), albumEl = $("rv-album"), titleEl = $("rv-album-title"), emptyEl = $("rv-empty");
     const noteEl = $("rv-album-note"), compareEl = $<HTMLSelectElement>("rv-compare"), progressEl = $("rv-progress");
-    const fbGrid = $("rv-fb"), siteGrid = $("rv-site");
+    const fbGrid = $("rv-fb"), siteGrid = $("rv-site"), reviewTitleEl = $("rv-review-title");
+    const importedWrap = $("rv-imported-wrap"), importedSummary = $("rv-imported-summary"), importedGrid = $("rv-imported"), siteSummary = $("rv-site-summary");
+    const dialogEl = $<any>("rv-dialog"), dialogTitle = $("rv-dialog-title"), dialogMatch = $("rv-dialog-match"), dialogPair = $("rv-dialog-pair"), dialogActions = $("rv-dialog-actions");
     const lists: Record<string, HTMLElement> = { project: $("rv-list-project"), generic: $("rv-list-generic"), branding: $("rv-list-branding") };
 
     let albums: Album[] = [];
@@ -47,6 +49,9 @@ async function start() {
     let photos: Photo[] = [];
     let site: SiteItem[] = [];
     let generation = 0;
+    // none: no gallery selected; running: fingerprinting; done: matches final.
+    let compareState: "none" | "running" | "done" = "none";
+    let dialogPhotoId: string | null = null;
     const hashes = new Map<string, string | null>();      // image URL -> hash (null = failed)
     const matches = new Map<string, Match | null>();      // fb photo id -> best match
     const pending = new Map<string, { photoId: string; albumId: string | null; decision: Decision | "clear"; duplicateOf?: string | null }>();
@@ -180,58 +185,144 @@ async function start() {
     }
 
     function badge(text: string, cls = "") { return el("span", { class: `rv-badge ${cls}`.trim() }, text); }
+    const isLocked = (p: Photo) => current?.kind === "branding" || p.state === "imported" || p.state === "hidden";
+    const matchedSite = (p: Photo) => { const m = matches.get(p.id); return m ? site.find((x) => x.id === m.id) || null : null; };
+    const matchText = (m: Match) => m.level === "likely" ? `Likely duplicate (difference ${m.distance})` : `Possible match (difference ${m.distance})`;
 
-    function renderPhoto(p: Photo) {
-        const li = el("li", { class: "rv-card", "data-photo": p.id, "data-decision": p.decision || "" });
-        put(li, retryingImg({ src: fbImage(p.id), alt: `Facebook photo ${p.id}`, loading: "lazy" }));
-        const badges = el("div", { class: "rv-badges" });
-        if (p.createdTime) put(badges, badge(p.createdTime.slice(0, 10)));
-        if (p.state === "imported") put(badges, badge("Already on website"));
-        else if (p.state === "hidden") put(badges, badge("Imported, hidden"));
-        else if (p.state) put(badges, badge(p.state));
+    // Why the website side is empty, in plain words.
+    function noMatchReason(p: Photo): string {
+        if (compareState === "none") return "No website gallery selected. Choose one in “Compare with”.";
+        if (compareState === "running") return "Comparing with the website gallery…";
+        if (!matches.has(p.id)) return "Could not fingerprint this photo. Compare it by eye with the gallery below.";
+        return "No matching website image found";
+    }
+
+    function sourceLine(label: string, value: string) {
+        const line = el("span"); put(line, el("strong", {}, `${label}: `), document.createTextNode(value)); return line;
+    }
+
+    function facebookSide(p: Photo, large = false) {
+        const fig = el("figure", { class: "rv-side" });
+        put(fig, el("span", { class: "rv-src rv-src--fb" }, "Facebook"));
+        put(fig, retryingImg({ src: fbImage(p.id), alt: `Facebook photo ${p.id} from album ${current?.name || ""}`, loading: large ? "eager" : "lazy" }));
+        const cap = el("figcaption", { class: "rv-source" });
+        put(cap, sourceLine("Album", current?.name || "—"), el("br"), sourceLine("Posted", p.createdTime ? p.createdTime.slice(0, 10) : "unknown"), el("br"), sourceLine("Photo ID", p.id));
+        put(fig, cap);
+        return fig;
+    }
+
+    function websiteSide(p: Photo, large = false) {
+        const fig = el("figure", { class: "rv-side" });
+        put(fig, el("span", { class: "rv-src rv-src--site" }, "Existing website"));
+        const s = matchedSite(p);
+        if (!s) {
+            put(fig, el("div", { class: "rv-nomatch", role: "note" }, noMatchReason(p)));
+            return fig;
+        }
+        put(fig, retryingImg({ src: s.src, alt: `Existing website photo ${s.file} in ${s.gallery}`, loading: large ? "eager" : "lazy" }));
+        const cap = el("figcaption", { class: "rv-source" });
+        put(cap, sourceLine("Gallery", s.gallery), el("br"), sourceLine("File", s.file), el("br"));
+        put(cap, el("span", { class: `rv-origin rv-origin--${s.origin}` }, s.origin === "facebook" ? "Previously imported from Facebook" : "Manually uploaded"));
+        put(fig, cap);
+        return fig;
+    }
+
+    function decisionButtons(p: Photo, large = false) {
+        const actions = el("div", { class: large ? "rv-actions rv-actions--large" : "rv-actions", role: "group", "aria-label": `Decision for Facebook photo ${p.id}` });
+        const choices: [Decision, string][] = [["skip", "Duplicate / Skip"], ["import", "Import"], ["later", "Review later"]];
+        for (const [value, label] of choices) {
+            const b = el("button", { type: "button", class: "btn-small", "aria-pressed": String(p.decision === value) }, label);
+            b.addEventListener("click", () => setDecision(p, p.decision === value ? null : value));
+            put(actions, b);
+        }
+        return actions;
+    }
+
+    // One review card: the Facebook photo beside its closest website photo,
+    // the match result, then the decision buttons directly beneath.
+    function renderPair(p: Photo) {
+        const li = el("li", { class: "rv-pair-card", "data-photo": p.id, "data-decision": p.decision || "" });
+        const pair = el("div", { class: "rv-pair" });
+        put(pair, facebookSide(p), websiteSide(p));
+        put(li, pair);
+        const status = el("div", { class: "rv-pair-status" });
         const m = matches.get(p.id);
-        if (m) put(badges, badge(m.level === "likely" ? `Likely duplicate (${m.distance})` : `Possible match (${m.distance})`, `rv-badge--${m.level}`));
-        put(li, badges);
-        if (m) {
-            const s = site.find((x) => x.id === m.id);
-            if (s) {
-                const jump = el("button", { type: "button", class: "rv-match", title: "Show the matching website photo" });
-                put(jump, el("img", { src: s.src, alt: "" }), el("span", {}, s.label));
-                jump.addEventListener("click", () => {
-                    const target = siteGrid.querySelector<HTMLElement>(`[data-site="${CSS.escape(s.id)}"]`);
-                    siteGrid.querySelectorAll(".rv-highlight").forEach((n) => n.classList.remove("rv-highlight"));
-                    target?.classList.add("rv-highlight");
-                    target?.scrollIntoView({ behavior: "smooth", block: "center" });
-                });
-                put(li, jump);
-            }
+        if (m && matchedSite(p)) {
+            const open = el("button", { type: "button", class: `rv-badge rv-badge-btn rv-badge--${m.level}`, title: "Open a large side-by-side comparison" }, `${matchText(m)} · Compare large`);
+            open.addEventListener("click", () => openDialog(p));
+            put(status, open);
+        } else if (compareState === "done" && matches.has(p.id)) {
+            put(status, badge("No match on the website"));
         }
-        const locked = current?.kind === "branding" || p.state === "imported" || p.state === "hidden";
-        if (!locked) {
-            const actions = el("div", { class: "rv-actions", role: "group", "aria-label": `Decision for photo ${p.id}` });
-            const choices: [Decision, string][] = [["skip", "Duplicate / Skip"], ["import", "Import"], ["later", "Review later"]];
-            for (const [value, label] of choices) {
-                const b = el("button", { type: "button", class: "btn-small", "aria-pressed": String(p.decision === value) }, label);
-                b.addEventListener("click", () => setDecision(p, p.decision === value ? null : value));
-                put(actions, b);
-            }
-            put(li, actions);
-        }
+        if (p.decision) put(status, badge(p.decision === "skip" ? "Marked Duplicate / Skip" : p.decision === "import" ? "Marked Import" : "Marked Review later"));
+        put(li, status);
+        if (!isLocked(p)) put(li, decisionButtons(p));
         return li;
     }
 
-    function renderPhotos() { fbGrid.replaceChildren(...photos.map(renderPhoto)); }
+    // Already on the website (imported earlier) or branding: shown for context only.
+    function renderImported(p: Photo) {
+        const li = el("li", { class: "rv-card", "data-photo": p.id });
+        put(li, el("span", { class: "rv-src rv-src--fb" }, "Facebook"));
+        put(li, retryingImg({ src: fbImage(p.id), alt: `Facebook photo ${p.id}`, loading: "lazy" }));
+        const badges = el("div", { class: "rv-badges" });
+        put(badges, badge(p.state === "hidden" ? "Imported, hidden on website" : p.state === "imported" ? "Already on website" : "Never imported"));
+        if (p.createdTime) put(badges, badge(p.createdTime.slice(0, 10)));
+        put(li, badges);
+        return li;
+    }
+
+    function renderPhotos() {
+        const onSite = photos.filter((p) => p.state === "imported" || p.state === "hidden");
+        const branding = current?.kind === "branding";
+        const toReview = branding ? [] : photos.filter((p) => !onSite.includes(p));
+        reviewTitleEl.textContent = branding ? "Branding photos are never imported" : `Needs review (${toReview.length})`;
+        fbGrid.replaceChildren(...toReview.map(renderPair));
+        const context = branding ? photos : onSite;
+        importedWrap.hidden = context.length === 0;
+        importedSummary.textContent = branding ? `Branding photos (${context.length})` : `Already on the website — imported from Facebook earlier (${context.length})`;
+        importedGrid.replaceChildren(...context.map(renderImported));
+        if (dialogPhotoId && dialogEl.open) { const p = photos.find((x) => x.id === dialogPhotoId); if (p) fillDialog(p); }
+    }
     function rerenderPhoto(p: Photo) {
         const old = fbGrid.querySelector(`[data-photo="${CSS.escape(p.id)}"]`);
-        if (old) old.replaceWith(renderPhoto(p));
+        if (old) old.replaceWith(renderPair(p));
+        if (dialogPhotoId === p.id && dialogEl.open) fillDialog(p);
     }
     function renderSite() {
+        const g = galleries.find((x) => x.value === compareEl.value);
+        const name = compareEl.value === "all" ? "all website galleries" : g ? `${g.name} (${g.prefix || g.category})` : "none";
+        siteSummary.textContent = site.length ? `Website gallery being compared: ${name} — ${site.length} photos` : "No website gallery selected";
         siteGrid.replaceChildren(...site.map((s) => {
             const li = el("li", { class: "rv-card", "data-site": s.id });
-            put(li, retryingImg({ src: s.src, alt: s.label, loading: "lazy" }), el("span", { class: "rv-site-label" }, s.label));
+            put(li, el("span", { class: "rv-src rv-src--site" }, "Existing website"));
+            put(li, retryingImg({ src: s.src, alt: s.label, loading: "lazy" }), el("span", { class: "rv-site-label" }, `${s.gallery}${s.file}`));
+            put(li, el("span", { class: `rv-origin rv-origin--${s.origin}` }, s.origin === "facebook" ? "Previously imported from Facebook" : "Manually uploaded"));
             return li;
         }));
     }
+
+    // --- large comparison --------------------------------------------------------
+    function fillDialog(p: Photo) {
+        const m = matches.get(p.id);
+        dialogTitle.textContent = `Compare: Facebook photo ${p.id}`;
+        dialogMatch.textContent = m ? `${matchText(m)}. Lower is more similar; 0–5 is very likely the same photo.` : noMatchReason(p);
+        dialogPair.replaceChildren(facebookSide(p, true), websiteSide(p, true));
+        dialogActions.replaceChildren(...(isLocked(p) ? [] : [...decisionButtons(p, true).children]));
+    }
+    function openDialog(p: Photo) {
+        dialogPhotoId = p.id;
+        fillDialog(p);
+        if (typeof dialogEl.showModal === "function") dialogEl.showModal(); else dialogEl.setAttribute("open", "");
+    }
+    function closeDialog() {
+        dialogPhotoId = null;
+        if (typeof dialogEl.close === "function") dialogEl.close(); else dialogEl.removeAttribute("open");
+    }
+    $("rv-dialog-close").addEventListener("click", closeDialog);
+    // Click on the backdrop (outside the dialog box) closes it; Esc closes natively.
+    dialogEl.addEventListener("click", (e: MouseEvent) => { if (e.target === dialogEl) closeDialog(); });
+    dialogEl.addEventListener("close", () => { dialogPhotoId = null; });
 
     // --- decisions -------------------------------------------------------------
     function setDecision(p: Photo, decision: Decision | null, duplicateOf?: string | null) {
@@ -310,13 +401,17 @@ async function start() {
         }
         if (!path) return [];
         const data = await api(path);
-        return (data.items || []).map((i: any) => i.facebookPhotoId
-            ? { id: `facebook:${i.facebookPhotoId}`, label: `Facebook ${i.facebookPhotoId}`, src: `${API}/photo-file?id=${encodeURIComponent(i.facebookPhotoId)}`, duplicateOf: `facebook:${i.facebookPhotoId}` }
-            : { id: i.key, label: i.key, src: `${API}/review-site-image?key=${encodeURIComponent(i.key)}`, duplicateOf: i.key });
+        const target = galleries.find((x) => x.value === value);
+        return (data.items || []).map((i: any): SiteItem => i.facebookPhotoId
+            ? { id: `facebook:${i.facebookPhotoId}`, label: `Facebook ${i.facebookPhotoId}`, src: `${API}/photo-file?id=${encodeURIComponent(i.facebookPhotoId)}`,
+                duplicateOf: `facebook:${i.facebookPhotoId}`, gallery: `${target?.name || "Facebook project"} (website gallery)`, file: `photo ${i.facebookPhotoId}`, origin: "facebook" }
+            : { id: i.key, label: i.key, src: `${API}/review-site-image?key=${encodeURIComponent(i.key)}`, duplicateOf: i.key,
+                gallery: i.key.slice(0, i.key.lastIndexOf("/") + 1), file: i.key.slice(i.key.lastIndexOf("/") + 1), origin: "manual" });
     }
 
     async function compare(gen: number) {
         matches.clear();
+        compareState = site.length ? "running" : "none";
         renderPhotos();
         if (!site.length) { progressEl.textContent = "No website gallery selected."; return; }
         await hashAll(site.map((s) => s.src), gen, "website photos");
@@ -331,6 +426,7 @@ async function start() {
             matches.set(p.id, m);
             if (m?.level === "likely") likely++; else if (m) possible++;
         }
+        compareState = "done";
         renderPhotos();
         progressEl.textContent = `${likely} likely duplicate${likely === 1 ? "" : "s"}, ${possible} possible match${possible === 1 ? "" : "es"}` +
             `${failed ? `, ${failed} photo${failed === 1 ? "" : "s"} could not be fingerprinted` : ""}. Fingerprints are a hint: look before deciding.`;
@@ -350,7 +446,9 @@ async function start() {
             : `${a.count} photos. ${a.imported} already on the website.`;
         compareOptions(a);
         photos = []; site = []; matches.clear();
-        fbGrid.replaceChildren(); siteGrid.replaceChildren();
+        compareState = compareEl.value === "none" ? "none" : "running";
+        fbGrid.replaceChildren(); siteGrid.replaceChildren(); importedGrid.replaceChildren();
+        importedWrap.hidden = true;
         progressEl.textContent = "Loading photos…";
         try {
             let after: string | null = null;
@@ -375,6 +473,9 @@ async function start() {
         if (!current) return;
         writeStore(current.id, compareEl.value);
         const gen = ++generation;
+        compareState = compareEl.value === "none" ? "none" : "running";
+        matches.clear();
+        renderPhotos();
         try {
             site = await loadSite(compareEl.value);
             if (gen !== generation) return;

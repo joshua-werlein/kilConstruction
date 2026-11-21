@@ -43,7 +43,8 @@ test("decisions are saved as JSON batches of at most 100 and retried on failure"
 
 test("three choices per photo; branding and already-imported photos are read-only", () => {
   assert.match(script, /\["skip", "Duplicate \/ Skip"\], \["import", "Import"\], \["later", "Review later"\]/);
-  assert.match(script, /const locked = current\?\.kind === "branding" \|\| p\.state === "imported" \|\| p\.state === "hidden";/);
+  assert.match(script, /const isLocked = \(p: Photo\) => current\?\.kind === "branding" \|\| p\.state === "imported" \|\| p\.state === "hidden";/);
+  assert.match(script, /if \(!isLocked\(p\)\) put\(li, decisionButtons\(p\)\);/);
 });
 
 test("bulk actions only touch unreviewed photos and need a second click", () => {
@@ -96,8 +97,11 @@ test("review styles are global (script-created elements need them) and namespace
 test("every class the script assigns has a style rule", async () => {
   const adminCss = await read("../src/styles/admin.css");
   const used = new Set();
-  // class: "a b" literals, class: `rv-badge ${cls}`, classList.add/remove("x"), and badge levels.
-  for (const m of script.matchAll(/class: [`"]([^`"]+)[`"]/g)) m[1].replace(/\$\{[^}]*\}/g, " ").split(/\s+/).forEach((c) => c && used.add(c));
+  // class: "a b" literals (template parts dropped), conditional class strings,
+  // classList.add/remove("x"), and the badge-level and origin variants.
+  for (const m of script.matchAll(/class: [`"]([^`"]+)[`"]/g)) m[1].replace(/\$\{[^}]*\}/g, " ").split(/\s+/).forEach((c) => c && !c.endsWith("--") && used.add(c));
+  for (const m of script.matchAll(/class: [^,}]*\? "([^"]+)" : "([^"]+)"/g)) `${m[1]} ${m[2]}`.split(/\s+/).forEach((c) => used.add(c));
+  if (/rv-origin--\$\{s\.origin\}/.test(script)) { used.add("rv-origin--manual"); used.add("rv-origin--facebook"); }
   for (const m of script.matchAll(/classList\.(?:add|remove|toggle)\("([^"]+)"\)/g)) used.add(m[1]);
   if (/rv-badge--\$\{m\.level\}/.test(script)) { used.add("rv-badge--likely"); used.add("rv-badge--possible"); }
   assert.ok(used.has("rv-row") && used.has("rv-row-name") && used.has("rv-card"), "scanner sanity check");
@@ -121,7 +125,7 @@ test("album rows: separate clickable rows with name, counts, progress and a sele
 test("album list scrolls independently; workspace uses the remaining width", () => {
   assert.match(css, /#rv-root \.rv-albums \{\s*position: sticky;[^}]*max-height: calc\(100vh - 7rem\);[^}]*overflow-y: auto;/);
   assert.match(css, /#rv-root \.rv-layout \{ display: grid; grid-template-columns: minmax\(240px, 300px\) minmax\(0, 1fr\);/);
-  assert.match(css, /#rv-root \.rv-columns \{ display: grid; grid-template-columns: minmax\(0, 3fr\) minmax\(0, 2fr\);/);
+  assert.match(css, /#rv-root \.rv-pairs \{ list-style: none; margin: 0; padding: 0; display: grid;/, "comparison cards fill the workspace width");
   assert.match(page, /<AdminLayout wide /, "wide admin card on this page");
 });
 
@@ -147,7 +151,61 @@ test("empty state until an album is selected", () => {
 });
 
 test("responsive: single column with a scrollable album list on phones", () => {
-  assert.match(css, /@media \(max-width: 1200px\) \{\s*#rv-root \.rv-columns \{ grid-template-columns: minmax\(0, 1fr\); \}/);
   assert.match(css, /@media \(max-width: 860px\) \{[\s\S]*#rv-root \.rv-layout \{ grid-template-columns: minmax\(0, 1fr\); \}[\s\S]*#rv-root \.rv-albums \{ position: static; max-height: 45vh; \}/);
   assert.match(script, /window\.matchMedia\("\(max-width: 860px\)"\)\.matches/);
+});
+
+// --- comparison presentation (2026-11-21): each Facebook photo is shown beside
+// its closest website photo, with clear sources and decisions underneath.
+test("each review card pairs a labelled Facebook photo with the closest labelled website photo", () => {
+  assert.match(script, /put\(pair, facebookSide\(p\), websiteSide\(p\)\);/);
+  assert.match(script, /el\("span", \{ class: "rv-src rv-src--fb" \}, "Facebook"\)/);
+  assert.match(script, /el\("span", \{ class: "rv-src rv-src--site" \}, "Existing website"\)/);
+  assert.match(css, /#rv-root \.rv-pair \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/, "equal-size halves");
+  assert.match(css, /#rv-root \.rv-side img, #rv-root \.rv-nomatch \{[^}]*aspect-ratio: 4 \/ 3; object-fit: contain;/, "whole photos, same box size");
+});
+
+test("sources: Facebook album, date and ID; website gallery, file and how it got there", () => {
+  for (const label of ['"Album"', '"Posted"', '"Photo ID"', '"Gallery"', '"File"']) assert.ok(script.includes(`sourceLine(${label}`), label);
+  assert.match(script, /s\.origin === "facebook" \? "Previously imported from Facebook" : "Manually uploaded"/);
+  assert.match(script, /origin: "manual" \}\);/);
+  assert.match(script, /origin: "facebook" \}/);
+});
+
+test("clear message when there is no website match, and why", () => {
+  assert.match(script, /return "No matching website image found";/);
+  assert.match(script, /if \(compareState === "none"\) return "No website gallery selected/);
+  assert.match(script, /if \(compareState === "running"\) return "Comparing with the website gallery…";/);
+  assert.match(script, /Could not fingerprint this photo/);
+  assert.match(script, /compareState = "done";\s*renderPhotos\(\);/);
+});
+
+test("duplicate badges open a large side-by-side comparison with the same decisions", () => {
+  assert.match(script, /open\.addEventListener\("click", \(\) => openDialog\(p\)\);/);
+  assert.match(script, /dialogPair\.replaceChildren\(facebookSide\(p, true\), websiteSide\(p, true\)\);/);
+  assert.match(script, /decisionButtons\(p, true\)/);
+  assert.match(script, /dialogEl\.showModal\(\)/);
+  assert.match(script, /if \(e\.target === dialogEl\) closeDialog\(\);/, "backdrop click closes; Esc is native");
+  assert.match(page, /<dialog id="rv-dialog" class="rv-dialog" aria-labelledby="rv-dialog-title">/);
+  assert.match(page, /<button id="rv-dialog-close" type="button" class="btn-small">Close<\/button>/);
+});
+
+test("decisions sit directly beneath each comparison", () => {
+  const body = script.slice(script.indexOf("function renderPair("), script.indexOf("function renderImported("));
+  const pairAt = body.indexOf("put(li, pair);"), statusAt = body.indexOf("put(li, status);"), actionsAt = body.indexOf("put(li, decisionButtons(p));");
+  assert.ok(pairAt > 0 && pairAt < statusAt && statusAt < actionsAt, "pair, then match result, then buttons");
+});
+
+test("photos already imported are listed separately from those needing review", () => {
+  assert.match(script, /const onSite = photos\.filter\(\(p\) => p\.state === "imported" \|\| p\.state === "hidden"\);/);
+  assert.match(script, /`Needs review \(\$\{toReview\.length\}\)`/);
+  assert.match(script, /Already on the website — imported from Facebook earlier \(\$\{context\.length\}\)/);
+  assert.match(page, /<details id="rv-imported-wrap" class="rv-section" hidden>/);
+  assert.match(script, /fbGrid\.replaceChildren\(\.\.\.toReview\.map\(renderPair\)\);/);
+});
+
+test("comparison layout is responsive", () => {
+  assert.match(css, /#rv-root \.rv-pairs \{[^}]*grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 460px\), 1fr\)\);/);
+  assert.match(css, /@media \(max-width: 520px\) \{\s*#rv-root \.rv-pair--large \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(css, /#rv-root \.rv-dialog \{ width: min\(1200px, 96vw\); max-height: 94vh; overflow: auto;/);
 });

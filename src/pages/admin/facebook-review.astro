@@ -79,18 +79,36 @@ if (!isAdmin) {
                     <button id="rv-bulk-later" type="button" class="btn-small">Mark remaining unreviewed as Review later</button>
                 </div>
                 <div id="rv-progress" class="hint" role="status" aria-live="polite"></div>
-                <div class="rv-columns">
-                    <div class="rv-column">
-                        <h3 class="rv-column-title">Facebook photos</h3>
-                        <ul id="rv-fb" class="rv-grid"></ul>
-                    </div>
-                    <div class="rv-column">
-                        <h3 class="rv-column-title">Website gallery</h3>
-                        <ul id="rv-site" class="rv-grid rv-grid--site"></ul>
-                    </div>
-                </div>
+
+                <h3 id="rv-review-title" class="rv-column-title">Needs review</h3>
+                <p class="hint rv-legend">
+                    Each card shows a <span class="rv-src rv-src--fb">Facebook</span> photo beside the closest
+                    <span class="rv-src rv-src--site">Existing website</span> photo. Choose a decision under each pair.
+                </p>
+                <ul id="rv-fb" class="rv-pairs"></ul>
+
+                <details id="rv-imported-wrap" class="rv-section" hidden>
+                    <summary id="rv-imported-summary"></summary>
+                    <p class="hint">These photos were imported from this Facebook album earlier and are already on the website. No decision is needed.</p>
+                    <ul id="rv-imported" class="rv-grid"></ul>
+                </details>
+
+                <details class="rv-section">
+                    <summary id="rv-site-summary">Website gallery being compared</summary>
+                    <ul id="rv-site" class="rv-grid rv-grid--site"></ul>
+                </details>
             </section>
         </div>
+
+        <dialog id="rv-dialog" class="rv-dialog" aria-labelledby="rv-dialog-title">
+            <div class="rv-dialog-head">
+                <h2 id="rv-dialog-title" class="rv-album-title">Compare photos</h2>
+                <button id="rv-dialog-close" type="button" class="btn-small">Close</button>
+            </div>
+            <p id="rv-dialog-match" class="rv-dialog-match"></p>
+            <div id="rv-dialog-pair" class="rv-pair rv-pair--large"></div>
+            <div id="rv-dialog-actions" class="rv-actions rv-actions--large" role="group" aria-label="Decision for this Facebook photo"></div>
+        </dialog>
     </div>
 
     <!--
@@ -142,44 +160,81 @@ if (!isAdmin) {
         #rv-root .rv-compare { display: flex; gap: .5rem; align-items: center; }
         #rv-root .rv-compare select { max-width: min(420px, 60vw); }
         #rv-root .rv-bulk { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0; }
-        #rv-root .rv-columns { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 1.25rem; align-items: start; }
-        #rv-root .rv-column { min-width: 0; }
-        #rv-root .rv-column-title { margin: .75rem 0 .5rem; font-size: 1rem; }
-        #rv-root .rv-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: .75rem; }
+        #rv-root .rv-column-title { margin: 1rem 0 .35rem; font-size: 1.05rem; }
+        #rv-root .rv-legend { margin: 0 0 .75rem; }
+        #rv-root .rv-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .75rem; }
         #rv-root .rv-grid--site { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+        #rv-root .rv-section { margin-top: 1.25rem; border-top: 1px solid var(--rv-line); padding-top: .75rem; }
+        #rv-root .rv-section > summary { cursor: pointer; font-weight: 600; padding: .25rem 0; }
+        #rv-root .rv-section[open] > summary { margin-bottom: .5rem; }
 
-        /* Photo cards */
-        #rv-root .rv-card { border: 1px solid var(--rv-line); border-radius: 8px; padding: .4rem; display: flex; flex-direction: column; gap: .35rem; background: #fff; min-width: 0; }
-        #rv-root .rv-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 4px; background: #eceee8; }
-        #rv-root .rv-card[data-decision="skip"] { opacity: .55; }
-        #rv-root .rv-card[data-decision="import"] { outline: 2px solid #2e7d32; }
-        #rv-root .rv-card[data-decision="later"] { outline: 2px dashed #b26a00; }
-        #rv-root .rv-card.rv-highlight { outline: 3px solid #1565c0; }
-        #rv-root .rv-badges { display: flex; flex-wrap: wrap; gap: .25rem; font-size: .75rem; }
-        #rv-root .rv-badge { padding: .05rem .45rem; border-radius: 999px; border: 1px solid currentColor; line-height: 1.5; }
+        /* Source labels: which side is Facebook and which is the existing website */
+        #rv-root .rv-src { display: inline-block; padding: .1rem .5rem; border-radius: 4px; font-size: .72rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; color: #fff; line-height: 1.5; }
+        #rv-root .rv-src--fb { background: #1456b8; }
+        #rv-root .rv-src--site { background: var(--rv-brand); }
+
+        /* Comparison cards: Facebook photo beside its closest website photo */
+        #rv-root .rv-pairs { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap: 1rem; }
+        #rv-root .rv-pair-card { border: 1px solid var(--rv-line); border-radius: 10px; padding: .6rem; display: flex; flex-direction: column; gap: .5rem; background: #fff; min-width: 0; }
+        #rv-root .rv-pair-card[data-decision="skip"] { background: #f6f6f6; }
+        #rv-root .rv-pair-card[data-decision="skip"] .rv-side img { opacity: .6; }
+        #rv-root .rv-pair-card[data-decision="import"] { outline: 2px solid #2e7d32; }
+        #rv-root .rv-pair-card[data-decision="later"] { outline: 2px dashed #b26a00; }
+        #rv-root .rv-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+        #rv-root .rv-side { margin: 0; display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+        #rv-root .rv-side img, #rv-root .rv-nomatch { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-radius: 6px; background: #eceee8; }
+        #rv-root .rv-nomatch { display: flex; align-items: center; justify-content: center; padding: .75rem; text-align: center; font-size: .85rem; color: var(--rv-muted); border: 2px dashed var(--rv-line); background: #fafbf8; }
+        #rv-root .rv-source { font-size: .75rem; color: var(--rv-muted); line-height: 1.35; overflow-wrap: anywhere; }
+        #rv-root .rv-source strong { color: #1f2933; font-weight: 600; }
+        #rv-root .rv-origin { display: inline-block; margin-top: .15rem; padding: 0 .4rem; border-radius: 999px; border: 1px solid currentColor; font-size: .7rem; }
+        #rv-root .rv-origin--manual { color: var(--rv-brand); }
+        #rv-root .rv-origin--facebook { color: #1456b8; }
+        #rv-root .rv-pair-status { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; font-size: .8rem; min-height: 1.6rem; }
+        #rv-root .rv-badge { padding: .05rem .45rem; border-radius: 999px; border: 1px solid currentColor; line-height: 1.5; font-size: .75rem; }
         #rv-root .rv-badge--likely { color: #c62828; font-weight: 600; }
         #rv-root .rv-badge--possible { color: #b26a00; }
-        #rv-root .rv-match { display: flex; gap: .35rem; align-items: center; font-size: .75rem; background: none; border: 0; color: inherit; padding: 0; cursor: pointer; text-align: left; min-width: 0; }
-        #rv-root .rv-match img { width: 48px; flex: none; aspect-ratio: 4 / 3; }
-        #rv-root .rv-match span { overflow-wrap: anywhere; }
-        #rv-root .rv-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .25rem; }
-        #rv-root .rv-actions button { font-size: .75rem; padding: .3rem .2rem; white-space: normal; line-height: 1.2; }
-        #rv-root .rv-actions button[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
+        #rv-root .rv-badge-btn { background: #fff; cursor: pointer; font: inherit; font-size: .75rem; }
+        #rv-root .rv-badge-btn:hover, #rv-root .rv-badge-btn:focus-visible { text-decoration: underline; }
+        #rv-root .rv-badge-btn:focus-visible { outline: 3px solid #1565c0; outline-offset: 2px; }
+        #rv-root .rv-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .3rem; }
+        #rv-root .rv-actions button { font-size: .8rem; padding: .4rem .25rem; white-space: normal; line-height: 1.2; }
+        #rv-root .rv-actions button[aria-pressed="true"] { font-weight: 700; text-decoration: underline; box-shadow: inset 0 0 0 2px currentColor; }
+
+        /* Reference grids (already imported photos, website gallery) */
+        #rv-root .rv-card { border: 1px solid var(--rv-line); border-radius: 8px; padding: .4rem; display: flex; flex-direction: column; gap: .3rem; background: #fff; min-width: 0; }
+        #rv-root .rv-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-radius: 4px; background: #eceee8; }
+        #rv-root .rv-card.rv-highlight { outline: 3px solid #1565c0; }
+        #rv-root .rv-badges { display: flex; flex-wrap: wrap; gap: .25rem; }
         #rv-root .rv-site-label { font-size: .7rem; overflow-wrap: anywhere; color: var(--rv-muted); }
 
-        /* Medium screens: photo panels stack, album list stays beside them */
-        @media (max-width: 1200px) {
-            #rv-root .rv-columns { grid-template-columns: minmax(0, 1fr); }
-        }
+        /* Large comparison dialog */
+        #rv-root .rv-dialog { width: min(1200px, 96vw); max-height: 94vh; overflow: auto; border: 0; border-radius: 14px; padding: 1rem 1.25rem 1.25rem; box-shadow: 0 25px 60px rgba(0,0,0,.35); }
+        #rv-root .rv-dialog::backdrop { background: rgba(15, 23, 42, .6); }
+        #rv-root .rv-dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+        #rv-root .rv-dialog-match { margin: .35rem 0 .75rem; font-size: .9rem; }
+        #rv-root .rv-pair--large { gap: 1rem; }
+        #rv-root .rv-pair--large img, #rv-root .rv-pair--large .rv-nomatch { aspect-ratio: auto; height: min(60vh, 560px); }
+        #rv-root .rv-pair--large .rv-source { font-size: .85rem; }
+        #rv-root .rv-actions--large { margin-top: .9rem; max-width: 640px; }
+        #rv-root .rv-actions--large button { font-size: .95rem; padding: .6rem .5rem; }
+
         /* Phones and small tablets: album list above the workspace, scrollable on its own */
         @media (max-width: 860px) {
             #rv-root .rv-layout { grid-template-columns: minmax(0, 1fr); }
             #rv-root .rv-albums { position: static; max-height: 45vh; }
-            #rv-root .rv-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+            #rv-root .rv-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
             #rv-root .rv-grid--site { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
             #rv-root .rv-compare { flex-wrap: wrap; width: 100%; }
             #rv-root .rv-compare select { max-width: 100%; width: 100%; }
             #rv-root .rv-empty { padding: 1.25rem; }
+            #rv-root .rv-dialog { padding: .75rem; }
+            #rv-root .rv-pair--large img, #rv-root .rv-pair--large .rv-nomatch { height: min(38vh, 360px); }
+        }
+        /* Narrow phones: the large comparison stacks so each photo stays big */
+        @media (max-width: 520px) {
+            #rv-root .rv-pair--large { grid-template-columns: minmax(0, 1fr); }
+            #rv-root .rv-pair--large img, #rv-root .rv-pair--large .rv-nomatch { height: auto; aspect-ratio: 4 / 3; }
+            #rv-root .rv-actions button { font-size: .75rem; }
         }
     </style>
 
