@@ -138,6 +138,12 @@ body {
     padding: clamp(1.5rem, 2.7vw, 2.1rem);
 }
 
+/* Opt-in (AdminLayout wide): side-by-side tools such as photo review. */
+.admin-card--wide {
+    max-width: min(1680px, 100%);
+    text-align: left;
+}
+
 /* ===== TITLES / TEXT ===== */
 
 .admin-title {

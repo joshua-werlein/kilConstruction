@@ -23,14 +23,14 @@ if (!isAdmin) {
     return new Response(null, { status: 302, headers: { Location: "/admin" } });
 }
 ---
-<AdminLayout title="Review Facebook Photos" description="Compare historical Facebook photos with website galleries before importing.">
-    <h1 class="admin-title">Review historical Facebook photos</h1>
-    <p class="admin-subtitle">
-        Compare each Facebook album with the website gallery for the same project, then mark every photo.
-        Decisions are saved as you click. Nothing is imported or published from this page.
-    </p>
-
+<AdminLayout wide title="Review Facebook Photos" description="Compare historical Facebook photos with website galleries before importing.">
     <div id="rv-root" data-admin-api="/api/gallery-api/facebook/admin">
+        <h1 class="admin-title">Review historical Facebook photos</h1>
+        <p class="admin-subtitle">
+            Compare each Facebook album with the website gallery for the same project, then mark every photo.
+            Decisions are saved as you click. Nothing is imported or published from this page.
+        </p>
+
         <section class="panel rv-summary" aria-label="Review summary">
             <div id="rv-status" class="status-row" role="status" aria-live="polite">Loading albums…</div>
             <dl id="rv-totals" class="rv-totals"></dl>
@@ -44,39 +44,48 @@ if (!isAdmin) {
 
         <div class="rv-layout">
             <nav class="panel rv-albums" aria-label="Facebook albums">
-                <h2 class="fb-heading">Project albums</h2>
+                <h2 class="rv-group-title">Project albums</h2>
                 <ul id="rv-list-project" class="rv-list"></ul>
-                <h2 class="fb-heading">Unsorted uploads</h2>
-                <p class="hint">Mixed albums such as Mobile uploads. Compared with every website gallery.</p>
+                <h2 class="rv-group-title">Unsorted uploads</h2>
+                <p class="hint rv-group-hint">Mixed albums such as Mobile uploads. Compared with every website gallery.</p>
                 <ul id="rv-list-generic" class="rv-list"></ul>
-                <h2 class="fb-heading">Branding (never imported)</h2>
+                <h2 class="rv-group-title">Branding (never imported)</h2>
                 <ul id="rv-list-branding" class="rv-list"></ul>
             </nav>
 
+            <section id="rv-empty" class="panel rv-empty" aria-live="polite">
+                <h2 class="rv-empty-title">Select an album to begin</h2>
+                <p>Choose an album on the left. Its Facebook photos appear beside the matching website gallery,
+                    and likely duplicates are flagged automatically.</p>
+                <ol>
+                    <li>Check the <strong>Compare with</strong> gallery (it defaults to the best match).</li>
+                    <li>Mark each photo <strong>Duplicate / Skip</strong>, <strong>Import</strong> or <strong>Review later</strong>.</li>
+                    <li>Decisions save automatically; you can stop and come back at any time.</li>
+                </ol>
+            </section>
+
             <section id="rv-album" class="panel rv-album" aria-live="polite" hidden>
-                <div class="toolbar">
-                    <h2 id="rv-album-title" class="fb-heading"></h2>
-                    <div class="toolbar-actions">
-                        <label class="rv-compare">
-                            <span>Compare with</span>
-                            <select id="rv-compare" class="admin-input"></select>
-                        </label>
-                    </div>
+                <div class="rv-album-head">
+                    <h2 id="rv-album-title" class="rv-album-title"></h2>
+                    <label class="rv-compare">
+                        <span>Compare with</span>
+                        <select id="rv-compare" class="admin-input"></select>
+                    </label>
                 </div>
                 <p id="rv-album-note" class="hint"></p>
-                <div class="rv-bulk toolbar-actions" role="group" aria-label="Bulk decisions for unreviewed photos">
+                <div class="rv-bulk" role="group" aria-label="Bulk decisions for unreviewed photos">
                     <button id="rv-bulk-dupes" type="button" class="btn-small">Mark likely duplicates as Duplicate</button>
                     <button id="rv-bulk-import" type="button" class="btn-small">Mark remaining unreviewed as Import</button>
                     <button id="rv-bulk-later" type="button" class="btn-small">Mark remaining unreviewed as Review later</button>
                 </div>
                 <div id="rv-progress" class="hint" role="status" aria-live="polite"></div>
                 <div class="rv-columns">
-                    <div>
-                        <h3 class="fb-subheading">Facebook photos</h3>
+                    <div class="rv-column">
+                        <h3 class="rv-column-title">Facebook photos</h3>
                         <ul id="rv-fb" class="rv-grid"></ul>
                     </div>
-                    <div>
-                        <h3 class="fb-subheading">Website gallery</h3>
+                    <div class="rv-column">
+                        <h3 class="rv-column-title">Website gallery</h3>
                         <ul id="rv-site" class="rv-grid rv-grid--site"></ul>
                     </div>
                 </div>
@@ -84,38 +93,94 @@ if (!isAdmin) {
         </div>
     </div>
 
-    <style>
-        .rv-totals { display: flex; flex-wrap: wrap; gap: 1rem 2rem; margin: .5rem 0; }
-        .rv-totals div { display: flex; gap: .4rem; align-items: baseline; }
-        .rv-totals dt { font-weight: 600; }
-        .rv-layout { display: grid; grid-template-columns: minmax(220px, 280px) 1fr; gap: 1rem; align-items: start; }
-        @media (max-width: 900px) { .rv-layout { grid-template-columns: 1fr; } }
-        .rv-list { list-style: none; margin: 0 0 1rem; padding: 0; }
-        .rv-list button { width: 100%; text-align: left; padding: .45rem .5rem; border: 1px solid transparent; border-radius: 6px; background: none; color: inherit; cursor: pointer; }
-        .rv-list button[aria-current="true"] { border-color: currentColor; font-weight: 600; }
-        .rv-list .rv-meta { display: block; font-size: .8rem; opacity: .75; }
-        .rv-compare { display: flex; gap: .5rem; align-items: center; }
-        .rv-bulk { margin: .5rem 0; flex-wrap: wrap; }
-        .rv-columns { display: grid; grid-template-columns: 3fr 2fr; gap: 1rem; }
-        @media (max-width: 1100px) { .rv-columns { grid-template-columns: 1fr; } }
-        .rv-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .75rem; }
-        .rv-grid--site { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
-        .rv-card { border: 1px solid rgba(128,128,128,.35); border-radius: 8px; padding: .4rem; display: flex; flex-direction: column; gap: .35rem; }
-        .rv-card img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 4px; background: rgba(128,128,128,.15); }
-        .rv-card[data-decision="skip"] { opacity: .55; }
-        .rv-card[data-decision="import"] { outline: 2px solid #2e7d32; }
-        .rv-card[data-decision="later"] { outline: 2px dashed #b26a00; }
-        .rv-card.rv-highlight { outline: 3px solid #1565c0; }
-        .rv-badges { display: flex; flex-wrap: wrap; gap: .25rem; font-size: .75rem; }
-        .rv-badge { padding: .05rem .4rem; border-radius: 999px; border: 1px solid currentColor; }
-        .rv-badge--likely { color: #c62828; font-weight: 600; }
-        .rv-badge--possible { color: #b26a00; }
-        .rv-match { display: flex; gap: .35rem; align-items: center; font-size: .75rem; background: none; border: 0; color: inherit; padding: 0; cursor: pointer; text-align: left; }
-        .rv-match img { width: 48px; aspect-ratio: 4 / 3; }
-        .rv-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: .25rem; }
-        .rv-actions button { font-size: .75rem; padding: .3rem .2rem; }
-        .rv-actions button[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
-        .rv-site-label { font-size: .7rem; word-break: break-all; opacity: .8; }
+    <!--
+        Global on purpose: album rows, photo cards and badges are created by
+        facebook-review-script.ts, and Astro's scoped styles only match elements
+        rendered by this template. Every selector is namespaced under #rv-root
+        so nothing leaks to other admin pages.
+    -->
+    <style is:global>
+        #rv-root { --rv-brand: var(--brand, #3f5422); --rv-line: #d7dccf; --rv-muted: #5b6470; --rv-soft: #f4f7ef; text-align: left; }
+        #rv-root [hidden] { display: none !important; }
+        #rv-root .rv-summary { margin-bottom: 1rem; }
+        #rv-root .rv-totals { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; margin: .5rem 0; }
+        #rv-root .rv-totals > div { display: flex; gap: .4rem; align-items: baseline; }
+        #rv-root .rv-totals dt { font-weight: 600; }
+        #rv-root .rv-totals dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+        /* Two columns: album list | workspace (empty state or album) */
+        #rv-root .rv-layout { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 1.25rem; align-items: start; }
+        #rv-root .rv-albums {
+            position: sticky; top: 5.5rem; max-height: calc(100vh - 7rem);
+            overflow-y: auto; overscroll-behavior: contain; padding: .75rem;
+        }
+        #rv-root .rv-group-title { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; color: var(--rv-muted); margin: 1rem 0 .4rem; }
+        #rv-root .rv-group-title:first-child { margin-top: 0; }
+        #rv-root .rv-group-hint { margin: 0 0 .4rem; font-size: .8rem; }
+        #rv-root .rv-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
+        #rv-root .rv-list li { margin: 0; }
+        #rv-root .rv-row {
+            display: flex; flex-direction: column; align-items: stretch; gap: .2rem; width: 100%;
+            padding: .55rem .7rem; border: 1px solid var(--rv-line); border-radius: 8px;
+            background: #fff; color: inherit; font: inherit; text-align: left; cursor: pointer;
+            transition: border-color .15s, background-color .15s;
+        }
+        #rv-root .rv-row:hover { border-color: var(--rv-brand); background: var(--rv-soft); }
+        #rv-root .rv-row:focus-visible { outline: 3px solid #1565c0; outline-offset: 2px; }
+        #rv-root .rv-row[aria-current="true"] { border-color: var(--rv-brand); background: var(--rv-soft); box-shadow: inset 4px 0 0 var(--rv-brand); }
+        #rv-root .rv-row-name { font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+        #rv-root .rv-row-meta { display: flex; flex-wrap: wrap; gap: .15rem .6rem; font-size: .8rem; color: var(--rv-muted); }
+        #rv-root .rv-row-progress { width: 100%; height: 6px; accent-color: var(--rv-brand); }
+
+        /* Workspace */
+        #rv-root .rv-empty { padding: 2rem; border: 2px dashed var(--rv-line); border-radius: 12px; color: var(--rv-muted); }
+        #rv-root .rv-empty-title { margin: 0 0 .5rem; color: inherit; font-size: 1.25rem; }
+        #rv-root .rv-empty ol { margin: .5rem 0 0; padding-left: 1.25rem; }
+        #rv-root .rv-album { min-width: 0; }
+        #rv-root .rv-album-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem; }
+        #rv-root .rv-album-title { margin: 0; font-size: 1.35rem; }
+        #rv-root .rv-compare { display: flex; gap: .5rem; align-items: center; }
+        #rv-root .rv-compare select { max-width: min(420px, 60vw); }
+        #rv-root .rv-bulk { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0; }
+        #rv-root .rv-columns { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 1.25rem; align-items: start; }
+        #rv-root .rv-column { min-width: 0; }
+        #rv-root .rv-column-title { margin: .75rem 0 .5rem; font-size: 1rem; }
+        #rv-root .rv-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: .75rem; }
+        #rv-root .rv-grid--site { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+
+        /* Photo cards */
+        #rv-root .rv-card { border: 1px solid var(--rv-line); border-radius: 8px; padding: .4rem; display: flex; flex-direction: column; gap: .35rem; background: #fff; min-width: 0; }
+        #rv-root .rv-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 4px; background: #eceee8; }
+        #rv-root .rv-card[data-decision="skip"] { opacity: .55; }
+        #rv-root .rv-card[data-decision="import"] { outline: 2px solid #2e7d32; }
+        #rv-root .rv-card[data-decision="later"] { outline: 2px dashed #b26a00; }
+        #rv-root .rv-card.rv-highlight { outline: 3px solid #1565c0; }
+        #rv-root .rv-badges { display: flex; flex-wrap: wrap; gap: .25rem; font-size: .75rem; }
+        #rv-root .rv-badge { padding: .05rem .45rem; border-radius: 999px; border: 1px solid currentColor; line-height: 1.5; }
+        #rv-root .rv-badge--likely { color: #c62828; font-weight: 600; }
+        #rv-root .rv-badge--possible { color: #b26a00; }
+        #rv-root .rv-match { display: flex; gap: .35rem; align-items: center; font-size: .75rem; background: none; border: 0; color: inherit; padding: 0; cursor: pointer; text-align: left; min-width: 0; }
+        #rv-root .rv-match img { width: 48px; flex: none; aspect-ratio: 4 / 3; }
+        #rv-root .rv-match span { overflow-wrap: anywhere; }
+        #rv-root .rv-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .25rem; }
+        #rv-root .rv-actions button { font-size: .75rem; padding: .3rem .2rem; white-space: normal; line-height: 1.2; }
+        #rv-root .rv-actions button[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
+        #rv-root .rv-site-label { font-size: .7rem; overflow-wrap: anywhere; color: var(--rv-muted); }
+
+        /* Medium screens: photo panels stack, album list stays beside them */
+        @media (max-width: 1200px) {
+            #rv-root .rv-columns { grid-template-columns: minmax(0, 1fr); }
+        }
+        /* Phones and small tablets: album list above the workspace, scrollable on its own */
+        @media (max-width: 860px) {
+            #rv-root .rv-layout { grid-template-columns: minmax(0, 1fr); }
+            #rv-root .rv-albums { position: static; max-height: 45vh; }
+            #rv-root .rv-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+            #rv-root .rv-grid--site { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+            #rv-root .rv-compare { flex-wrap: wrap; width: 100%; }
+            #rv-root .rv-compare select { max-width: 100%; width: 100%; }
+            #rv-root .rv-empty { padding: 1.25rem; }
+        }
     </style>
 
     <script>

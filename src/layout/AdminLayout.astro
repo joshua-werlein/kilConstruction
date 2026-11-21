@@ -8,6 +8,8 @@ interface Props {
     description?: string;
     image?: string;
     url?: string;
+    /** Wide, left-aligned card for side-by-side tools (e.g. photo review). */
+    wide?: boolean;
 }
 
 const {
@@ -15,6 +17,7 @@ const {
     description = "KIL Construction admin dashboard.",
     image = logo.src,
     url, // optional override
+    wide = false,
 } = Astro.props;
 
 const canonicalUrl = Astro.site
@@ -81,7 +84,7 @@ const absoluteImage = image.startsWith("http")
     </header>
 
     <main class="admin-main">
-        <div class="admin-card">
+        <div class={wide ? "admin-card admin-card--wide" : "admin-card"}>
             <slot />
         </div>
     </main>

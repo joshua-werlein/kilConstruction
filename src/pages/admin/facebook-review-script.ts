@@ -36,7 +36,7 @@ async function start() {
     if (!root) return;
     const API = (root.dataset.adminApi || "/api/gallery-api/facebook/admin").replace(/\/$/, "");
     const $ = <T = HTMLElement>(id: string) => document.getElementById(id) as unknown as T;
-    const statusEl = $("rv-status"), totalsEl = $("rv-totals"), albumEl = $("rv-album"), titleEl = $("rv-album-title");
+    const statusEl = $("rv-status"), totalsEl = $("rv-totals"), albumEl = $("rv-album"), titleEl = $("rv-album-title"), emptyEl = $("rv-empty");
     const noteEl = $("rv-album-note"), compareEl = $<HTMLSelectElement>("rv-compare"), progressEl = $("rv-progress");
     const fbGrid = $("rv-fb"), siteGrid = $("rv-site");
     const lists: Record<string, HTMLElement> = { project: $("rv-list-project"), generic: $("rv-list-generic"), branding: $("rv-list-branding") };
@@ -138,8 +138,20 @@ async function start() {
         for (const ul of Object.values(lists)) ul.replaceChildren();
         for (const a of albums) {
             const decided = a.decisions.import + a.decisions.skip + a.decisions.later;
-            const btn = el("button", { type: "button", "data-album": a.id }, a.name);
-            put(btn, el("span", { class: "rv-meta" }, `${a.count} photos · ${decided} reviewed · ${a.imported} on website`));
+            const reviewable = Math.max(0, a.count - a.imported);
+            const progress = a.kind === "branding" ? "never imported" : `${Math.min(decided, reviewable)}/${reviewable} reviewed`;
+            const btn = el("button", {
+                type: "button", class: "rv-row", "data-album": a.id,
+                "aria-label": `${a.name}: ${a.count} photos, ${progress}${a.imported ? `, ${a.imported} already on the website` : ""}`,
+            });
+            put(btn, el("span", { class: "rv-row-name" }, a.name));
+            const meta = el("span", { class: "rv-row-meta" });
+            put(meta, el("span", {}, `${a.count} photo${a.count === 1 ? "" : "s"}`), el("span", {}, progress));
+            if (a.imported) put(meta, el("span", {}, `${a.imported} on website`));
+            put(btn, meta);
+            if (a.kind !== "branding" && reviewable) {
+                put(btn, el("progress", { class: "rv-row-progress", max: String(reviewable), value: String(Math.min(decided, reviewable)), "aria-hidden": "true" }));
+            }
             if (current?.id === a.id) btn.setAttribute("aria-current", "true");
             btn.addEventListener("click", () => void openAlbum(a));
             const li = el("li"); put(li, btn);
@@ -328,7 +340,10 @@ async function start() {
         const gen = ++generation;
         current = a;
         renderAlbumList();
+        emptyEl.hidden = true;
         albumEl.hidden = false;
+        // Single-column (phone) layout: bring the workspace into view.
+        if (window.matchMedia("(max-width: 860px)").matches) albumEl.scrollIntoView({ behavior: "smooth", block: "start" });
         titleEl.textContent = a.name;
         noteEl.textContent = a.kind === "branding" ? "Branding photos are never imported."
             : a.kind === "generic" ? "Unsorted album: compare with all galleries. Photos marked Import are assigned to a project in the import step."

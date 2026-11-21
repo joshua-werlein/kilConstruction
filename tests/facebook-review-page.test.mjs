@@ -75,3 +75,79 @@ test("rate-limited image requests back off and retry instead of failing the revi
   assert.match(script, /return null; \/\/ not remembered: retried the next time the album is opened/);
   assert.match(script, /retryingImg\(\{ src: fbImage\(p\.id\)/);
 });
+
+// --- layout regression (2026-11-21): the page's scoped <style> never matched
+// the album rows, cards and badges that the script creates, so they rendered
+// unstyled (album names and counts ran together, no selection highlight).
+const styleBlocks = [...page.matchAll(/<style\b([^>]*)>([\s\S]*?)<\/style>/g)];
+const css = styleBlocks.map((m) => m[2]).join("\n");
+
+test("review styles are global (script-created elements need them) and namespaced under #rv-root", () => {
+  assert.ok(styleBlocks.length >= 1);
+  for (const [, attrs] of styleBlocks) assert.match(attrs, /\bis:global\b/, "no scoped <style> blocks on this page");
+  const selectors = css.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@media[^{]+\{/g, "").split("}")
+    .map((r) => r.split("{")[0].trim()).filter(Boolean);
+  for (const sel of selectors) for (const part of sel.split(",")) {
+    assert.match(part.trim(), /^#rv-root\b/, `selector must be namespaced: ${part.trim()}`);
+  }
+  assert.match(css, /#rv-root \[hidden\] \{ display: none !important; \}/, "global display rules must not unhide [hidden]");
+});
+
+test("every class the script assigns has a style rule", async () => {
+  const adminCss = await read("../src/styles/admin.css");
+  const used = new Set();
+  // class: "a b" literals, class: `rv-badge ${cls}`, classList.add/remove("x"), and badge levels.
+  for (const m of script.matchAll(/class: [`"]([^`"]+)[`"]/g)) m[1].replace(/\$\{[^}]*\}/g, " ").split(/\s+/).forEach((c) => c && used.add(c));
+  for (const m of script.matchAll(/classList\.(?:add|remove|toggle)\("([^"]+)"\)/g)) used.add(m[1]);
+  if (/rv-badge--\$\{m\.level\}/.test(script)) { used.add("rv-badge--likely"); used.add("rv-badge--possible"); }
+  assert.ok(used.has("rv-row") && used.has("rv-row-name") && used.has("rv-card"), "scanner sanity check");
+  for (const cls of used) {
+    if (!cls.startsWith("rv-")) { assert.ok(adminCss.includes(`.${cls}`), `admin.css defines .${cls}`); continue; }
+    assert.ok(new RegExp(`\.${cls}(?![a-z-])`).test(css), `page CSS defines .${cls}`);
+  }
+});
+
+test("album rows: separate clickable rows with name, counts, progress and a selected state", () => {
+  assert.match(script, /class: "rv-row", "data-album": a\.id/);
+  assert.match(script, /el\("span", \{ class: "rv-row-name" \}, a\.name\)/);
+  assert.match(script, /el\("span", \{ class: "rv-row-meta" \}\)/);
+  assert.match(script, /el\("progress", \{ class: "rv-row-progress"/);
+  assert.match(script, /btn\.setAttribute\("aria-current", "true"\)/);
+  assert.match(css, /#rv-root \.rv-row\[aria-current="true"\] \{[^}]*box-shadow/);
+  assert.match(css, /#rv-root \.rv-row-meta \{ display: flex;/, "counts on their own line, never run into the name");
+  assert.match(css, /#rv-root \.rv-row:focus-visible/);
+});
+
+test("album list scrolls independently; workspace uses the remaining width", () => {
+  assert.match(css, /#rv-root \.rv-albums \{\s*position: sticky;[^}]*max-height: calc\(100vh - 7rem\);[^}]*overflow-y: auto;/);
+  assert.match(css, /#rv-root \.rv-layout \{ display: grid; grid-template-columns: minmax\(240px, 300px\) minmax\(0, 1fr\);/);
+  assert.match(css, /#rv-root \.rv-columns \{ display: grid; grid-template-columns: minmax\(0, 3fr\) minmax\(0, 2fr\);/);
+  assert.match(page, /<AdminLayout wide /, "wide admin card on this page");
+});
+
+test("only the review page opts into the wide admin card", async () => {
+  const layout = await read("../src/layout/AdminLayout.astro");
+  const adminCss = await read("../src/styles/admin.css");
+  assert.match(layout, /wide = false,/);
+  assert.match(layout, /class=\{wide \? "admin-card admin-card--wide" : "admin-card"\}/);
+  assert.match(adminCss, /\.admin-card \{\s*width: 100%;\s*max-width: 900px;/, "default card unchanged");
+  assert.match(adminCss, /\.admin-card--wide \{\s*max-width: min\(1680px, 100%\);\s*text-align: left;/);
+  const { readdir } = await import("node:fs/promises");
+  const pages = (await readdir(new URL("../src/pages/admin/", import.meta.url))).filter((f) => f.endsWith(".astro"));
+  for (const f of pages) {
+    const src = await read(`../src/pages/admin/${f}`);
+    assert.equal(/<AdminLayout\b[^>]*\bwide\b/.test(src), f === "facebook-review.astro", f);
+  }
+});
+
+test("empty state until an album is selected", () => {
+  assert.match(page, /<section id="rv-empty"[^>]*>\s*<h2 class="rv-empty-title">Select an album to begin<\/h2>/);
+  assert.match(page, /<section id="rv-album"[^>]*hidden>/);
+  assert.match(script, /emptyEl\.hidden = true;\s*albumEl\.hidden = false;/);
+});
+
+test("responsive: single column with a scrollable album list on phones", () => {
+  assert.match(css, /@media \(max-width: 1200px\) \{\s*#rv-root \.rv-columns \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(css, /@media \(max-width: 860px\) \{[\s\S]*#rv-root \.rv-layout \{ grid-template-columns: minmax\(0, 1fr\); \}[\s\S]*#rv-root \.rv-albums \{ position: static; max-height: 45vh; \}/);
+  assert.match(script, /window\.matchMedia\("\(max-width: 860px\)"\)\.matches/);
+});
