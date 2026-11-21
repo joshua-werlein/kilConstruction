@@ -54,7 +54,10 @@ The local preview HTML files and their generator scripts are in the paused sessi
 
 1. **Review `eca9ad3`.** Check out `task/review-comparison-ui`, run `npm run test:site` and `npm run test:gallery-worker` with Node 22.23.5, then `npm run build`. Approve the presentation.
 2. **Deploy it (Pages only).**
-   - `git fetch`. If `origin/main` is still `47dc2e7`, run `git switch main && git merge --ff-only task/review-comparison-ui`, then push without `[CF-Pages-Skip]`.
+   - `git fetch`. `main` has moved ahead by docs-only commits since `47dc2e7`, starting with this handoff.
+   - Run `git switch task/review-comparison-ui && git rebase origin/main`. No conflicts are expected: the branch only touches the review page, its script and tests.
+   - Re-run both suites and the build.
+   - Then `git switch main && git merge --ff-only task/review-comparison-ui`, and push without `[CF-Pages-Skip]`.
    - Confirm the new Pages deployment, run the 67 production checks, and confirm the signed-out redirect.
    - Rollback: Pages `dccbe970`.
 3. **Owner check on the live page.** On `/admin/facebook-review`, open Ganz Garage:
