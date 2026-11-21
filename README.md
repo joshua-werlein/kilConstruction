@@ -6,11 +6,11 @@
 
 [![Live Website](https://img.shields.io/badge/Live_Site-kilcon.work-111827?style=for-the-badge)](https://kilcon.work)
 [![Astro](https://img.shields.io/badge/Astro-5-BC52EE?style=flat-square&logo=astro&logoColor=white)](https://astro.build/)
-[![Cloudflare](https://img.shields.io/badge/Cloudflare-Workers_·_D1_·_R2-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://www.cloudflare.com/)
+[![Cloudflare](https://img.shields.io/badge/Cloudflare-Workers_%C2%B7_D1_%C2%B7_R2-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://www.cloudflare.com/)
 ![Status](https://img.shields.io/badge/Status-Production-2EA44F?style=flat-square)
 [![License](https://img.shields.io/badge/License-Proprietary-5B5B5B?style=flat-square)](LICENSE)
 
-**[🌐 Live Site](https://kilcon.work)** · **[📸 Project Gallery](https://kilcon.work/projects)** · **[👨‍💻 Developer Portfolio](https://joshuawerlein.com)**
+**[🌐 Live Site](https://kilcon.work)** · **[📸 Project Gallery](https://kilcon.work/projects)** · **[GitHub](https://github.com/joshua-werlein/kilConstruction)** · **[👨‍💻 Developer Portfolio](https://joshuawerlein.com)**
 
 </div>
 
@@ -20,7 +20,7 @@
 
 A production website and custom content platform built for a construction business. Its owner can organize project imagery, manage customer reviews, and maintain public content without editing code or relying on a third-party CMS.
 
-The interesting engineering work is behind the visuals: **signed admin sessions, Cloudflare Worker APIs, D1 data, R2 media, Facebook integration, and privacy-aware customer uploads**.
+The Astro site uses two Cloudflare Workers in this repository. The gallery Worker handles media, reviews, and Facebook events. The contact Worker verifies Turnstile challenges and delivers messages through Resend.
 
 ## 🚀 Features
 
@@ -47,59 +47,55 @@ flowchart TB
     H[Meta Page webhook] --> B
 ```
 
-This repository contains **all three code areas**, rather than only the frontend:
-
-```text
-src/                                 # Astro site, public pages, and administration
-workers/kilcon-gallery-worker/       # Gallery, reviews, Facebook, D1 and R2 APIs
-workers/kilcon-contact/              # Contact form and email integration
-migrations/                          # Versioned D1 migrations
-docs/                                # Security notes and integration runbooks
-```
+| Source | Responsibility |
+| :--- | :--- |
+| [Astro application](src/) | Public pages, admin sign-in, and same-origin API routes |
+| [Gallery and reviews Worker](workers/kilcon-gallery-worker/) | D1 records, R2 media, moderation, and Facebook imports |
+| [Contact Worker](workers/kilcon-contact/) | Turnstile verification and Resend delivery |
 
 > **Deployment boundary:** The Astro site and two Workers deploy separately. A site push does not automatically redeploy the backend Workers.
 
-## 🔎 Selected engineering challenges
+## 🔎 Media and Facebook integration
 
-**Private customer content:** Review images and data use controlled private storage and access checks. Security work specifically addressed alternate path encodings, image proxy routes, and public-storage exposure.
+The gallery Worker validates signed admin sessions for privileged operations. Project images and private review uploads use separate R2 storage. The review photo endpoint requires approval for public viewing and authorizes admins to inspect pending submissions.
 
-**Event-driven media imports:** Meta webhook payloads are signature-verified, deduplicated, and reconciled against stored state. Import/discovery workflows include dry-run preview and administrative controls rather than blindly importing every historical photo.
+Production receives signature-verified Meta webhooks and deduplicates eligible new-post imports. Broader album discovery and historical import are disabled in the documented production configuration. The admin preview supports reviewing matches before a historical import is considered.
 
-**Safe content changes:** Image deletion, review moderation, and Facebook removal handling distinguish public content from material that must no longer be exposed.
+<details>
+<summary><strong>Implementation and rollout details</strong></summary>
 
-### 📌 Facebook integration status
+- [Gallery and review access checks](workers/kilcon-gallery-worker/src/index.js)
+- [Webhook verification and imports](docs/facebook-webhook.md)
+- [Album discovery, preview, and release gates](docs/facebook-album-implementation.md)
+- [Verified production flags](docs/security-release-2026-11-19.md)
 
-The production site has new-post import functionality configured, but **historical album reconciliation and broader album-only discovery should not be described as complete**. Their implementation, release gates, and verification requirements are documented separately:
-
-- [Facebook webhook and import operations](docs/facebook-webhook.md)
-- [Album discovery and historical preview](docs/facebook-album-implementation.md)
-- [Security release and rollout notes](docs/security-release-2026-11-19.md)
+</details>
 
 ## 📷 Screenshots
 
 | Homepage | Project gallery |
 | :---: | :---: |
-| <img src="docs/screenshots/homepage.png" alt="KIL Construction homepage" width="420"> | <img src="docs/screenshots/projectsGallery.png" alt="Construction project gallery" width="420"> |
+| [<img src="docs/screenshots/homepage.png" alt="KIL Construction homepage" width="420">](docs/screenshots/homepage.png) | [<img src="docs/screenshots/projectsGallery.png" alt="Public construction project gallery" width="420">](docs/screenshots/projectsGallery.png) |
 
 | Admin dashboard | Admin media management |
 | :---: | :---: |
-| <img src="docs/screenshots/adminDashboard.png" alt="Authenticated admin dashboard" width="420"> | <img src="docs/screenshots/manageImages.png" alt="Admin image management" width="420"> |
+| [<img src="docs/screenshots/adminDashboard.png" alt="Authenticated admin dashboard with gallery and review tools" width="420">](docs/screenshots/adminDashboard.png) | [<img src="docs/screenshots/manageImages.png" alt="Admin media management search, folder list, and controls" width="420">](docs/screenshots/manageImages.png) |
 
 <details>
-<summary><strong>🖼️ More screenshots</strong></summary>
+<summary><strong>More screenshots</strong></summary>
 
 | Review moderation | Contact page |
 | :---: | :---: |
-| <img src="docs/screenshots/manageReviews.png" alt="Review moderation" width="420"> | <img src="docs/screenshots/contactPage.png" alt="Contact page" width="420"> |
+| [<img src="docs/screenshots/manageReviews.png" alt="Review moderation screen with filters and review actions" width="420">](docs/screenshots/manageReviews.png) | [<img src="docs/screenshots/contactPage.png" alt="KIL Construction public contact page" width="420">](docs/screenshots/contactPage.png) |
 
 </details>
 
 ## 💻 Development
 
-This repository currently declares **Astro 5** in `package.json`; do not change the badge to Astro 7 until that upgrade is merged and verified.
+The site uses **Astro 5**. See [package.json](package.json) for dependencies and commands.
 
 ```bash
-npm install
+npm ci
 npm run dev
 npm run build
 npm run test:site
