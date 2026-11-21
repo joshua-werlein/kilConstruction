@@ -1,152 +1,183 @@
-# Facebook image caching: investigation and proposed fix
+# Facebook image caching: gated delivery
 
-Status: **investigation and design only. Nothing changed in production.** Measured 2026-11-21.
+Status: **implemented and tested on branch `feat/facebook-image-gate`. NOT deployed.**
+No production Cloudflare rule, route, R2 object or D1 row has been changed.
+Investigation 2026-11-21; implementation 2026-11-21.
 
-## Evidence
-
-### What is served today
+## 1. Problem (measured live)
 
 All Facebook photos are served from the public R2 custom domain `images.kilcon.work`.
 
-| Request | Stored on R2 | Served to browser | Edge cache |
+| Request | Stored on R2 | Browser receives | Edge |
 |---|---|---|---|
-| `GET /Facebook/<id>.jpg` | `public, max-age=3600` (seen with HEAD) | `public, max-age=14400` | MISS → HIT |
-| `GET /cdn-cgi/image/width=480,fit=cover,quality=80/Facebook/<id>.jpg` | n/a | `public, max-age=14400` | MISS → HIT |
-| Same, at any other width, or via `kilcon.work/cdn-cgi/image/.../https://images.kilcon.work/Facebook/<id>.jpg` | n/a | `public, max-age=14400` | cached separately |
-| `GET /Facebook/<missing>.jpg` (404) | n/a | `max-age=14400` | EXPIRED → HIT (404s are edge-cached) |
-| Admin gallery image (`/Projects/...`) | *no Cache-Control* | `max-age=14400` | HIT |
-| Pages static asset (`/_astro/*.css`, `/favicon.svg`) | `max-age=0, must-revalidate` | `public, max-age=14400, must-revalidate` | n/a |
+| `/Facebook/<id>.jpg` | `public, max-age=3600` | `public, max-age=14400` | MISS → HIT |
+| `/cdn-cgi/image/<any params>/Facebook/<id>.jpg`, on either host | n/a | `public, max-age=14400` | HIT, one entry per parameter set |
+| `/Facebook/<missing>.jpg` (404) | n/a | `max-age=14400` | EXPIRED → HIT |
+| Manual gallery image | none | `max-age=14400` | HIT |
+| Pages asset | `max-age=0, must-revalidate` | `public, max-age=14400, must-revalidate` | n/a |
 
-### What overrides the headers
+### Why browsers get 4 hours
 
-Shorter-than-4 h origin values are raised to 4 h on **both** hosts, and responses with no
-`Cache-Control` get 4 h added. That is the documented behavior of the zone-wide
-**Browser Cache TTL = 4 hours** setting: Cloudflare overrides the origin when its value is
-lower than the setting, or when the origin sends none.
+The zone's **Browser Cache TTL is 4 hours**. Cloudflare raises any shorter origin value to
+4 hours, and adds 4 hours when the origin sends none. This happens on both hosts.
 
-A Cache Rule scoped to images would not affect Pages assets, so the cause is the zone setting.
+Worker responses are **not** raised: pre-release review photos at `max-age=300` reached
+browsers as 300. The wrangler token can't read zone settings; confirm the value under
+Caching → Configuration.
 
-The wrangler token can't read zone settings or Cache Rules. **Confirm in the dashboard:**
-Caching → Configuration → Browser Cache TTL, and Caching → Cache Rules.
+### What hiding a photo leaves behind
 
-### What is not affected
+`reconcilePhoto()` deletes the public R2 copy within seconds of a hide, delete or unpublish.
+Galleries stop listing the photo at once, because the gallery API is `no-store`. But cached
+copies remain reachable:
 
-**Worker responses are not raised.** Before the 2026-11-19 release, review photos were
-served by the Gallery Worker with `public, max-age=300`, and browsers received exactly that,
-with no `CF-Cache-Status` (see `security-release-2026-11-19.md` §C).
+- **Full image at the edge:** about 1 hour.
+- **Every resized URL already cached:** up to the edge TTL.
+- **Browsers that already loaded it:** up to 4 hours.
+- **Restored photos:** a visitor who got the cached 404 sees a broken image for up to 4 hours.
 
-### What happens when a photo is hidden
+## 2. Could a narrowly scoped Cache Rule solve it? No
 
-When a photo is hidden, deleted or unpublished on Facebook, or hidden by an admin or with
-its project, `reconcilePhoto()` deletes the public R2 object immediately (`src/facebook.js`).
-The master copy stays in the private bucket.
+A rule matching host `images.kilcon.work` with path starting `/Facebook/`, set to
+Browser TTL "respect origin" and Edge TTL "respect origin", plus R2 metadata rewritten to
+`max-age=300`, would bound exposure to about 5 minutes. It falls short on every requirement
+that matters:
 
-So the origin is correct within seconds. All remaining exposure is cached copies:
+| Requirement | Cache Rule result |
+|---|---|
+| Hidden photo unreachable | No. It is still served from the edge and from browsers for up to 300 s, because nothing checks visibility. |
+| Resized variants | Unknown and unbounded. Each `/cdn-cgi/image` parameter set is cached separately, and it isn't documented that the rule applies to transformed responses. A Cache Rule can't make browsers cache *less* than the origin says. |
+| Old transformation URLs and arbitrary parameters | Still work for visible photos; already-cached copies of hidden ones persist. |
+| Cached 404s | Needs status-code TTL handling, and pre-change browser 404s persist anyway. |
+| No production data change | Needs the metadata of every Facebook object in R2 rewritten. |
 
-- **Full images at the edge:** until the edge TTL expires, about 1 h if it follows the stored `max-age`.
-- **Every variant URL already cached at the edge:** variants can be requested at any width, through either host.
-- **Browsers that already loaded the photo:** up to 4 h.
-- **Restored photos:** a visitor who got the cached 404 keeps seeing a broken image for up to 4 h after the photo is restored.
+The only token-free ways to make a hide take effect immediately are to check visibility on
+every request (the gate below) or to block the request before the cache (WAF).
 
-Gallery listings are not a source of exposure. The gallery API is `no-store`, and the SSR pages aren't edge-cached, so a hidden photo leaves the gallery pages at once.
+## 3. Implementation (`workers/kilcon-gallery-worker`)
 
-## Options considered
+### Route
 
-| Option | Browser TTL | Invalidation | Cost and risk |
-|---|---|---|---|
-| A. Zone Browser Cache TTL → "Respect existing headers" | 300 s, once R2 metadata changes | none (≤5 min) | **Zone-wide.** Admin gallery images (no header) and Pages assets lose browser caching. Rejected. |
-| B. Cache Rule (host `images.kilcon.work`, path contains `/Facebook/`, Browser TTL "respect origin") + rewrite the R2 metadata of the 8 objects + `PUBLIC_CACHE_CONTROL` | 300 s | none. Stale ≤5 min at the edge and in browsers. Unclear whether the rule matches `/cdn-cgi/image/` variants. | One zone rule, an R2 data change, no code risk. |
-| C. Purge on hide (Cache Purge API) | needs B too | edge only. Each variant URL must be listed, and arbitrary widths can't be enumerated. | **Needs a purge token.** Not necessary given D. |
-| **D. Worker-gated Facebook images (recommended)** | **300 s** | **Immediate at the edge, for full images and variants.** Only browsers holding a copy keep it, for ≤300 s. | New Worker route plus an Images binding. 1 Worker request and 1 R2 HEAD per image view. No purge token. |
+`images.kilcon.work/Facebook/*` → `kilcon-gallery-worker` (`wrangler.toml`).
 
-## Recommended design (D)
+The route's request-limit failure mode must be **Fail closed**. Do not use Fail open: it
+would send requests to R2 when the daily Worker limit is hit.
 
-### 1. Worker route
+### `src/facebook-image.js`, on every request
 
-Add `images.kilcon.work/Facebook/*` → `kilcon-gallery-worker`, like the existing `Reviews/*` route.
+1. **GET and HEAD only.** Anything else gets 405 `no-store`.
+2. **Strict canonical paths only.** No decoding, no extra segments, no leading-zero widths, and the extension must match the stored key.
+   - `/Facebook/<digits>.<jpg|png|webp>`: full image.
+   - `/Facebook/w/480/<digits>.<ext>`: thumbnail. 480 is the **only** width the site uses; adding one is a one-line change and costs one unique transformation per photo per month.
+3. **Visibility gate in D1, before any cache lookup.** It uses the same `VISIBLE_PHOTO_SQL` as the gallery listings (now exported):
+   - status `imported`, not hidden, `public_key` set;
+   - project not hidden;
+   - `FB_INTEGRATION_ENABLED = "true"`.
+4. **Bytes come from the private master** (`PRIVATE_BUCKET`), never from the public bucket.
+5. **Thumbnails** are resized from the master with the **Images binding**, so no `/cdn-cgi/image` URL is involved.
+   - Each thumbnail is stored in the Worker Cache API for 24 h. That's safe because the gate runs first.
+   - If the transformation fails (quota error 9422, input over 20 MB, binding outage), the original is served **uncached**. The gate has already passed, so this is not a bypass.
+6. **Visible responses** get `Cache-Control: public, max-age=300`, an `ETag`, 304 revalidation, and `nosniff`.
+7. **Missing, hidden, deleted or unknown** → 404 `no-store`.
+8. **Any error** (D1, R2 or Cache API) → **503 `no-store`**. Nothing falls through to R2.
 
-Set the route's request-limit failure mode to **fail open**. If the Free-plan daily limit
-(100k requests) is reached, requests fall through to R2. Hidden photos are already deleted
-there, so they still return 404.
+### Other changes
 
-### 2. Handler `serveFacebookImage(request, env)`
+- **`buildThumbUrl()`:** Facebook keys now get `https://images.kilcon.work/Facebook/w/480/<id>.<ext>`. Manual gallery images keep `/cdn-cgi/image/...` (unchanged; asserted by the existing upload test).
+- **`[images] binding = "IMAGES"`** added.
+- **No site (Pages) change is needed.**
+  - `ProjectCard` shows only the thumbnail.
+  - The detail pages' srcset `.replace('=s0', …)` already never matched.
+  - The index pages' preload `withWidth()` simply doesn't rewrite the new URL, so it preloads the thumbnail actually displayed.
+- **The existing public R2 copies are left untouched.** No R2 change is needed. They exist only for visible photos, are no longer used, and keep a rollback possible.
 
-**Accepted requests.** GET and HEAD only. Two path forms, anything else returns 404 `no-store`:
+## 4. Bypass analysis
 
-- `/Facebook/<digits>.jpg` (full image)
-- `/Facebook/w/<480|600|1200|2000>/<digits>.jpg` (variant)
+| Path | After deploy |
+|---|---|
+| `images.kilcon.work/Facebook/<id>.jpg`, including edge-cached copies from before the deploy | Goes to the Worker; the route runs before the cache. **Gated.** |
+| `images.kilcon.work/Facebook/w/<other>/…`, `?width=…`, `0480`, wrong extension, extra segments | **404 `no-store`.** Query strings are ignored and never reach the cache key. |
+| `images.kilcon.work/cdn-cgi/image/<any>/Facebook/…` and `kilcon.work/cdn-cgi/image/<any>/https://images.kilcon.work/Facebook/…` | Bypass Workers. Hidden photos aren't in the public bucket, but **already-cached variants stay reachable**. **Needs the WAF rule.** |
+| Encoded or case variants (`/Facebook%2F…`, `/%46acebook/…`, `/facebook/…`) | Don't match the route pattern; R2 may normalize them to the public copy (`security-deployment-plan.md` E5). Visible photos only, but cached copies persist. **Covered by the WAF rule.** |
+| r2.dev | Disabled on both buckets (checked 2026-11-21). |
+| Other custom domains | None. `kilcon-gallery` has only `images.kilcon.work`; `kilcon-private` has none. |
+| `www.kilcon.work` | 301 to the apex. |
+| `*.workers.dev` | Not served: the gate runs only for host `images.kilcon.work`. |
 
-**Visibility gate, on every request and before any cache lookup:**
-`GALLERY_BUCKET.head("Facebook/<id>.jpg")`. The public object exists only while the photo is
-visible, so this is the single source of truth.
-
-- If the object is missing, return 404 with `Cache-Control: no-store`.
-
-**Full image.**
-
-1. `GALLERY_BUCKET.get(key, { onlyIf: request.headers })` handles `ETag` and 304 responses.
-2. Respond `Cache-Control: public, max-age=300`, with the `ETag`, the stored `Content-Type` and `X-Content-Type-Options: nosniff`.
-
-**Variant.**
-
-1. Look up `caches.default` by the variant URL.
-2. On a miss, transform with the **Images binding**:
-   `env.IMAGES.input(obj.body).transform({ width, fit: "cover" }).output({ format: "image/jpeg", quality: 80 })`.
-   It reads the R2 body directly, with no URL fetch, so there is no request loop and no dependence on `/cdn-cgi/image`.
-3. Store the result in `caches.default` with a long internal TTL (`s-maxage=86400`).
-4. Serve it to the browser with `public, max-age=300`.
-
-A stale cache entry is never served after a hide, because the gate runs first. **No purge is ever needed.**
-
-### 3. URLs the site emits
-
-`buildThumbUrl()` emits `https://images.kilcon.work/Facebook/w/480/<id>.jpg` for Facebook
-keys only. Non-Facebook images keep their `/cdn-cgi/image/` URLs.
-
-The site's `withWidth()` helpers (`projects/index.astro` and the three `services/*/index.astro`)
-also rewrite `/Facebook/w/\d+/` to the allowed widths 600, 1200 and 2000.
-
-### 4. Optional zone hardening (WAF custom rule)
-
-Block requests where:
+### WAF custom rule: required, action **Block**
 
 ```
-starts_with(http.request.uri.path, "/cdn-cgi/image/") and http.request.uri.path contains "/Facebook/"
+(starts_with(http.request.uri.path, "/cdn-cgi/image/") and lower(url_decode(http.request.uri.path, "r")) contains "facebook")
+or (http.host eq "images.kilcon.work" and lower(url_decode(http.request.uri.path, "r")) contains "facebook"
+    and not starts_with(http.request.uri.path, "/Facebook/"))
 ```
 
-This stops arbitrary-width variants that would bypass the gate. Without it, a variant that
-was **already** edge-cached before a hide stays reachable at its exact URL until it expires.
-After the hide, uncached variants fail because the R2 source is gone.
+- It mirrors the existing Reviews rule.
+- The WAF is verified to evaluate `/cdn-cgi/image/` paths: Reviews variants return 403 on both hosts.
+- **False positives:** none among the 198 public gallery URLs. Facebook covers stop using `/cdn-cgi/image` with this deploy.
+- **Plan capacity:** the Free plan allows 5 custom rules; this would be the second.
 
-## Cached 404s
+## 5. Tests
 
-- **Edge-cached 404s** under `/Facebook/*` are never served again, because the Worker route runs before the cache. New 404s are `no-store`.
-- **Browser-cached 404s from before the deploy** (`max-age=14400`) can't be cleared server-side. They expire within 4 h. All 8 current photos are visible, so no visitor should have one.
+- `test/facebook-image.test.mjs` (20 tests, real local D1/R2): visible, private-only, 304/HEAD, thumbnail plus cache hit, query strings, hide with a cached thumbnail (the cache is never read), stale public copy, a real hide → restore through `reconcilePhoto`, deleted, hidden project, importing, integration off, 14 bypass paths, encoded prefixes, methods, other hosts, D1 / R2 / Cache API failures (503 `no-store`), transformation quota failure and a missing binding, and the URL helpers.
+- **Real runtime** (`wrangler dev --local`, local D1/R2 only, Images binding local mode):
+  - Thumbnail is a real 480×252 JPEG of 13 KB.
+  - Full image is 59 KB, served from the private master rather than a decoy public copy.
+  - 304 works for both.
+  - `w/600` → 404 `no-store`.
+  - Hide → 404 on the next request; restore → 200; project hide → 404; delete → 404.
+- Totals: Worker suite **145/145**, site suite **37/37**. `wrangler deploy --dry-run` bundles fine (179 KiB, 43 KiB gzip) with `env.IMAGES`.
 
-## Existing 8 images: R2 metadata
+## 6. Costs and limits
 
-**No update needed under D.** The Worker sets the response headers, so the stored
-`cacheControl` (`public, max-age=3600`) is no longer sent for `/Facebook/*`. It only matters
-again if the route is removed.
+| Resource | Free plan | Estimated use |
+|---|---|---|
+| **Image Transformations** (shared by the binding and `/cdn-cgi/image`; unique per image and parameters per calendar month) | 5,000/month. Over the limit, new transformations fail (9422) and cached ones keep working. No charge. | Facebook: ≤ 388 with 388 photos × 1 width. Manual galleries: about 198 thumbnails + 3 × ~40 cover preloads ≈ 320. **Total ≈ 700–800/month.** A failed transformation serves the original. |
+| **Workers requests** (account-wide, all Workers) | 100,000/day, then the route fails closed (error 1027) | 1 per Facebook image view; repeats within 5 min come from the browser cache. ~50 images per visitor × 100 visitors ≈ 5k/day; 1,000 visitors ≈ 50k/day. |
+| Workers CPU | 10 ms/request | D1, R2 and Images are I/O. The original-image fallback buffers up to 25 MB, the only CPU-heavy path. |
+| D1 reads | 5M rows/day | About 2 rows per image request. |
+| R2 Class B | 10M/month | 1 per full image, plus 1 per thumbnail cache miss. |
 
-Under option B, all 8 objects would need their metadata rewritten in place, and
-`PUBLIC_CACHE_CONTROL` changed to `public, max-age=300`.
+**Main operational risk: the shared 100k/day Worker limit.** When it's exhausted, every
+Worker route fails closed until 00:00 UTC: galleries, reviews, the Facebook webhook (Meta
+retries) and now images.
 
-## Things to confirm before building
+Mitigations, either of which needs approval:
 
-1. Image Transformations or the Images binding are available on the account's Free plan, and the monthly quota (5,000 unique transformations) is acceptable. About 8 photos × 4 widths today; historical album import will raise it.
-2. The dashboard values of Browser Cache TTL and Cache Rules (see Evidence).
-3. Worker request volume after historical import. Each Facebook image view costs one Worker request. The 300 s browser TTL and `loading="lazy"` limit repeats.
+- **Workers Paid** ($5/month: 10M requests/month included, no daily cliff). Recommended before the historical import of 388+ photos.
+- **A WAF rate-limiting rule** (Free: 1 rule, 10 s period) on `images.kilcon.work/Facebook/*`. It blocks scrapers before they consume Worker requests.
 
-## Deploy order and rollback (needs approval)
+## 7. Deploy runbook (needs approval)
 
-1. **Worker:** `versions upload --tag <commit>`, then `versions deploy`. This adds the route, the Images binding and the handler.
-2. **Verify** the full image, each variant, a 404, and a 304 revalidation:
-   - Status codes are as expected.
-   - `Cache-Control` is `public, max-age=300`, or `no-store` on 404s.
-   - Edge behavior is correct.
-3. **Pages:** deploy the `withWidth()` change.
-4. **Rollback:** `npx wrangler rollback b5ad9617-2324-4aca-962f-2ac1c3e33b76`, **then remove the `images.kilcon.work/Facebook/*` route** in the dashboard (Workers → Routes).
-   - Routes aren't versioned, so a rollback alone leaves the route pointing at old code that doesn't handle it.
-   - The rolled-back Worker emits `/cdn-cgi/image/` thumbnail URLs again.
-   - The 8 R2 objects are untouched.
+Current rollback points: Worker version `b5ad9617-2324-4aca-962f-2ac1c3e33b76`; Pages unaffected.
+
+1. **Upload the version** (no traffic change):
+   `npx wrangler versions upload --tag <commit> --message "Gated Facebook images"`.
+   This also confirms the account accepts the `IMAGES` binding.
+2. **Add the route while the old code is live:** `npx wrangler triggers deploy`. It applies `wrangler.toml` routes and crons.
+   - The old code answers `/Facebook/*` with 404 `no-store` for a few seconds, so nothing is cached.
+   - The reverse order would let R2 404s for the new thumbnail URLs be browser-cached for 4 h.
+3. **Deploy the version:** `npx wrangler versions deploy <version-id>@100% -y`.
+4. **Dashboard:** set the `images.kilcon.work/Facebook/*` route's failure mode to **Fail closed**, and confirm `kilcon.work/api/*` and `Reviews/*` too.
+5. **Verify:**
+   - Full image, thumbnail, 304 and `w/600` → 404 all behave as tested.
+   - The gallery API thumbnails are `/Facebook/w/480/…`.
+   - The projects pages render.
+6. **Add the WAF rule** (§4), then verify that the Facebook `/cdn-cgi/image/` URLs return 403 on both hosts and that manual gallery thumbnails still load.
+
+## 8. Rollback
+
+1. Disable the WAF rule first; otherwise the old code's `/cdn-cgi/image` Facebook thumbnails are blocked.
+2. `npx wrangler rollback b5ad9617-2324-4aca-962f-2ac1c3e33b76`. The old code emits `/cdn-cgi/image` thumbnails again. Facebook full images return 404 `no-store` until step 3.
+3. **Remove the `images.kilcon.work/Facebook/*` route** in Dashboard → Workers → kilcon-gallery-worker → Domains & Routes. Routes aren't versioned, so a rollback alone keeps the route. Requests then reach the untouched public R2 copies again.
+4. Check with curl that `/Facebook/<id>.jpg` returns 200 from R2.
+
+No D1 or R2 data changes, so nothing else needs undoing.
+
+## 9. Follow-up (separate approval): private-only storage
+
+Stop writing public Facebook copies in `reconcilePhoto()`, and delete the existing ones
+(an R2 change; 8 objects today). After that the public bucket holds no Facebook bytes, so
+even a removed route or a WAF misconfiguration can't expose a photo.
+
+Trade-off: a rollback would then have to recreate the public copies from the private masters.

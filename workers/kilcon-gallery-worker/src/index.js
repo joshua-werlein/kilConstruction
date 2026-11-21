@@ -31,6 +31,7 @@ import {
   runReviewMigration,
 } from "./reviewPrivacy.js";
 import { validateImageFile, readBoundedFormData, isSafeUploadKey } from "./imageValidation.js";
+import { serveFacebookImage, facebookThumbUrl } from "./facebook-image.js";
 
 // Facebook sync ships disabled. Until FB_INTEGRATION_ENABLED = "true", every
 // Facebook route 404s, public galleries never query D1, and cron only runs
@@ -317,9 +318,11 @@ export default {
       const pathname = url.pathname;
       const params = url.searchParams;
 
-      // Review attachments are never served straight from the public bucket;
-      // approved photos go through /api/reviews/photo instead.
+      // images.kilcon.work routes: /Facebook/* is served through the D1
+      // visibility gate (facebook-image.js). Review attachments are never served
+      // from the public bucket; approved photos go through /api/reviews/photo.
       if (url.hostname === PUBLIC_IMAGE_HOST) {
+        if (pathname.startsWith("/Facebook/")) return await serveFacebookImage(request, env, ctx);
         return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
       }
 
@@ -832,7 +835,9 @@ function buildThumbUrl(full, env) {
     const u = new URL(full);
     const path = u.pathname.replace(/^\/+/, "");
     const base = baseForResize.replace(/\/+$/, "");
-    return `${base}/cdn-cgi/image/${THUMB_PARAMS}/${path}`;
+    // Facebook photos use the gated Worker thumbnail, never /cdn-cgi/image
+    // (which would bypass the visibility check). Manual gallery images unchanged.
+    return facebookThumbUrl(base, path) ?? `${base}/cdn-cgi/image/${THUMB_PARAMS}/${path}`;
   } catch (e) {
     console.warn("buildThumbUrl failed for", full, e);
     return full;
