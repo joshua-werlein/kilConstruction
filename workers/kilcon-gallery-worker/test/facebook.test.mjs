@@ -647,7 +647,8 @@ test("signed event imports in waitUntil: master private, public copy, visible ga
   assert.ok(card, "project card listed");
   assert.equal(card.name, "Johnson Backyard Deck");
   assert.equal(card.previews.length, 3);
-  assert.match(card.images.thumb, /\/cdn-cgi\/image\/.+\/Facebook\/\d+\.jpg$/);
+  // Gated Worker thumbnail, never /cdn-cgi/image (which would bypass the visibility check).
+  assert.match(card.images.thumb, /^https:\/\/images\.kilcon\.work\/Facebook\/w\/480\/\d+\.jpg$/);
 
   const page = await getJson("/api/gallery-api?project=johnson-backyard-deck");
   assert.equal(page.project.name, "Johnson Backyard Deck");

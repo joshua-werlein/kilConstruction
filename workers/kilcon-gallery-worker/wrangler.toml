@@ -96,3 +96,16 @@ zone_name = "kilcon.work"
 [[routes]]
 pattern = "images.kilcon.work/Reviews/*"
 zone_name = "kilcon.work"
+
+# Facebook photos are served only through the D1 visibility gate
+# (src/facebook-image.js), from the private master copy. The route's
+# request-limit failure mode must be "Fail closed" (Dashboard → Workers Routes):
+# fail open would let requests reach the public bucket directly.
+[[routes]]
+pattern = "images.kilcon.work/Facebook/*"
+zone_name = "kilcon.work"
+
+# Cloudflare Images binding: 480px Facebook thumbnails are resized from the
+# private master (no /cdn-cgi/image URL, so nothing can bypass the gate).
+[images]
+binding = "IMAGES"

@@ -1326,7 +1326,8 @@ function toItem(row, urls) {
   };
 }
 
-const VISIBLE_PHOTO_SQL = `ph.status = 'imported' AND ph.hidden = 0 AND ph.public_key IS NOT NULL
+// Shared with facebook-image.js: the image gate must agree with the listings.
+export const VISIBLE_PHOTO_SQL = `ph.status = 'imported' AND ph.hidden = 0 AND ph.public_key IS NOT NULL
   AND p.hidden = 0`;
 
 export async function listFacebookProjects(env, category, urls) {
