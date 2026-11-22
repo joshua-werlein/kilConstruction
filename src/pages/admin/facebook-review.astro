@@ -121,6 +121,11 @@ if (!isAdmin) {
                 </section>
 
                 <h3 id="rv-review-title" class="rv-column-title">Needs review</h3>
+                <div class="rv-filters" role="group" aria-label="Which photos to show">
+                    <label><input id="rv-hide-skip" type="checkbox" checked /> Hide photos marked Duplicate / Skip</label>
+                    <label><input id="rv-hide-imported" type="checkbox" checked /> Hide photos already imported</label>
+                    <span id="rv-filter-note" class="hint" role="status" aria-live="polite"></span>
+                </div>
                 <p class="hint rv-legend">
                     Each card shows a <span class="rv-src rv-src--fb">Facebook</span> photo beside the closest
                     <span class="rv-src rv-src--site">Existing website</span> photo. Choose a decision under each pair.
@@ -218,6 +223,8 @@ if (!isAdmin) {
         #rv-root .rv-import-report { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .85rem; }
         #rv-root .rv-import-report li { margin: .15rem 0; overflow-wrap: anywhere; }
         #rv-root .rv-import-dialog { width: min(560px, 94vw); }
+        #rv-root .rv-filters { display: flex; flex-wrap: wrap; gap: .4rem 1rem; align-items: center; margin: .25rem 0 .6rem; font-size: .9rem; }
+        #rv-root .rv-filters label { display: inline-flex; gap: .35rem; align-items: center; cursor: pointer; }
         #rv-root .rv-newgal { margin: .5rem 0; padding: .5rem .75rem; border: 1px dashed #cbd5e1; border-radius: 8px; background: #fff; }
         #rv-root .rv-newgal summary { cursor: pointer; font-weight: 600; }
         #rv-root .rv-held-note { margin: .35rem 0 0; padding: .35rem .5rem; border-left: 3px solid #d97706; background: #fffbeb; font-size: .8rem; }

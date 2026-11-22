@@ -50,6 +50,52 @@ export function destinationBody(gallery) {
   return {};
 }
 
+// --- review-page view filters (display only: nothing is deleted or re-decided) ---
+
+/** @typedef {{ hideSkipped: boolean, hideImported: boolean }} ReviewFilters */
+/** @type {Readonly<ReviewFilters>} */
+export const DEFAULT_FILTERS = Object.freeze({ hideSkipped: true, hideImported: true });
+
+/** Saved filter settings, falling back to the defaults for anything missing or invalid. */
+export function readFilters(raw) {
+  let saved = {};
+  try { saved = typeof raw === "string" ? JSON.parse(raw) || {} : {}; } catch { saved = {}; }
+  return {
+    hideSkipped: typeof saved.hideSkipped === "boolean" ? saved.hideSkipped : DEFAULT_FILTERS.hideSkipped,
+    hideImported: typeof saved.hideImported === "boolean" ? saved.hideImported : DEFAULT_FILTERS.hideImported,
+  };
+}
+
+/**
+ * Splits an album's photos for display.
+ * - review: photos not on the website, minus Duplicate / Skip when hidden.
+ * - onSite: photos already imported (shown in their own section unless hidden).
+ * By default only photos that still need attention show: undecided, Review
+ * later, and Import-approved photos that aren't imported yet.
+ */
+/** @param {any[]} photos @param {ReviewFilters} [filters] */
+export function filterPhotos(photos, filters = DEFAULT_FILTERS) {
+  const list = Array.isArray(photos) ? photos : [];
+  const onSite = list.filter((p) => p.state === "imported" || p.state === "hidden");
+  const notOnSite = list.filter((p) => !onSite.includes(p));
+  const skipped = notOnSite.filter((p) => p.decision === "skip");
+  const review = filters.hideSkipped ? notOnSite.filter((p) => p.decision !== "skip") : notOnSite;
+  return {
+    review,
+    onSite: filters.hideImported ? [] : onSite,
+    hiddenSkipped: filters.hideSkipped ? skipped.length : 0,
+    hiddenImported: filters.hideImported ? onSite.length : 0,
+    totalOnSite: onSite.length,
+  };
+}
+
+export function filterNote(view) {
+  const parts = [];
+  if (view.hiddenSkipped) parts.push(`${view.hiddenSkipped} marked Duplicate / Skip`);
+  if (view.hiddenImported) parts.push(`${view.hiddenImported} already imported`);
+  return parts.length ? `Hidden: ${parts.join(" and ")}. Their decisions are kept.` : "";
+}
+
 export const GALLERY_CONFIRMATION = "CREATE GALLERY"; // Worker GALLERY_CONFIRMATION
 
 /** The first "suggested name" recorded on automatically held photos, if any. */

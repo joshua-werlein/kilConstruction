@@ -3,7 +3,7 @@
 // sees the Page token or Facebook CDN URLs. Same-origin images also let the
 // page compute perceptual hashes in a canvas without tainting it.
 import { dHashFromRgba, bestMatch } from "../../lib/photo-hash.js";
-import { GALLERY_CONFIRMATION, chunk, confirmText, destinationBody, destinationMode, galleryCheckText, galleryGroups, runFlags, suggestedGalleryName, summarizeDryRun, summarizeImport } from "../../lib/review-import.js";
+import { DEFAULT_FILTERS, filterNote, filterPhotos, readFilters, GALLERY_CONFIRMATION, chunk, confirmText, destinationBody, destinationMode, galleryCheckText, galleryGroups, runFlags, suggestedGalleryName, summarizeDryRun, summarizeImport } from "../../lib/review-import.js";
 
 type Decision = "import" | "skip" | "later";
 type Target = { value: string; name: string; category: string; prefix: string | null; source: string; id: number | null };
@@ -274,13 +274,30 @@ async function start() {
         return li;
     }
 
+    // View filters: display only. Decisions, bulk actions and the import plan
+    // always use the full photo list; nothing is deleted or re-decided.
+    const hideSkipEl = $<HTMLInputElement>("rv-hide-skip"), hideImportedEl = $<HTMLInputElement>("rv-hide-imported"), filterNoteEl = $("rv-filter-note");
+    const FILTER_KEY = "kilcon-review-filters";
+    let filters: { hideSkipped: boolean; hideImported: boolean } = { ...DEFAULT_FILTERS };
+    try { filters = readFilters(localStorage.getItem(FILTER_KEY)); } catch { /* storage unavailable: defaults */ }
+    hideSkipEl.checked = filters.hideSkipped;
+    hideImportedEl.checked = filters.hideImported;
+    const onFilterChange = () => {
+        filters = { hideSkipped: hideSkipEl.checked, hideImported: hideImportedEl.checked };
+        try { localStorage.setItem(FILTER_KEY, JSON.stringify(filters)); } catch { /* per-viewer convenience only */ }
+        renderPhotos();
+    };
+    hideSkipEl.addEventListener("change", onFilterChange);
+    hideImportedEl.addEventListener("change", onFilterChange);
+
     function renderPhotos() {
-        const onSite = photos.filter((p) => p.state === "imported" || p.state === "hidden");
         const branding = current?.kind === "branding";
-        const toReview = branding ? [] : photos.filter((p) => !onSite.includes(p));
+        const view = filterPhotos(photos, filters);
+        const toReview = branding ? [] : view.review;
         reviewTitleEl.textContent = branding ? "Branding photos are never imported" : `Needs review (${toReview.length})`;
+        filterNoteEl.textContent = branding ? "" : filterNote(view);
         fbGrid.replaceChildren(...toReview.map(renderPair));
-        const context = branding ? photos : onSite;
+        const context = branding ? photos : view.onSite;
         importedWrap.hidden = context.length === 0;
         importedSummary.textContent = branding ? `Branding photos (${context.length})` : `Already on the website — imported from Facebook earlier (${context.length})`;
         importedGrid.replaceChildren(...context.map(renderImported));

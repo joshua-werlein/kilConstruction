@@ -196,8 +196,11 @@ test("decisions sit directly beneath each comparison", () => {
   assert.ok(pairAt > 0 && pairAt < statusAt && statusAt < actionsAt, "pair, then match result, then buttons");
 });
 
-test("photos already imported are listed separately from those needing review", () => {
-  assert.match(script, /const onSite = photos\.filter\(\(p\) => p\.state === "imported" \|\| p\.state === "hidden"\);/);
+test("photos already imported are listed separately from those needing review", async () => {
+  // The split lives in the shared filter helper (src/lib/review-import.js).
+  const lib = await read("../src/lib/review-import.js");
+  assert.match(lib, /const onSite = list\.filter\(\(p\) => p\.state === "imported" \|\| p\.state === "hidden"\);/);
+  assert.match(script, /const view = filterPhotos\(photos, filters\);/);
   assert.match(script, /`Needs review \(\$\{toReview\.length\}\)`/);
   assert.match(script, /Already on the website — imported from Facebook earlier \(\$\{context\.length\}\)/);
   assert.match(page, /<details id="rv-imported-wrap" class="rv-section" hidden>/);

@@ -150,3 +150,32 @@ test("Create New Gallery is wired safely: check first, confirm, then select the 
   assert.match(create, /await refreshImportPanel\(\);\s*importGallery\.value = `project:\$\{r\.project\.id\}`;/);
   assert.match(s, /\/\^Held automatically\/\.test\(p\.note\)/, "held photos show why");
 });
+
+test("review filters: by default only photos that still need attention show; nothing is lost", async () => {
+  const { DEFAULT_FILTERS, readFilters, filterPhotos, filterNote } = await import("../src/lib/review-import.js");
+  const photos = [
+    { id: "1", decision: null, state: null }, { id: "2", decision: "later", state: null }, { id: "3", decision: "import", state: null },
+    { id: "4", decision: "skip", state: null }, { id: "5", decision: "skip", state: null },
+    { id: "6", decision: "import", state: "imported" }, { id: "7", decision: null, state: "hidden" },
+  ];
+  assert.deepEqual(DEFAULT_FILTERS, { hideSkipped: true, hideImported: true });
+  let v = filterPhotos(photos, DEFAULT_FILTERS);
+  assert.deepEqual([v.review.map((p) => p.id), v.onSite.map((p) => p.id), v.hiddenSkipped, v.hiddenImported], [["1", "2", "3"], [], 2, 2]);
+  assert.equal(filterNote(v), "Hidden: 2 marked Duplicate / Skip and 2 already imported. Their decisions are kept.");
+  v = filterPhotos(photos, { hideSkipped: false, hideImported: false });
+  assert.deepEqual([v.review.map((p) => p.id), v.onSite.map((p) => p.id), filterNote(v)], [["1", "2", "3", "4", "5"], ["6", "7"], ""]);
+  assert.equal(photos.length, 7, "the input list is never modified");
+  assert.deepEqual(readFilters('{"hideSkipped":false}'), { hideSkipped: false, hideImported: true });
+  for (const bad of [null, "", "nope", '{"hideSkipped":"yes"}', "[]"]) assert.deepEqual(readFilters(bad), DEFAULT_FILTERS, String(bad));
+});
+
+test("review filters only change what is shown, not decisions, bulk actions or the import plan", () => {
+  assert.match(page, /<input id="rv-hide-skip" type="checkbox" checked \/>/);
+  assert.match(page, /<input id="rv-hide-imported" type="checkbox" checked \/>/);
+  const s = code(script);
+  const render = s.slice(s.indexOf("function renderPhotos()"), s.indexOf("function rerenderPhoto("));
+  assert.match(render, /const view = filterPhotos\(photos, filters\);/);
+  assert.match(s, /const reviewable = \(\) => current && current\.kind !== "branding" \? photos\.filter\(\(p\) => !p\.decision && !p\.state\) : \[\];/, "bulk actions still use every photo");
+  assert.doesNotMatch(render, /review-decisions|setDecision|pending\.set|fetch\(/, "rendering never writes");
+  assert.match(s, /try \{ localStorage\.setItem\(FILTER_KEY/, "the setting is a per-browser convenience");
+});
