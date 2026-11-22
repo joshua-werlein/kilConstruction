@@ -95,7 +95,7 @@ Production is stable and verified. Start here; the linked docs hold the details.
    - Tests cover the cutoff and branding exclusion.
    - Before enabling: verify the subscription, retries, album-only additions and removals.
 6. **Cleanup and the remaining deferred items:**
-   - delete `task/review-comparison-ui` and `task/facebook-integration-completion` (both merged);
+   - delete `task/review-comparison-ui` (merged), once the owner authorizes it;
    - private-only storage;
    - sharper comparison images;
    - CSP enforcement;
@@ -125,7 +125,7 @@ Production is stable and verified. Start here; the linked docs hold the details.
 |---|---|
 | `main` | `= origin/main` at `bd707ef` |
 | `task/mixed-album-import` | Local and uncommitted (mixed-album import); **keep** |
-| `task/facebook-integration-completion` | Merged (`bd707ef`); delete |
+| `task/facebook-integration-completion` | Merged (`bd707ef`) and deleted |
 | `task/review-comparison-ui` | Merged; delete |
 | `backup-pre-revert` | Unmerged; the owner's backup; keep |
 | `codex/facebook-album-integration` | Merged; another agent's branch; delete only with the owner's approval |
