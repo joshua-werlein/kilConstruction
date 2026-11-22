@@ -21,8 +21,13 @@ Production is stable and verified. Start here; the linked docs hold the details.
   the previous version before deploying.
 - **Data:**
   - Ganz Garage (project 1) has **15** photos.
-  - Review decisions: 7 Import (Ganz Garage, done). There are no album mappings.
-  - Nothing has changed in D1 since the Ganz import (snapshot diff).
+  - Review decisions: 7 Import (Ganz Garage, done) and **216 Skip**. The Skips were saved
+    2026-11-22 at 17:20 UTC: all high-confidence visual duplicates (distance 0–2), re-checked
+    against D1 first, each with `duplicate_of` evidence. The 20 medium-confidence matches are
+    left undecided for the owner.
+  - **Ripley** gallery: project `5`, Projects, empty, not public yet. It is linked to album
+    `122203565678318503`.
+  - D1 bookmark from before the Skip save: `000006e6-00000000-0000512b-887ad3972528c2c10e9776b04d53b3d5`.
 - **Verified on 2026-11-22, after `bd707ef`:**
   - **Production checks:** 122/122 passed.
   - **Signed-out access:** `/admin/manage` redirects to `/admin`, and `album-link` and
@@ -62,14 +67,24 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 ## Next actionable step
 
-**The owner approves saving the 236 Skip decisions.**
-- I re-check that each photo is still undecided, then save in 3 batches of at most 100.
-- I verify the counts on the review page.
-- Then the owner marks **Import** for batch 1 (**Ripley**, 2 photos) on `/admin/facebook-review`.
+The owner opens `/admin/facebook-review`, picks album **Ripley**, compares the 2 photos and marks
+**Import**:
+- `122203565936318503`
+- `122203565978318503`
+
+Both are new: the nearest website image is at distance 20.
+
+Then:
+1. a targeted dry run into project 5 (expect 2 new, 0 refused);
+2. the owner approves;
+3. a `--var` flag-on version;
+4. the run with `expectedCount: 2`;
+5. flag off;
+6. verify.
 
 ## Remaining steps, in order (each needs the owner's approval)
 
-1. **Save the Skip plan** (above).
+1. ~~Save the Skip plan~~: done (216 high-confidence Skips). The owner reviews the 20 medium-confidence matches by eye.
 2. **Phase C batches.** See the batch plan in reconciliation §10.
    - **Order:** Ripley, Zingshiem, Rieck Deck, Pongratz, Bisek, then the Group A albums one at
      a time.
