@@ -106,3 +106,59 @@ Enable `FB_DISCOVERY_ENABLED`:
   its first run.
 - **Rules:** the same album rules and holds apply. Branding is excluded, and tests cover it.
 - **Verify:** the subscription, retries, album-only additions, removals and holds.
+
+## Phase D: automatic discovery, staged rollout (approved 2026-11-22; paused at preflight)
+
+**Preflight results (2026-11-22 21:58 UTC):**
+
+| Check | Result |
+|---|---|
+| Live Worker `a97a5c14`: flags | `FB_DISCOVERY_ENABLED=false`, `FB_HISTORICAL_IMPORT_ENABLED=false`, `FB_REVIEWED_IMPORT_ENABLED=true`, `FB_AUTO_IMPORT=true` |
+| Discovery jobs | **0** rows, so the first scheduled run creates the reconcile job and records its cutoff |
+| Photos | 115, all `imported`; none mid-import |
+| Review decisions | 113 Import, 226 Skip; 6 Import-approved photos in 2 albums are not imported (see below) |
+| Production checks | 146/146 |
+| Webhook token, `feed` subscription, album and photo read access | **Not verified.** The admin session in the agent's browser had expired. This is the blocker. |
+
+**How the cutoff works (code-reviewed):**
+- **When it's set.** The first scheduled `reconcile` run creates its job with `cutoff = that run's
+  time`. Every photo created before it is skipped (`outside-cutoff`), so historical Mobile uploads
+  are never imported. A restart keeps the cutoff, and it never widens.
+- **Line up the activation with the next cron run** (`17 * * * *`), so the cutoff is within a
+  minute or two of the activation. Webhooks cover new posts between the two.
+- **Removals:** the scheduled scan's removal re-check never hides a photo because Graph reports
+  it unavailable. It needs an explicit unpublish or hide (`confirmUnavailable` with
+  `hasRemovalEvent=false`).
+- **Unchanged webhook behaviour:** an edit event for an old post the site never imported is
+  historical. It can import only photos with an Import decision. 6 such photos exist, in albums
+  `122150124368318503` and `122130061988318503`. Mark them Duplicate / Skip or Review later if
+  they should never import.
+
+**Procedure, once the owner is signed in:**
+1. **Health check, signed in** (`GET /facebook/admin/health`): the token is `ok`, `feedSubscribed`,
+   no errors. `review-albums` and `review-album` list albums and photos.
+2. **D1 bookmark:** `wrangler d1 time-travel info kilcon-db`.
+3. **Stage:** `wrangler versions upload --var FB_DISCOVERY_ENABLED:true`, then a bindings diff
+   against `a97a5c14` (only that variable and the tag may differ), then `versions deploy <id>@100%`.
+   Do this at about :15.
+4. **After the :17 run:**
+   - a `reconcile` job row exists, and its `state.cutoff` is that run's time;
+   - status `pending` or `complete` with no `last_error`;
+   - the photo count is unchanged, with no new Review later holds;
+   - `facebook_albums` is filled in;
+   - production checks;
+   - `GET health` shows `albumAccess` / `albumPhotoAccess` `ok`.
+
+   The first full scan spans several hourly runs, at 20 Graph calls each, which is within Free-plan
+   limits.
+5. **Make it permanent:** set `FB_DISCOVERY_ENABLED = "true"` in `wrangler.toml` and commit with
+   `[CF-Pages-Skip]`. Then `versions upload`, a diff against the staged version (only the tag may
+   differ), then `versions deploy`.
+6. **Real-world checks:** the contractor's next posts. A new named album creates its gallery in
+   the tagged category, `#highlight` appears on the homepage, an ambiguous post is held, and
+   duplicates and retries don't re-import.
+
+**Rollback:**
+- **Worker:** `wrangler versions deploy a97a5c14-1f3d-40ca-ae73-773a33a4db93@100%` (discovery off).
+- **The reconcile job row** can stay; it's ignored while discovery is off.
+- **D1 bookmark:** a last resort only.
