@@ -1846,13 +1846,18 @@ test('complete discovery: explicit album destination applies only to new imports
 test('complete discovery: reconciliation establishes future-only cutoff and recovers a missed album upload', async () => {
   discoveryFixtures(['9701'], { created: '2020-01-01T00:00:00+0000' });
   const env = makeEnv({ FB_DISCOVERY_ENABLED: 'true', FB_AUTO_IMPORT: 'true' });
-  await handleFacebookScheduled(env);
+  // Reconciliation runs only in the 12:00 / 18:00 America/Chicago slots; 18:17 UTC is 12:17 CST.
+  const slot = new Date('2026-11-22T18:17:00Z');
+  await handleFacebookScheduled(env, { now: slot });
   assert.equal((await rows('SELECT * FROM facebook_photos')).length, 0, 'no unauthorized history');
   const cutoff = JSON.parse((await rows('SELECT state FROM facebook_discovery_jobs'))[0].state).cutoff;
-  assert.ok(cutoff);
-  discoveryFixtures(['9701', '9702'], { created: new Date(Date.now() + 1000).toISOString() });
+  assert.equal(cutoff, slot.toISOString());
+  discoveryFixtures(['9701', '9702'], { created: new Date(slot.getTime() + 1000).toISOString() });
   await baseEnv.DB.prepare('UPDATE facebook_discovery_jobs SET next_attempt_at=0').run();
-  for (let n = 0; n < 5 && !(await rows('SELECT * FROM facebook_photos')).length; n++) await handleFacebookScheduled(env);
+  for (let n = 0; n < 5 && !(await rows('SELECT * FROM facebook_photos')).length; n++) {
+    await baseEnv.DB.prepare("DELETE FROM facebook_sync_state WHERE key = 'discovery_last_slot'").run(); // a later slot
+    await handleFacebookScheduled(env, { now: slot });
+  }
   assert.ok((await rows('SELECT * FROM facebook_photos')).some(p => p.fb_photo_id === '9702'));
   assert.equal(JSON.parse((await rows('SELECT state FROM facebook_discovery_jobs'))[0].state).cutoff, cutoff);
 });

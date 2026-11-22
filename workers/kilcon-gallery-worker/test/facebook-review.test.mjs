@@ -1244,3 +1244,96 @@ test("scheduled discovery holds ambiguous albums too; historical scans never wri
   await editPost(`${PAGE_ID}_331`);
   assert.deepEqual(await reviewsOf(["9342"]), []);
 });
+
+// --- discovery schedule: twice daily (America/Chicago), cutoff at activation --
+
+const DSTART = `${ADMIN}/discovery-start`;
+const discEnv = (o = {}) => makeEnv({ FB_DISCOVERY_ENABLED: "true", ...o });
+const scanCallsAll = () => fetchCalls.filter((c) => c.url.hostname === "graph.facebook.com" && /\/(albums|posts)$/.test(c.url.pathname));
+
+test("discovery slots: 12:00 and 18:00 America/Chicago, across daylight saving time", async () => {
+  const { discoverySlot } = await import("../src/facebook.js");
+  const at = (iso) => discoverySlot(new Date(iso));
+  // November (CST, UTC-6) and July (CDT, UTC-5); the cron fires at :17.
+  assert.equal(at("2026-11-22T18:17:00Z"), "2026-11-22 12:00 America/Chicago");
+  assert.equal(at("2026-11-23T00:17:00Z"), "2026-11-22 18:00 America/Chicago");
+  assert.equal(at("2026-07-15T17:17:00Z"), "2026-07-15 12:00 America/Chicago");
+  assert.equal(at("2026-07-15T23:17:00Z"), "2026-07-15 18:00 America/Chicago");
+  // Switch-over days.
+  assert.equal(at("2026-03-08T17:17:00Z"), "2026-03-08 12:00 America/Chicago");
+  assert.equal(at("2026-11-01T18:17:00Z"), "2026-11-01 12:00 America/Chicago");
+  for (const off of ["2026-11-22T17:17:00Z", "2026-11-22T19:17:00Z", "2026-07-15T18:17:00Z", "2026-11-01T17:17:00Z", "2026-11-22T06:17:00Z"]) assert.equal(at(off), null, off);
+  // Exactly 24 slot hours in a 12-day span that crosses the November change.
+  let n = 0;
+  // Oct 27 01:17 UTC (Oct 26 evening local) through Nov 8 00:17 UTC (Nov 7 18:17 CST): 12 full local days.
+  for (let t = Date.parse("2026-10-27T01:17:00Z"); t <= Date.parse("2026-11-08T00:17:00Z"); t += 3600e3) if (at(new Date(t).toISOString())) n++;
+  assert.equal(n, 24);
+});
+
+test("hourly ticks keep retries and retention; reconciliation runs only in a slot, once per slot", async () => {
+  const { handleFacebookScheduled } = await import("../src/facebook.js");
+  stubPageAlbums([["500", "Harper Barn", 1]]);
+  stubAlbum("500", "Harper Barn", ["9971"], { created: NEW });
+  const env = discEnv();
+  // A pending webhook event (stored, not yet processed) is retried hourly.
+  stubPhoto("9972", { created: NEW, album: { id: "501", name: "Lund Barn" } });
+  // A photo-only event (these stubs have no post attachments edge).
+  await webhook([{ item: "photo", verb: "add", photo_id: "9972", published: 1, from: { id: PAGE_ID } }], makeEnv({ FB_AUTO_IMPORT: "false" }));
+  assert.equal((await rows("SELECT status FROM facebook_webhook_events"))[0].status, "pending");
+
+  await handleFacebookScheduled(env, { now: new Date("2026-11-22T17:17:00Z") }); // 11:17 CST
+  assert.equal((await rows("SELECT status FROM facebook_webhook_events"))[0].status, "done", "the retry ran at a non-slot hour");
+  assert.equal(scanCallsAll().length, 0, "no reconciliation outside the slots");
+  const [job] = await rows("SELECT mode, state FROM facebook_discovery_jobs");
+  assert.equal(JSON.parse(job.state).cutoff, "2026-11-22T17:17:00.000Z", "a cutoff exists even before the first slot");
+
+  await handleFacebookScheduled(env, { now: new Date("2026-11-22T18:17:00Z") }); // 12:17 CST
+  const afterFirst = scanCallsAll().length;
+  assert.ok(afterFirst > 0, "reconciliation ran in the 12:00 slot");
+  await handleFacebookScheduled(env, { now: new Date("2026-11-22T18:47:00Z") }); // same slot, e.g. a minute-0 trigger added later
+  assert.equal(scanCallsAll().length, afterFirst, "only once per slot");
+  assert.equal((await rows("SELECT value FROM facebook_sync_state WHERE key = 'discovery_last_slot'"))[0].value, "2026-11-22 12:00 America/Chicago");
+  await handleFacebookScheduled(env, { now: new Date("2026-11-23T00:17:00Z") }); // 18:17 CST
+  assert.ok(scanCallsAll().length > afterFirst, "and again in the 18:00 slot");
+});
+
+test("discovery-start records the cutoff at activation; later photos are found by the first scan, older ones never", async () => {
+  const { handleFacebookScheduled } = await import("../src/facebook.js");
+  const expect = async (body, status, opts) => { const r = await call(DSTART, { method: "POST", body, env: discEnv(), ...opts }); assert.equal(r.status, status, JSON.stringify(body)); return r.json(); };
+  await expect({ confirm: "START DISCOVERY" }, 403, { env: makeEnv({ FB_DISCOVERY_ENABLED: "false" }) });
+  await expect({}, 400);
+  await expect({ confirm: "start discovery" }, 400);
+  await expect({ confirm: "START DISCOVERY" }, 401, { admin: false });
+  assert.equal((await call(DSTART, { method: "POST", env: discEnv(), headers: { "Content-Type": "application/x-www-form-urlencoded" }, raw: "confirm=START+DISCOVERY" })).status, 415);
+  assert.equal((await rows("SELECT * FROM facebook_discovery_jobs")).length, 0, "refusals record nothing");
+
+  const before = Date.now();
+  const r = await expect({ confirm: "START DISCOVERY" }, 200);
+  assert.ok(r.created && Date.parse(r.cutoff) >= before - 1000 && Date.parse(r.cutoff) <= Date.now(), "cutoff = activation time");
+  assert.equal(r.schedule, "12:00 and 18:00 America/Chicago");
+  const again = await expect({ confirm: "START DISCOVERY" }, 200);
+  assert.deepEqual([again.created, again.cutoff], [false, r.cutoff], "never moved");
+
+  // Photos: one from before activation (Mobile uploads history), one posted after it.
+  const cutoff = Date.parse(r.cutoff);
+  stubPageAlbums([["890", "Mobile uploads", 2], ["620", "Sorensen Shop", 1]]);
+  stubAlbum("890", "Mobile uploads", ["9981"], { created: "2025-01-05T12:00:00+0000" });
+  stubAlbum("620", "Sorensen Shop", ["9982"], { created: new Date(cutoff + 60_000).toISOString().replace(/\.\d+Z$/, "+0000") });
+  const slotAfter = new Date(cutoff + 86400e3); // the next day; pick that day's 12:17 CST below
+  const day = slotAfter.toISOString().slice(0, 10);
+  for (let n = 0; n < 12; n++) await handleFacebookScheduled(discEnv(), { now: new Date(`${day}T18:17:00Z`) }).then(() =>
+    baseEnv.DB.prepare("DELETE FROM facebook_sync_state WHERE key = 'discovery_last_slot'").run()); // let the test finish the pass in one "day"
+  assert.deepEqual((await rows("SELECT fb_photo_id, status FROM facebook_photos ORDER BY fb_photo_id")).map((x) => [x.fb_photo_id, x.status]), [["9982", "imported"]],
+    "the photo posted after activation is imported; the historical Mobile upload is not");
+  assert.equal(JSON.parse((await rows("SELECT state FROM facebook_discovery_jobs"))[0].state).cutoff, r.cutoff, "the cutoff survived the scans");
+  const health = await (await call(`${ADMIN}/health`, { env: discEnv() })).json();
+  assert.deepEqual([health.discovery.schedule, health.discovery.cutoff], ["12:00 and 18:00 America/Chicago", r.cutoff]);
+});
+
+test("with discovery off, scheduled ticks never create a discovery job or scan", async () => {
+  const { handleFacebookScheduled } = await import("../src/facebook.js");
+  stubPageAlbums([["500", "Harper Barn", 1]]);
+  await handleFacebookScheduled(makeEnv({ FB_DISCOVERY_ENABLED: "false" }), { now: new Date("2026-11-22T18:17:00Z") });
+  assert.equal((await rows("SELECT * FROM facebook_discovery_jobs")).length, 0);
+  assert.equal(scanCallsAll().length, 0);
+});

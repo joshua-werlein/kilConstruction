@@ -2083,6 +2083,7 @@ export async function handleFacebookAdmin(request, env, sub, urls) {
     if (sub === "project-create") return await adminProjectCreate(env, body);
     if (sub === "album-link") return await adminAlbumLink(env, body);
     if (sub === "gallery-create") return await adminGalleryCreate(env, request, body);
+    if (sub === "discovery-start") return await adminDiscoveryStart(env, request, body);
     if (sub === "import-run") return await adminImportRun(env, request, body);
     if (sub === "photo-update") return await adminPhotoUpdate(env, body);
     if (sub === "retry") return await adminRetry(env);
@@ -2445,6 +2446,16 @@ async function adminHealth(env) {
     feedSubscribed: null,
     errors: [],
   };
+  if (env.FB_DISCOVERY_ENABLED === "true" && env.DB) {
+    const job = await env.DB.prepare(`SELECT state, status, last_error, updated_at FROM facebook_discovery_jobs WHERE mode = 'reconcile'`).first().catch(() => null);
+    let cutoff = null;
+    try { cutoff = job ? JSON.parse(job.state).cutoff ?? null : null; } catch { cutoff = null; }
+    out.discovery = {
+      schedule: `${DISCOVERY_HOURS.map((h) => `${h}:00`).join(" and ")} ${DISCOVERY_TIMEZONE}`,
+      cutoff, status: job?.status ?? null, lastError: job?.last_error ?? null,
+      lastSlot: (await getState(env.DB, "discovery_last_slot").catch(() => null)) || null,
+    };
+  }
   if (!env.FB_PAGE_ACCESS_TOKEN) return jsonResult(out);
 
   // With a Page token, /me is the Page itself: this proves which Page the
@@ -3006,6 +3017,66 @@ export async function handleFacebookScheduled(env, { now = new Date() } = {}) {
 
   const summary = await processPendingEvents(env, { limit: CRON_BATCH, budget: newBudget(20) });
   if (summary.processed) console.log("[facebook] cron processed", summary);
-  if (env.FB_DISCOVERY_ENABLED === 'true') await runFacebookDiscovery(env, { dryRun: false }, { mode: 'reconcile', now, budget: newBudget(20) });
+  if (env.FB_DISCOVERY_ENABLED === 'true') {
+    // The cutoff is normally recorded at activation (admin discovery-start);
+    // this only records one if that step was missed. It never changes it.
+    await ensureDiscoveryCutoff(env, now);
+    // Reconciliation (a fallback for missed webhooks and album-only photos)
+    // runs only in the scheduled slots, once per slot. Webhooks stay immediate.
+    const slot = discoverySlot(now);
+    if (slot && (await getState(env.DB, "discovery_last_slot")) !== slot) {
+      await setState(env.DB, "discovery_last_slot", slot);
+      await runFacebookDiscovery(env, { dryRun: false }, { mode: 'reconcile', now, budget: newBudget(20) });
+    }
+  }
   return summary;
+}
+
+// --- discovery schedule and cutoff -----------------------------------------
+// Twice daily in the owner's time zone; DST is handled by Intl. The hourly
+// cron (17 * * * *) fires inside each slot hour, so runs start at 12:17 and
+// 18:17 local time. A trigger at minute 0 can be added in the dashboard later
+// without code changes (the slot is still run once).
+export const DISCOVERY_TIMEZONE = "America/Chicago";
+export const DISCOVERY_HOURS = Object.freeze([12, 18]);
+
+/** The slot key ("2026-11-22 12:00 America/Chicago") when now falls in a discovery hour, else null. */
+export function discoverySlot(now, timeZone = DISCOVERY_TIMEZONE, hours = DISCOVERY_HOURS) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" })
+      .formatToParts(now).map((p) => [p.type, p.value])
+  );
+  const hour = Number(parts.hour);
+  return hours.includes(hour) ? `${parts.year}-${parts.month}-${parts.day} ${String(hour).padStart(2, "0")}:00 ${timeZone}` : null;
+}
+
+/**
+ * Creates the scheduled-reconcile job with cutoff = now if it doesn't exist.
+ * Photos created before the cutoff are never imported by reconciliation, and
+ * an existing cutoff is never moved. Returns { cutoff, created }.
+ */
+export async function ensureDiscoveryCutoff(env, now = new Date()) {
+  const pageId = configuredPageId(env);
+  if (!pageId || !env.DB) return { cutoff: null, created: false };
+  const stamp = now.toISOString();
+  const ins = await env.DB
+    .prepare(`INSERT OR IGNORE INTO facebook_discovery_jobs (mode, state, updated_at) VALUES ('reconcile', ?, ?)`)
+    .bind(JSON.stringify(initialDiscovery(pageId, stamp)), stamp)
+    .run();
+  const row = await env.DB.prepare(`SELECT state FROM facebook_discovery_jobs WHERE mode = 'reconcile'`).first();
+  let cutoff = null;
+  try { cutoff = JSON.parse(row?.state || "{}").cutoff ?? null; } catch { cutoff = null; }
+  if (ins?.meta?.changes) console.log("[facebook] discovery cutoff recorded", { cutoff });
+  return { cutoff, created: !!ins?.meta?.changes };
+}
+
+export const DISCOVERY_START_CONFIRMATION = "START DISCOVERY";
+async function adminDiscoveryStart(env, request, body) {
+  const type = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/json") return jsonResult({ error: "JSON body required" }, 415);
+  if (env.FB_DISCOVERY_ENABLED !== "true") return jsonResult({ error: "Automatic discovery is switched off" }, 403);
+  if (body?.confirm !== DISCOVERY_START_CONFIRMATION) return jsonResult({ error: `Confirmation required: {"confirm":"${DISCOVERY_START_CONFIRMATION}"}` }, 400);
+  const r = await ensureDiscoveryCutoff(env, new Date());
+  if (!r.cutoff) return jsonResult({ error: "Discovery cutoff could not be recorded" }, 500);
+  return jsonResult({ ok: true, ...r, schedule: `${DISCOVERY_HOURS.map((h) => `${h}:00`).join(" and ")} ${DISCOVERY_TIMEZONE}` });
 }
