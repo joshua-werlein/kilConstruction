@@ -313,3 +313,68 @@ branding albums (Profile pictures 4, Cover photos 1) stay excluded.
    - It never approves anything.
    - Import decisions stay yours, photo by photo.
 5. **Mobile uploads:** keep the 33 unique photos held (recommended).
+
+### Owner decisions (2026-11-22) and the evidence behind them
+
+1. **Twin galleries stay.** The canonical destination is Projects/, except New
+   Construction/Kitelinger Shell and Remodels/J&A_Dahl.
+2. **New galleries:** Bisek, Pongratz, Rieck Deck, Zingshiem and Ripley.
+   - They default to Projects/. Nothing seen so far points to another category, but captions
+     aren't available from the review API, so the owner can change the category on
+     `/admin/facebook` later.
+   - No existing gallery has any of these names.
+3. **Jsme and Home are held** until their identities are confirmed.
+4. **Fankhauser: no merge.**
+   - E. Fankhauser has 3 photos from 2026-10-19; Fankhauser has 2 from 2024-09-26. That's two
+     years apart.
+   - No photo of one resembles any of the other: the nearest distances are 18–20.
+   - So they are not confirmed as one project. Keep them separate; each needs a display name
+     before it is created.
+5. **The Ganz album is two projects, matched photo by photo:**
+
+   | Photo | Date | Nearest website image | Distance | Plan |
+   |---|---|---|---|---|
+   | `122153213516318503` | 2024-12-23 | Remodels/3D_Autobody/3D_Autobody_Exterior_1 | 1 | Skip (duplicate) |
+   | `122153213558318503` | 2024-12-23 | …/3D_Autobody_Exterior_4 | 5 | Skip (duplicate, medium confidence) |
+   | `122153213600318503` | 2024-12-23 | …/3D_Autobody_Exterior_3 | 2 | Skip (duplicate) |
+   | `122153213690318503` | 2024-12-23 | …/3D_Autobody_Exterior_2 | 0 | Skip (duplicate) |
+   | `122180740952318503` | 2025-06-22 | Projects/Ganz Re-Deck/Ganz_Re-Deck | 0 | Skip (duplicate) |
+   | `122153213480318503` | 2024-12-23 | …/3D_Autobody_Exterior_5 | **6** | **Owner's eye**: just outside the automatic threshold |
+   | `122153213648318503` | 2024-12-23 | …/3D_Autobody_Exterior_3 | 13 | **Held** (the 7th photo): a 3D Autobody exterior from the same day; not on the website |
+
+6. **The duplicate Skip plan is prepared but not saved.**
+   - **Count:** 236 photos, all at distance 5 or less, and none with a decision yet.
+   - **Confidence:** 216 high (distance 0–2), 20 medium (3–5), **0 ambiguous**.
+     - Every Group A and Ganz match is in that album's own gallery.
+     - The 179 website images involved were re-fingerprinted, and none is low-detail (all
+       between 12 and 52 bits set).
+     - The 58 Mobile-upload duplicates point to the matching website image (21) or to the
+       project-album copy (37, as `facebook:<id>`).
+   - **Not included:** the distance-6 Ganz photo above (so 236, not 237).
+   - **Where it is:** in the owner's browser, local storage `kil-skip-plan-2026-11-22` on
+     kilcon.work. Each row carries its distance and confidence in the note.
+   - **Saving it:** needs the owner's approval. At save time each photo's current decision is
+     re-checked, and only undecided photos are written.
+
+### Phase C batch plan (each batch needs approval; nothing approved automatically)
+
+For each batch:
+1. Create the gallery (`project-create`), or the Facebook gallery linked to the manual folder.
+2. Run `album-link`.
+3. **The owner marks Import** for the new photos on the review page.
+4. Targeted dry run: it must show `new = n`, `refused 0`.
+5. Turn historical import on with a `--var` version, run with `expectedCount`, then turn it off at once.
+6. Verify: gallery count, every image loads, D1 snapshot diff, production checks.
+
+| # | Batch | Destination | New photos |
+|---|---|---|---|
+| 1 | Ripley | new Projects/ gallery "Ripley" | 2 |
+| 2 | Zingshiem | new "Zingshiem" | 3 |
+| 3 | Rieck Deck | new "Rieck Deck" | 12 (4 copies in Mobile uploads are skipped) |
+| 4 | Pongratz | new "Pongratz" | 13 (10 copies in Mobile uploads skipped) |
+| 5 | Bisek | new "Bisek" | 15 |
+| 6–18 | Group A, one album per batch | linked to its canonical manual gallery | 38 in total: Schwennson 8, D.Dahl Porch 6, Wheelman 5, Cutting boards 5, Ford 3, Pfaffe 3, Tyman 3, Loretta 2, Gibson 1, Kiley Lean-to 1, Kitelinger 1 |
+| held | Jsme 13, Home 7, E. Fankhauser 3, Fankhauser 2, Ganz `…480` and `…648`, Mobile uploads (33 unique) | after the owner identifies them; Mobile uploads and Ganz use mixed-album batches | — |
+
+Group A albums with no new photos (Kiley porch, Pritchard, Cabinets, Fox Hollow, Riesman and
+Dahl) need no batch. Their duplicates are covered by the Skip plan.

@@ -1,6 +1,6 @@
 # Facebook galleries in Manage Images
 
-Status: **implemented and tested locally on branch `task/facebook-integration-completion`; not deployed.**
+Status: **deployed 2026-11-22**: Pages `584403a7` (`bd707ef`), Worker `93b9f92b` (flags unchanged). Signed in, the owner's browser shows Ganz Garage with 15 of 15 photos visible, all 15 thumbnails loading and selectable, permanent deletion locked, and the 35 manual folders unchanged (`Apparel/Coats/` expands with its 2 files). Production checks: 122/122.
 It is Pages-only: the Worker code is unchanged; only Worker tests were added.
 
 ## Problem
@@ -74,11 +74,6 @@ Names, categories, new galleries and linking a gallery to a manual folder stay o
 - **Totals:** site 80/80, Worker 170/170, `tsc` 0 errors (the new script is also clean under
   `--strict`), `astro build` OK.
 
-## Deploy (needs approval)
+## Rollback
 
-A Pages-only push to `main`, without `[CF-Pages-Skip]`. After deploying:
-1. Run the production checks.
-2. Confirm signed out that `/admin/manage` still redirects to `/admin`.
-3. Have the owner check the page signed in: Ganz Garage is listed with 15 photos.
-
-**Rollback:** redeploy the previous Pages deployment, `02aaaf2a`.
+Pages `02aaaf2a`; Worker `npx wrangler versions deploy 8c893925-6546-41fd-ad68-16e056de7d39@100%`.

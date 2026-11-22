@@ -217,6 +217,33 @@ downloads nothing and writes nothing.
 **Tests.** 5 tests in `test/facebook-review.test.mjs`. One is a mutation check that proved the
 album checks are enforced.
 
+### Mixed albums (local, branch `task/mixed-album-import`, not deployed)
+
+Some albums hold several projects. Mobile uploads is one; the "Ganz" album holds 3D Autobody
+and Ganz Re-Deck.
+
+- **How it works.** With `mixedAlbum: true`, each batch names its own destination gallery. No
+  album mapping is written, so later photos in that album aren't affected. Each imported photo
+  is set `project_locked`, so sync never moves it.
+- **Refusals:**
+  - an album already linked to a gallery is refused in mixed mode; import it normally;
+  - without `mixedAlbum`, an unlinked album is refused;
+  - branding-album photos are refused in both modes.
+- **Unchanged:** all other checks (an Import decision, the album and owner confirmed by Graph,
+  and `expectedCount`).
+
+**Tests:** 2 more, plus a mutation check. Worker 176/176.
+
+### Linking an album first: `POST /facebook/admin/album-link` (deployed `bd707ef`)
+
+`{ albumId, projectId }` links one album to one existing gallery without importing anything,
+by writing one locked mapping row. Use it for a gallery created by hand or linked to a manual
+folder. It refuses:
+- branding and unsorted albums;
+- Recent Project Updates;
+- albums the Page doesn't own;
+- albums already linked elsewhere.
+
 ### Procedure (used 2026-11-22 for Ganz Garage)
 
 1. **Dry run:** signed in, from the browser console. It must show `new = n`, `existing 0` and
