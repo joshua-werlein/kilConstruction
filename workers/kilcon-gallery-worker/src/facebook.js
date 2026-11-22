@@ -1532,7 +1532,7 @@ async function graphRequest(env, method, path, params = {}, budget = null, signa
 // review decisions, discovery jobs or the backfill cursor.
 //
 // POST /api/gallery-api/facebook/backfill
-//   { targeted: true, dryRun: true|false, albumId, projectId, photoIds: [...], expectedCount }
+//   { targeted: true, dryRun: true|false, albumId, projectId, photoIds: [...], expectedCount, mixedAlbum? }
 
 const MAX_TARGETED_PHOTOS = 10;
 
@@ -1554,18 +1554,24 @@ async function runTargetedImport(env, input) {
     return jsonResult({ error: "expectedCount is required for a real run" }, 400);
   }
 
-  // Destination: an existing, visible project already linked to this album.
+  // Destination: an existing, visible project. Normally the album must be
+  // linked to it. A mixed album (several projects, e.g. Mobile uploads) is
+  // never linked: with mixedAlbum: true each batch names its own project, and
+  // no mapping is written, so later photos in that album are not affected.
+  const mixed = input.mixedAlbum === true;
   const project = await env.DB
     .prepare(`SELECT id, slug, name, kind, hidden, fb_album_id FROM facebook_projects WHERE id = ?`)
     .bind(projectId)
     .first();
   if (!project) return jsonResult({ error: "Project not found" }, 404);
   if (project.kind !== "project" || project.hidden) return jsonResult({ error: "Project must be a visible portfolio project" }, 409);
-  const mapped = await env.DB
-    .prepare(`SELECT 1 AS ok FROM facebook_album_mappings WHERE album_id = ? AND project_id = ?`)
-    .bind(albumId, projectId)
-    .first();
-  if (project.fb_album_id !== albumId && !mapped) {
+  const [mappedTo, ownedBy] = await Promise.all([
+    env.DB.prepare(`SELECT project_id FROM facebook_album_mappings WHERE album_id = ?`).bind(albumId).first(),
+    env.DB.prepare(`SELECT id FROM facebook_projects WHERE fb_album_id = ?`).bind(albumId).first(),
+  ]);
+  if (mixed) {
+    if (mappedTo || ownedBy) return jsonResult({ error: "This album is linked to a gallery; import it without mixedAlbum" }, 409);
+  } else if (project.fb_album_id !== albumId && mappedTo?.project_id !== projectId) {
     return jsonResult({ error: "This album is not linked to that project" }, 409);
   }
 
@@ -1591,6 +1597,7 @@ async function runTargetedImport(env, input) {
       if (cleanId(photo?.id) !== id) { entry.outcome = "refused"; entry.reason = "graph-id-mismatch"; continue; }
       if (cleanId(photo?.from?.id) && photo.from.id !== pageId) { entry.outcome = "refused"; entry.reason = "not-page-photo"; continue; }
       if (cleanId(photo?.album?.id) !== albumId) { entry.outcome = "refused"; entry.reason = "album-mismatch"; continue; }
+      if (isBrandingPhoto(photo)) { entry.outcome = "refused"; entry.reason = "branding-album"; continue; }
       const best = pickLargestImage(photo.images);
       try { if (!best) throw new Error(); assertFacebookCdnUrl(best.source); }
       catch { entry.outcome = "refused"; entry.reason = "no-facebook-image"; continue; }
@@ -1607,6 +1614,7 @@ async function runTargetedImport(env, input) {
   const report = {
     targeted: true,
     dryRun,
+    mixedAlbum: mixed,
     album: albumId,
     destination: { id: project.id, slug: project.slug, name: project.name },
     requested: photoIds.length,
@@ -1634,7 +1642,12 @@ async function runTargetedImport(env, input) {
         budget,
         reviewMode: "historical",
       });
-      if (r.imported) { entry.outcome = "imported"; report.imported++; }
+      if (r.imported) {
+        entry.outcome = "imported";
+        report.imported++;
+        // From a mixed album the gallery was chosen per photo: sync must never move it.
+        if (mixed) await env.DB.prepare(`UPDATE facebook_photos SET project_locked = 1 WHERE fb_photo_id = ?`).bind(entry.id).run();
+      }
       else { entry.outcome = "existing"; entry.reason = r.reason; }
     } catch (e) {
       entry.outcome = "failed";
@@ -1648,6 +1661,82 @@ async function runTargetedImport(env, input) {
   if (report.imported) await setState(env.DB, "last_success_at", stamp);
   console.log("[facebook] targeted import", { album: albumId, project: project.id, imported: report.imported, failed: report.failed.length });
   return jsonResult(out(), report.failed.length ? 207 : 200);
+}
+
+// --- reviewed import from /admin/facebook-review (admin only) -----------
+//
+// The owner approves photos one by one, then clicks Import Approved Photos.
+// This is narrower than the historical import and has its own switch
+// (FB_REVIEWED_IMPORT_ENABLED), so the global FB_HISTORICAL_IMPORT_ENABLED
+// stays off:
+// - import-plan (GET, D1 only): the album's Import-approved photo IDs, split
+//   into not-yet-imported and already imported, plus its linked gallery.
+// - import-run (POST): one bounded batch (<= MAX_TARGETED_PHOTOS explicit IDs)
+//   through runTargetedImport, so every check there applies: Import decision
+//   for this album, Graph confirms album and Page, no branding, not already
+//   imported, destination rules, expectedCount. It never lists albums or
+//   posts, so it can't start a historical scan. A real run also needs the
+//   confirmation phrase and a JSON body (no form posts), and is rate limited.
+
+export const IMPORT_CONFIRMATION = "IMPORT APPROVED";
+const IMPORT_PLAN_LIMIT = 1000;
+
+async function adminImportPlan(env, request) {
+  const albumId = cleanId(new URL(request.url).searchParams.get("albumId"));
+  if (!albumId) return jsonResult({ error: "albumId required" }, 400);
+  let rows = [];
+  try {
+    rows = (await env.DB
+      .prepare(`SELECT r.fb_photo_id AS id, p.status, p.hidden, p.removed_on_facebook_at, p.master_key
+                  FROM facebook_photo_reviews r LEFT JOIN facebook_photos p ON p.fb_photo_id = r.fb_photo_id
+                 WHERE r.album_id = ? AND r.decision = 'import' ORDER BY r.fb_photo_id LIMIT ?`)
+      .bind(albumId, IMPORT_PLAN_LIMIT)
+      .all()).results || [];
+  } catch (e) {
+    if (!/no such table/i.test(String(e?.message || e))) throw e;
+  }
+  const pending = rows.filter((r) => !r.status || r.status === "failed").map((r) => r.id);
+  const imported = rows.filter((r) => r.status && r.status !== "failed").map((r) => r.id);
+  const [mapped, owner, projects] = await Promise.all([
+    env.DB.prepare(`SELECT p.id, p.name, p.slug, p.kind, p.hidden FROM facebook_album_mappings m JOIN facebook_projects p ON p.id = m.project_id WHERE m.album_id = ?`).bind(albumId).first(),
+    env.DB.prepare(`SELECT id, name, slug, kind, hidden FROM facebook_projects WHERE fb_album_id = ?`).bind(albumId).first(),
+    env.DB.prepare(`SELECT id, name, slug, category, linked_prefix FROM facebook_projects WHERE kind = 'project' AND hidden = 0 ORDER BY name`).all(),
+  ]);
+  const linked = mapped || owner;
+  return jsonResult({
+    albumId,
+    enabled: env.FB_REVIEWED_IMPORT_ENABLED === "true",
+    batchSize: MAX_TARGETED_PHOTOS,
+    pending,
+    imported,
+    linked: linked ? { id: linked.id, name: linked.name, slug: linked.slug, usable: linked.kind === "project" && !linked.hidden } : null,
+    galleries: (projects.results || []).map((p) => ({ id: p.id, name: p.name, slug: p.slug, category: p.category, linkedPrefix: p.linked_prefix || null })),
+    confirmation: IMPORT_CONFIRMATION,
+  });
+}
+
+async function adminImportRun(env, request, body) {
+  const type = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/json") return jsonResult({ error: "JSON body required" }, 415);
+  const dryRun = body?.dryRun !== false;
+  if (!dryRun) {
+    if (env.FB_REVIEWED_IMPORT_ENABLED !== "true") return jsonResult({ error: "Reviewed importing is switched off" }, 403);
+    if (body?.confirm !== IMPORT_CONFIRMATION) return jsonResult({ error: `Confirmation required: {"confirm":"${IMPORT_CONFIRMATION}"}` }, 400);
+  }
+  if (env.REVIEW_LIMITER) {
+    const { success } = await env.REVIEW_LIMITER.limit({ key: dryRun ? "import-dry" : "import-run" });
+    if (!success) return jsonResult({ error: "Too many import requests; try again shortly" }, 429);
+  } else if (!dryRun) {
+    return jsonResult({ error: "Import rate limiter is not configured" }, 503);
+  }
+  return await runTargetedImport(env, {
+    dryRun,
+    albumId: body?.albumId,
+    projectId: body?.projectId,
+    photoIds: body?.photoIds,
+    expectedCount: body?.expectedCount,
+    mixedAlbum: body?.mixedAlbum === true,
+  });
 }
 
 // --- historical backfill (admin only; caller enforces requireAdmin) ----
@@ -1816,6 +1905,7 @@ export async function handleFacebookAdmin(request, env, sub, urls) {
     }
     if (sub === "overview" && request.method === "GET") return await adminOverview(env);
     if (sub === "photos" && request.method === "GET") return await adminPhotos(env, request, urls);
+    if (sub === "import-plan" && request.method === "GET") return await adminImportPlan(env, request);
     if (sub === "photo-file" && request.method === "GET") return await adminPhotoFile(env, request);
     if (sub === "health" && request.method === "GET") return await adminHealth(env);
     if (request.method !== "POST") return jsonResult({ error: "Not found" }, 404);
@@ -1826,6 +1916,7 @@ export async function handleFacebookAdmin(request, env, sub, urls) {
     if (sub === "project-update") return await adminProjectUpdate(env, body);
     if (sub === "project-create") return await adminProjectCreate(env, body);
     if (sub === "album-link") return await adminAlbumLink(env, body);
+    if (sub === "import-run") return await adminImportRun(env, request, body);
     if (sub === "photo-update") return await adminPhotoUpdate(env, body);
     if (sub === "retry") return await adminRetry(env);
     return jsonResult({ error: "Not found" }, 404);

@@ -3,6 +3,7 @@
 // sees the Page token or Facebook CDN URLs. Same-origin images also let the
 // page compute perceptual hashes in a canvas without tainting it.
 import { dHashFromRgba, bestMatch } from "../../lib/photo-hash.js";
+import { chunk, confirmText, destinationMode, runFlags, summarizeDryRun, summarizeImport } from "../../lib/review-import.js";
 
 type Decision = "import" | "skip" | "later";
 type Target = { value: string; name: string; category: string; prefix: string | null; source: string; id: number | null };
@@ -333,6 +334,7 @@ async function start() {
         bumpAlbumCount(before, decision);
         rerenderPhoto(p);
         pending.set(p.id, { photoId: p.id, albumId: current.id, decision: decision || "clear", duplicateOf: p.duplicateOf });
+        updateImportButton();
         clearTimeout(saveTimer);
         saveTimer = window.setTimeout(() => void flush(), 300);
     }
@@ -355,6 +357,7 @@ async function start() {
             await api("review-decisions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decisions: batch }) });
             setStatus(pending.size ? "Saving…" : "All decisions saved.");
             void refreshTotals();
+            if (!pending.size) void refreshImportPanel();
         } catch (e) {
             for (const d of batch) if (!pending.has(d.photoId)) pending.set(d.photoId, d);
             setStatus(`Not saved: ${(e as Error).message}. Retrying in 5 seconds.`);
@@ -446,6 +449,7 @@ async function start() {
             : `${a.count} photos. ${a.imported} already on the website.`;
         compareOptions(a);
         photos = []; site = []; matches.clear();
+        importBox.hidden = true; plan = null; dry = null;
         compareState = compareEl.value === "none" ? "none" : "running";
         fbGrid.replaceChildren(); siteGrid.replaceChildren(); importedGrid.replaceChildren();
         importedWrap.hidden = true;
@@ -460,6 +464,7 @@ async function start() {
                 progressEl.textContent = `Loaded ${photos.length} photos…`;
             } while (after);
             renderPhotos();
+            void refreshImportPanel();
             site = await loadSite(compareEl.value);
             if (gen !== generation) return;
             renderSite();
@@ -484,6 +489,144 @@ async function start() {
         } catch (e) {
             progressEl.textContent = `Could not load the website gallery: ${(e as Error).message}`;
         }
+    });
+
+    // --- Import Approved Photos ------------------------------------------------
+    // Plan (D1) -> dry run in bounded batches -> confirmation dialog -> import in
+    // the same batches -> summary -> reload the album. The Worker re-checks every
+    // photo (Import decision, album, Page, not imported) on each request.
+    const importBox = $("rv-import"), importSummary = $("rv-import-summary"), importStatus = $("rv-import-status"), importReport = $("rv-import-report");
+    const importGallery = $<HTMLSelectElement>("rv-import-gallery"), importGalleryLabel = $("rv-import-gallery-label");
+    const importMixed = $<HTMLInputElement>("rv-import-mixed"), importMixedLabel = $("rv-import-mixed-label");
+    const importCheck = $<HTMLButtonElement>("rv-import-check");
+    const importDialog = $<any>("rv-import-dialog"), importDialogText = $("rv-import-dialog-text"), importDialogList = $("rv-import-dialog-list");
+    const importConfirm = $<HTMLButtonElement>("rv-import-confirm"), importCancel = $<HTMLButtonElement>("rv-import-cancel");
+    let plan: any = null;
+    let dest: any = null;
+    let dry: any = null;
+    let importing = false;
+
+    const listItems = (target: HTMLElement, items: string[]) => { target.replaceChildren(...items.map((t) => el("li", {}, t))); };
+    const postJson = (path: string, body: unknown) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    // Keep per-photo details from refused (409) and partial (207) batches.
+    async function postBatch(body: unknown) {
+        const res = await fetch(`${API}/import-run`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const data: any = await res.json().catch(() => ({}));
+        if (!res.ok && !Array.isArray(data?.photos)) return { error: data?.error || `Request failed (${res.status})` };
+        return data;
+    }
+    function selectedGallery() {
+        if (!dest) return null;
+        if (dest.mode === "linked") return dest.gallery;
+        const id = Number(importGallery.value);
+        return dest.galleries.find((g: any) => g.id === id) || null;
+    }
+    function updateImportButton() {
+        const g = selectedGallery();
+        importCheck.disabled = importing || !plan || !plan.pending.length || !g || (dest?.mode === "linked" && !dest.usable) || pending.size > 0;
+    }
+    async function refreshImportPanel() {
+        const a = current;
+        if (!a || a.kind === "branding") { importBox.hidden = true; return; }
+        try {
+            const p = await api(`import-plan?albumId=${encodeURIComponent(a.id)}`);
+            if (current !== a) return;
+            plan = p;
+        } catch (e) {
+            importBox.hidden = false;
+            importSummary.textContent = `Could not load the import plan: ${(e as Error).message}`;
+            importCheck.disabled = true;
+            return;
+        }
+        dest = destinationMode(plan, a);
+        importBox.hidden = false;
+        const parts = [`${plan.pending.length} approved photo${plan.pending.length === 1 ? "" : "s"} not yet imported`, `${plan.imported.length} already imported`];
+        if (dest.mode === "linked") parts.push(dest.usable ? `destination: ${dest.gallery.name} (this album's gallery)` : `the linked gallery ${dest.gallery.name} is hidden; show it first`);
+        if (!plan.enabled) parts.push("importing is switched off on the server; the check still works");
+        importSummary.textContent = parts.join(" · ") + ".";
+        importGalleryLabel.hidden = dest.mode === "linked";
+        importMixedLabel.hidden = dest.mode === "linked";
+        if (dest.mode === "choose") {
+            const keep = importGallery.value;
+            importGallery.replaceChildren();
+            put(importGallery, el("option", { value: "" }, "Choose a gallery…"),
+                ...dest.galleries.map((g: any) => el("option", { value: String(g.id) }, `${g.name}${g.linkedPrefix ? ` (website gallery ${g.linkedPrefix.replace(/\/$/, "")})` : ""}`)));
+            if (keep && dest.galleries.some((g: any) => String(g.id) === keep)) importGallery.value = keep;
+            importMixed.checked = dest.mixedDefault || importMixed.checked;
+            importMixed.disabled = dest.mixedLocked;
+        }
+        updateImportButton();
+    }
+    importGallery.addEventListener("change", updateImportButton);
+
+    importCheck.addEventListener("click", async () => {
+        const a = current, g = selectedGallery();
+        if (!a || !plan || !g || importing || pending.size) return;
+        importing = true; updateImportButton(); importReport.replaceChildren();
+        const flags = runFlags(dest, { mixed: importMixed.checked, dryRun: true });
+        const batches = chunk(plan.pending, plan.batchSize);
+        const responses: any[] = [];
+        try {
+            for (let i = 0; i < batches.length; i++) {
+                importStatus.textContent = `Checking batch ${i + 1} of ${batches.length}…`;
+                responses.push(await postBatch({ dryRun: true, albumId: a.id, projectId: g.id, photoIds: batches[i], mixedAlbum: flags.mixedAlbum }));
+            }
+        } catch (e) {
+            responses.push({ error: (e as Error).message });
+        }
+        importing = false; updateImportButton();
+        if (current !== a) return;
+        const likely = new Set([...matches].filter(([, m]) => m?.level === "likely").map(([id]) => id));
+        dry = { ...summarizeDryRun(responses, likely), gallery: g, albumId: a.id };
+        importStatus.textContent = `Check complete: ${dry.newIds.length} new, ${dry.existing.length} already imported, ${dry.refused.length} can't be imported${dry.errors.length ? `, ${dry.errors.length} error(s)` : ""}.`;
+        listItems(importReport, [
+            ...dry.errors.map((t: string) => `Error: ${t}`),
+            ...dry.refused.map((r: any) => `${r.id}: ${r.reason}`),
+            ...dry.likelyDuplicates.map((id: string) => `${id}: looks like a duplicate of a website photo`),
+        ]);
+        if (!dry.newIds.length || dry.errors.length) return;
+        importDialogText.textContent = confirmText(dry, g.name) + (plan.enabled ? "" : " Importing is switched off on the server, so this can't run yet.");
+        listItems(importDialogList, dry.newIds.map((id: string) => `${id}${dry.likelyDuplicates.includes(id) ? " (looks like a duplicate)" : ""}`));
+        importConfirm.disabled = !plan.enabled;
+        importConfirm.textContent = `Import ${dry.newIds.length} photo${dry.newIds.length === 1 ? "" : "s"}`;
+        importDialog.showModal();
+    });
+    importCancel.addEventListener("click", () => { importDialog.close(); importStatus.textContent = "Import cancelled. Nothing was changed."; });
+
+    importConfirm.addEventListener("click", async () => {
+        const a = current;
+        if (!a || !dry || dry.albumId !== a.id || importing) return;
+        importDialog.close();
+        importing = true; updateImportButton();
+        const flags = runFlags(dest, { mixed: importMixed.checked, dryRun: false });
+        const responses: any[] = [];
+        try {
+            if (flags.linkFirst) {
+                importStatus.textContent = `Linking this album to ${dry.gallery.name}…`;
+                await postJson("album-link", { albumId: a.id, projectId: dry.gallery.id });
+            }
+            const batches = chunk(dry.newIds, plan.batchSize);
+            for (let i = 0; i < batches.length; i++) {
+                importStatus.textContent = `Importing batch ${i + 1} of ${batches.length} (${batches[i].length} photo${batches[i].length === 1 ? "" : "s"})…`;
+                const r = await postBatch({ dryRun: false, confirm: plan.confirmation, albumId: a.id, projectId: dry.gallery.id, photoIds: batches[i], expectedCount: batches[i].length, mixedAlbum: flags.mixedAlbum });
+                responses.push(r);
+                if (r.error) break; // a refused batch stops the run; partial failures (207) carry on and are reported
+            }
+        } catch (e) {
+            responses.push({ error: (e as Error).message });
+        }
+        const result = summarizeImport(responses);
+        importing = false;
+        const ok = !result.errors.length && !result.failed.length;
+        const message = ok ? `Done: ${result.imported} photo${result.imported === 1 ? "" : "s"} imported into ${dry.gallery.name}.`
+            : `Finished with problems: ${result.imported} imported, ${result.failed.length} failed${result.errors.length ? `, ${result.errors.length} batch error(s)` : ""}. Failed photos can be imported again.`;
+        const details = [...result.errors.map((t: string) => `Error: ${t}`), ...result.failed.map((f: any) => `${f.id}: ${f.reason}`), ...result.skipped.map((s: any) => `${s.id}: ${s.reason}`)];
+        a.imported += result.imported;
+        dry = null;
+        void refreshTotals();
+        await openAlbum(a); // reloads photos: imported ones move to "already on the website"
+        importStatus.textContent = message;
+        listItems(importReport, details);
     });
 
     try {

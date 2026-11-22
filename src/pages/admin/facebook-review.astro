@@ -80,6 +80,26 @@ if (!isAdmin) {
                 </div>
                 <div id="rv-progress" class="hint" role="status" aria-live="polite"></div>
 
+                <section id="rv-import" class="rv-import" aria-labelledby="rv-import-title" hidden>
+                    <h3 id="rv-import-title" class="rv-column-title">Import approved photos</h3>
+                    <p id="rv-import-summary" class="hint"></p>
+                    <div id="rv-import-dest" class="rv-import-dest">
+                        <label id="rv-import-gallery-label">
+                            <span>Destination gallery</span>
+                            <select id="rv-import-gallery" class="admin-input"></select>
+                        </label>
+                        <label id="rv-import-mixed-label" class="rv-import-mixed">
+                            <input id="rv-import-mixed" type="checkbox" />
+                            <span>This album holds several projects: import these photos into this gallery only, without linking the album</span>
+                        </label>
+                    </div>
+                    <div class="rv-bulk">
+                        <button id="rv-import-check" type="button" class="btn-small">Import Approved Photos</button>
+                    </div>
+                    <div id="rv-import-status" class="hint" role="status" aria-live="polite"></div>
+                    <ul id="rv-import-report" class="rv-import-report"></ul>
+                </section>
+
                 <h3 id="rv-review-title" class="rv-column-title">Needs review</h3>
                 <p class="hint rv-legend">
                     Each card shows a <span class="rv-src rv-src--fb">Facebook</span> photo beside the closest
@@ -108,6 +128,16 @@ if (!isAdmin) {
             <p id="rv-dialog-match" class="rv-dialog-match"></p>
             <div id="rv-dialog-pair" class="rv-pair rv-pair--large"></div>
             <div id="rv-dialog-actions" class="rv-actions rv-actions--large" role="group" aria-label="Decision for this Facebook photo"></div>
+        </dialog>
+
+        <dialog id="rv-import-dialog" class="rv-dialog rv-import-dialog" aria-labelledby="rv-import-dialog-title">
+            <h2 id="rv-import-dialog-title" class="rv-album-title">Import approved photos?</h2>
+            <p id="rv-import-dialog-text"></p>
+            <ul id="rv-import-dialog-list" class="rv-import-report"></ul>
+            <div class="rv-bulk">
+                <button id="rv-import-confirm" type="button" class="btn-small btn-primary">Import</button>
+                <button id="rv-import-cancel" type="button" class="btn-small">Cancel</button>
+            </div>
         </dialog>
     </div>
 
@@ -160,6 +190,15 @@ if (!isAdmin) {
         #rv-root .rv-compare { display: flex; gap: .5rem; align-items: center; }
         #rv-root .rv-compare select { max-width: min(420px, 60vw); }
         #rv-root .rv-bulk { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0; }
+        #rv-root .rv-import { border: 1px solid #d1d5db; border-radius: 10px; padding: .75rem 1rem; margin: .75rem 0 1rem; background: #f9fafb; }
+        #rv-root .rv-import[hidden], #rv-root .rv-import [hidden] { display: none; }
+        #rv-root .rv-import-dest { display: grid; gap: .5rem; margin: .5rem 0; }
+        #rv-root .rv-import-dest label { display: grid; gap: .25rem; }
+        #rv-root .rv-import-dest .rv-import-mixed { display: flex; gap: .5rem; align-items: flex-start; font-size: .9rem; }
+        #rv-root .rv-import-report { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .85rem; }
+        #rv-root .rv-import-report li { margin: .15rem 0; overflow-wrap: anywhere; }
+        #rv-root .rv-import-dialog { width: min(560px, 94vw); }
+        #rv-root .rv-import-dialog .rv-import-report { max-height: 40vh; overflow: auto; }
         #rv-root .rv-column-title { margin: 1rem 0 .35rem; font-size: 1.05rem; }
         #rv-root .rv-legend { margin: 0 0 .75rem; }
         #rv-root .rv-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .75rem; }

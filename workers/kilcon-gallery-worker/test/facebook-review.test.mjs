@@ -759,3 +759,161 @@ test("scheduled discovery (reconcile) is future-only and never imports branding 
     "only the photo added after the cutoff; older photos and the profile picture stay out");
   assert.equal((await rows("SELECT * FROM facebook_photo_reviews")).length, 0, "no review decisions are written");
 });
+
+// --- mixed albums: approved photos go to different galleries, per batch -------
+
+test("mixed albums: approved photos are imported into different galleries, with no album mapping", async () => {
+  const ganzId = await ganzSetup();
+  const autobody = (await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "3D Autobody", category: "remodels" } })).json()).project.id;
+  stubAlbum("890", "Mobile uploads", ["9891", "9892", "9893"], { created: OLD });
+  await decide([{ photoId: "9891", albumId: "890", decision: "import" }, { photoId: "9892", albumId: "890", decision: "import" }]);
+  const base = { targeted: true, albumId: "890" };
+
+  assert.equal((await call(BACKFILL, { method: "POST", body: { ...base, projectId: autobody, photoIds: ["9891"], dryRun: true } })).status, 409, "an unlinked album needs mixedAlbum");
+  assert.equal((await call(BACKFILL, { method: "POST", body: { ...base, albumId: GANZ, projectId: autobody, photoIds: [seven[0]], dryRun: true, mixedAlbum: true } })).status, 409,
+    "a linked album can't be imported elsewhere as mixed");
+
+  const dry = await (await call(BACKFILL, { method: "POST", body: { ...base, mixedAlbum: true, projectId: autobody, photoIds: ["9891", "9893"], dryRun: true } })).json();
+  assert.deepEqual(dry.photos.map((p) => [p.id, p.outcome, p.reason]), [["9891", "new", null], ["9893", "refused", "review-unreviewed"]], "unreviewed photos are refused in mixed albums too");
+
+  const a = await (await call(BACKFILL, { method: "POST", body: { ...base, mixedAlbum: true, projectId: autobody, photoIds: ["9891"], dryRun: false, expectedCount: 1 } })).json();
+  const b = await (await call(BACKFILL, { method: "POST", body: { ...base, mixedAlbum: true, projectId: ganzId, photoIds: ["9892"], dryRun: false, expectedCount: 1 } })).json();
+  assert.deepEqual([a.imported, a.mixedAlbum, b.imported], [1, true, 1]);
+  assert.deepEqual(await rows("SELECT fb_photo_id, project_id, project_locked, album_id FROM facebook_photos WHERE fb_photo_id IN ('9891','9892') ORDER BY fb_photo_id"),
+    [{ fb_photo_id: "9891", project_id: autobody, project_locked: 1, album_id: "890" }, { fb_photo_id: "9892", project_id: ganzId, project_locked: 1, album_id: "890" }]);
+  assert.deepEqual(await rows("SELECT * FROM facebook_album_mappings"), [], "no mapping: the album stays unsorted");
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE fb_photo_id = '9893'")).length, 0);
+});
+
+test("targeted import refuses branding-album photos", async () => {
+  await ganzSetup();
+  const p = (await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "Logo", category: "projects" } })).json()).project.id;
+  stubAlbum("891", "Profile pictures", ["9894"], { created: OLD });
+  await decide([{ photoId: "9894", albumId: "891", decision: "import" }]);
+  const r = await (await call(BACKFILL, { method: "POST", body: { targeted: true, albumId: "891", mixedAlbum: true, projectId: p, photoIds: ["9894"], dryRun: true } })).json();
+  assert.deepEqual(r.photos.map((x) => [x.outcome, x.reason]), [["refused", "branding-album"]]);
+});
+
+// --- Import Approved Photos (import-plan / import-run) -------------------------
+// The review page's own import: scoped switch, explicit IDs only, no scans.
+
+const PLAN = (albumId) => `${ADMIN}/import-plan?albumId=${albumId}`;
+const RUN = `${ADMIN}/import-run`;
+// Global historical import OFF; only the scoped switch is on.
+const reviewEnv = (o = {}) => makeEnv({ FB_HISTORICAL_IMPORT_ENABLED: "false", FB_REVIEWED_IMPORT_ENABLED: "true", ...o });
+const runImport = (body, opts = {}) => call(RUN, { method: "POST", env: reviewEnv(), ...opts, body: { albumId: GANZ, photoIds: seven, ...body } });
+const scanCalls = () => fetchCalls.filter((c) => c.url.hostname === "graph.facebook.com" && /\/(albums|posts|photos|attachments)$/.test(c.url.pathname));
+
+test("import-plan lists the album's approved photos, its gallery and the switch, from D1 only", async () => {
+  const projectId = await ganzSetup();
+  await decide([{ photoId: "9799", albumId: GANZ, decision: "later" }]);
+  const calls = fetchCalls.length;
+  const res = await call(PLAN(GANZ), { env: reviewEnv() });
+  assert.equal(res.status, 200);
+  const plan = await res.json();
+  assert.deepEqual([plan.pending, plan.imported, plan.enabled, plan.batchSize, plan.confirmation], [seven, [], true, 10, "IMPORT APPROVED"]);
+  assert.deepEqual(plan.linked, { id: projectId, name: "Ganz Garage", slug: "ganz-garage", usable: true });
+  assert.ok(plan.galleries.some((g) => g.id === projectId));
+  assert.equal(fetchCalls.length, calls, "no Graph calls");
+  assert.equal((await call(PLAN(GANZ), { env: reviewEnv({ FB_REVIEWED_IMPORT_ENABLED: "false" }) }).then((r) => r.json())).enabled, false);
+  assert.equal((await call(PLAN(GANZ), { admin: false, env: reviewEnv() })).status, 401);
+  assert.equal((await call(PLAN("x"), { env: reviewEnv() })).status, 400);
+});
+
+test("import-run imports approved photos with global historical import off, then the plan shows them imported", async () => {
+  const projectId = await ganzSetup();
+  const before = await snapshotAll();
+  const dry = await (await runImport({ projectId, dryRun: true })).json();
+  assert.deepEqual([dry.new, dry.existing, dry.refused], [7, 0, 0]);
+  assert.deepEqual(await snapshotAll(), before, "the dry run writes nothing");
+  const res = await runImport({ projectId, dryRun: false, expectedCount: 7, confirm: "IMPORT APPROVED" });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).imported, 7);
+  const plan = await (await call(PLAN(GANZ), { env: reviewEnv() })).json();
+  assert.deepEqual([plan.pending, plan.imported], [[], seven]);
+  assert.equal(scanCalls().length, 0, "never lists albums, posts or album photos");
+  const after = await snapshotAll();
+  for (const k of ["projects", "mappings", "posts", "reviews", "jobs", "albums", "cursor"]) assert.deepEqual(after[k], before[k], k);
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE project_id = ?", projectId)).length, 15);
+});
+
+test("import-run authentication, switch, confirmation, JSON-only body and rate limit", async () => {
+  const projectId = await ganzSetup();
+  const before = await snapshotAll();
+  const real = { projectId, dryRun: false, expectedCount: 7, confirm: "IMPORT APPROVED" };
+  assert.equal((await runImport(real, { admin: false })).status, 401, "signed out");
+  assert.equal((await runImport(real, { env: reviewEnv({ FB_REVIEWED_IMPORT_ENABLED: "false" }) })).status, 403, "scoped switch off");
+  assert.equal((await runImport(real, { env: reviewEnv({ FB_REVIEWED_IMPORT_ENABLED: undefined }) })).status, 403, "switch missing fails closed");
+  assert.equal((await runImport({ ...real, confirm: undefined })).status, 400, "no confirmation");
+  assert.equal((await runImport({ ...real, confirm: "import approved" })).status, 400, "wrong confirmation");
+  const form = await call(RUN, { method: "POST", env: reviewEnv(), headers: { "Content-Type": "application/x-www-form-urlencoded" }, raw: "dryRun=false" });
+  assert.equal(form.status, 415, "form posts (CSRF shape) are refused");
+  const throttled = reviewEnv({ REVIEW_LIMITER: { limit: async () => ({ success: false }) } });
+  assert.equal((await runImport(real, { env: throttled })).status, 429);
+  assert.equal((await runImport(real, { env: reviewEnv({ REVIEW_LIMITER: undefined }) })).status, 503, "real runs need the limiter");
+  assert.equal((await runImport(real, { env: reviewEnv({ FB_INTEGRATION_ENABLED: "false" }) })).status, 404, "integration kill switch");
+  assert.deepEqual(await snapshotAll(), before, "every refusal wrote nothing");
+});
+
+test("import-run batch limits and unintended imports are refused before anything is written", async () => {
+  const projectId = await ganzSetup();
+  const before = await snapshotAll();
+  const real = { projectId, dryRun: false, confirm: "IMPORT APPROVED" };
+  const eleven = Array.from({ length: 11 }, (_, i) => String(9600 + i));
+  assert.equal((await runImport({ ...real, photoIds: eleven, expectedCount: 11 })).status, 400, "more than 10 photos");
+  assert.equal((await runImport({ ...real, photoIds: [], expectedCount: 1 })).status, 400);
+  assert.equal((await runImport({ ...real, photoIds: [...seven.slice(0, 6), "9799"], expectedCount: 7 })).status, 409, "an unreviewed photo refuses the batch");
+  assert.equal((await runImport({ ...real, photoIds: [...seven.slice(0, 6), "9601"], expectedCount: 7 })).status, 409, "approved in another album");
+  assert.equal((await runImport({ ...real, expectedCount: 8 })).status, 409, "count changed since the check");
+  assert.equal((await runImport({ ...real, expectedCount: 7, mixedAlbum: true })).status, 409, "a linked album can't be sent elsewhere");
+  assert.equal((await runImport({ ...real, albumId: "600", photoIds: ["9601"], expectedCount: 1 })).status, 409, "an unlinked album without mixedAlbum");
+  assert.deepEqual(await snapshotAll(), before);
+  assert.equal(scanCalls().length, 0);
+});
+
+test("import-run never imports a photo twice, even when two runs overlap", async () => {
+  const projectId = await ganzSetup();
+  const real = { projectId, dryRun: false, expectedCount: 7, confirm: "IMPORT APPROVED" };
+  const [a, b] = await Promise.all([runImport(real), runImport(real)]);
+  const imported = (await a.json()).imported + (await b.json()).imported;
+  assert.equal(imported, 7, "together the two runs import each photo once");
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE project_id = ?", projectId)).length, 15);
+  assert.equal((await keys(baseEnv.PRIVATE_BUCKET)).filter((k) => seven.some((id) => k.includes(id))).length, 7);
+  const again = await (await runImport({ projectId, dryRun: true })).json();
+  assert.deepEqual([again.new, again.existing], [0, 7], "already imported photos are reported, not re-fetched");
+});
+
+test("import-run partial failure: the rest import, failures are reported and can be retried", async () => {
+  const projectId = await ganzSetup();
+  const broken = `https://scontent.xx.fbcdn.net/big/${seven[2]}.jpg`;
+  const good = cdn.get(broken);
+  cdn.delete(broken);
+  const res = await runImport({ projectId, dryRun: false, expectedCount: 7, confirm: "IMPORT APPROVED" });
+  assert.equal(res.status, 207);
+  const r = await res.json();
+  assert.equal(r.imported, 6);
+  assert.deepEqual(r.failed.map((f) => f.id), [seven[2]]);
+  assert.equal(r.photos.find((p) => p.id === seven[2]).outcome, "failed");
+  const plan = await (await call(PLAN(GANZ), { env: reviewEnv() })).json();
+  assert.deepEqual(plan.pending, [seven[2]], "the failed photo is offered again");
+  cdn.set(broken, good);
+  const retry = await (await runImport({ projectId, photoIds: [seven[2]], dryRun: false, expectedCount: 1, confirm: "IMPORT APPROVED" })).json();
+  assert.equal(retry.imported, 1);
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE project_id = ? AND status = 'imported'", projectId)).length, 15);
+});
+
+test("import-run into a chosen gallery for a mixed album, and webhook auto-import is unaffected", async () => {
+  const ganzId = await ganzSetup();
+  const autobody = (await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "3D Autobody", category: "remodels" } })).json()).project.id;
+  stubAlbum("890", "Mobile uploads", ["9891", "9892"], { created: OLD });
+  await decide([{ photoId: "9891", albumId: "890", decision: "import" }]);
+  const r = await (await runImport({ albumId: "890", photoIds: ["9891", "9892"], projectId: autobody, mixedAlbum: true, dryRun: true })).json();
+  assert.deepEqual(r.photos.map((p) => [p.id, p.outcome]), [["9891", "new"], ["9892", "refused"]]);
+  const done = await (await runImport({ albumId: "890", photoIds: ["9891"], projectId: autobody, mixedAlbum: true, dryRun: false, expectedCount: 1, confirm: "IMPORT APPROVED" })).json();
+  assert.equal(done.imported, 1);
+  assert.deepEqual(await rows("SELECT * FROM facebook_album_mappings"), []);
+  stubPhoto("9895", { created: NEW, album: { id: GANZ, name: "Ganz Garage" } });
+  stubPost(`${PAGE_ID}_105`, ["9895"], NEW);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_105`, published: 1, from: { id: PAGE_ID } }], reviewEnv());
+  assert.equal((await rows("SELECT project_id FROM facebook_photos WHERE fb_photo_id = '9895'"))[0].project_id, ganzId, "new posts still import automatically");
+});

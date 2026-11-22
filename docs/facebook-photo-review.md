@@ -217,6 +217,87 @@ downloads nothing and writes nothing.
 **Tests.** 5 tests in `test/facebook-review.test.mjs`. One is a mutation check that proved the
 album checks are enforced.
 
+### Import Approved Photos on the review page (local, branch `task/review-import-workflow`, not deployed)
+
+The owner's whole workflow: review photos, mark **Import**, click **Import Approved Photos**,
+confirm. No console commands, and no global switch is turned on and off.
+
+**On the page**, in each album's *Import approved photos* panel:
+1. **Plan** (`GET import-plan?albumId=`, D1 only). It shows:
+   - how many approved photos are not yet imported, and how many already are;
+   - the destination.
+2. **Destination:**
+   - **Linked album:** the destination is fixed.
+   - **Unlinked album:** choose a gallery. If the album holds several projects, tick the box and
+     the batch goes only to that gallery, with no link written (Ganz).
+   - **Unsorted albums** (Mobile uploads) are always handled that way.
+3. **Check** (dry run), in batches of 10. It reports the new photos, those already imported, those
+   that can't be imported (with reasons), and those the page's fingerprints flag as likely
+   duplicates of website photos. It writes nothing; it never links an album.
+4. **Confirmation dialog:** "Import n approved photos into ⟨gallery⟩ and publish them?" It lists
+   each photo and warns about likely duplicates. **Cancel** changes nothing.
+5. **Import:** if the album should be linked, `album-link` runs first. Then the same batches go
+   through `POST import-run`, with `confirm` and the exact `expectedCount` each time.
+   - Progress is shown per batch.
+   - A refused batch stops the run (for example, the count changed since the check).
+   - Partial failures (207) carry on. They are listed, and the photos can be imported again.
+6. **Refresh:** the album reloads, so imported photos move to *Already on the website*.
+
+The button stays disabled while decisions are unsaved, and while the server switch is off (the
+check still works).
+
+**On the Worker**, `POST /facebook/admin/import-run` refuses in each of these cases:
+
+| Case | Response |
+|---|---|
+| No admin cookie (route-level `requireAdmin`) | 401 |
+| `FB_INTEGRATION_ENABLED` not `"true"` | 404 |
+| The body isn't JSON | 415, so a form post (CSRF) can't trigger it |
+| A real run while `FB_REVIEWED_IMPORT_ENABLED` isn't `"true"` | 403 (this is the scoped switch) |
+| A real run without `confirm: "IMPORT APPROVED"` | 400 |
+| Rate limit exceeded (`REVIEW_LIMITER`, separate keys for checks and real runs) | 429 |
+| A real run with the limiter binding missing | 503 (fails closed) |
+| More than 10 IDs, or no `expectedCount` | 400 |
+| Any photo fails a `runTargetedImport` check, or the count changed | 409; nothing is written |
+
+`runTargetedImport` checks each photo for an Import decision for this album, confirms the album
+and Page with Graph, refuses branding photos and photos already imported, and enforces the
+destination and link rules.
+
+It takes explicit photo IDs only, and never lists albums or posts, so it can't start a
+historical scan. `FB_HISTORICAL_IMPORT_ENABLED` stays `"false"`.
+
+**Tests:**
+- **Worker:** 7 new tests against real local D1/R2. They cover:
+  - the plan;
+  - an import with global historical import off;
+  - auth, the switch, the confirmation, JSON-only, rate limit and kill switch;
+  - batch limits;
+  - unapproved, wrong-album, linked-as-mixed and count-changed refusals;
+  - two overlapping runs importing each photo once;
+  - a partial failure, then a retry;
+  - mixed albums;
+  - that webhook auto-import is unaffected.
+
+  Mutation checks prove the confirmation and switch checks are enforced.
+- **Site:** 6 new tests (`tests/review-import.test.mjs`).
+- **Browser harness** (mocked API): the linked, unlinked multi-batch with a failure, and mixed
+  album flows all behaved as designed, as did cancel and unsaved decisions. There's no overflow
+  at 360 px.
+- **Totals:** site 86/86, Worker 183/183.
+
+**To deploy (needs approval):**
+1. Commit and merge.
+2. **Pages:** a push without `[CF-Pages-Skip]`.
+3. **Worker:** `versions upload`, then a bindings diff, then `versions deploy`. The scoped switch
+   ships `"false"`.
+4. **Owner check:** the Ripley dry run on the page.
+5. **Turn the scoped switch on permanently**, with separate approval: a version with
+   `--var FB_REVIEWED_IMPORT_ENABLED:true`, plus the same change committed to `wrangler.toml`.
+6. **The owner imports Ripley** with the button.
+
+**Rollback:** set the scoped switch back to `"false"`, or redeploy the previous versions.
+
 ### Mixed albums (local, branch `task/mixed-album-import`, not deployed)
 
 Some albums hold several projects. Mobile uploads is one; the "Ganz" album holds 3D Autobody
