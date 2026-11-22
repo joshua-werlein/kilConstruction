@@ -76,21 +76,22 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 ## Next actionable step
 
-**Ripley is done.** The owner imported its 2 photos with the button. I verified both: stored,
-visible, and all 4 image URLs return 200.
+**The final Facebook deployment is ready for approval.** Deploy it only when the owner isn't
+importing.
 
-The owner is now reviewing and importing the remaining historical photos.
+- **Code:** branch `task/facebook-integration-final`, local and not pushed. It combines:
+  - the website-gallery destinations fix;
+  - caption hashtags with migration 018;
+  - Create New Gallery;
+  - holding ambiguous new projects for review.
+- **Tests:** site 90/90, Worker 201/201.
+- **Plan:** docs/facebook-final-deployment.md on that branch (order, validation, rollback).
+- **README:** PR #2 has 2 local reconcile commits on top of the owner's, `f8e2b46` and
+  `2e80705`. Push them (no force) and merge after the deploy is verified.
+- **After that:** automatic discovery (Phase D), with approval.
 
-**Hashtags: ready, awaiting approval, and only when no import is running.**
-- **Code:** branch `task/facebook-hashtags` (`a5db749`), committed and not pushed.
-- **Plan:** the contractor guide and the deployment, validation and rollback plan are in
-  docs/facebook-hashtags.md on that branch.
-- **Order:** D1 bookmark, then migration 018, then the Worker, then Pages, then validation.
-
-**README:** the reconciling commit `f8e2b46` sits on top of the owner's PR #2 branch, locally
-and unpushed. Push it and merge only after the hashtag deploy is verified.
-
-**After that:** enable automatic discovery (Phase D), with approval.
+The owner is reviewing and importing historical photos with Import Approved Photos. Ripley is
+done (2 photos, verified).
 
 ## Remaining steps, in order (each needs the owner's approval)
 
@@ -146,8 +147,8 @@ and unpushed. Push it and merge only after the hashtag deploy is verified.
 | Item | State |
 |---|---|
 | `main` | `= origin/main` (`2d8f323` plus docs) |
-| `task/facebook-hashtags` | Local, committed (`a5db749`), not pushed: caption hashtags + migration 018; **keep** |
-| `docs/kil-readme-align-20261122` (local) | The owner's PR #2 branch + 1 local commit `f8e2b46` (README reconcile); push after the hashtag deploy |
+| `task/facebook-integration-final` | Local, committed, not pushed: destinations fix + hashtags + Create New Gallery + holds; **keep** (supersedes `task/import-manual-galleries` and `task/facebook-hashtags`, both merged into it) |
+| `docs/kil-readme-align-20261122` (local) | The owner's PR #2 + 2 local commits (`f8e2b46`, `2e80705`); push after the final deploy |
 | `task/review-import-workflow`, `task/mixed-album-import` | Merged into `2d8f323` and deleted |
 | `docs/kil-readme-align-20261122` (draft PR #2) | The owner's README branch; **don't overwrite**; merge last |
 | `task/facebook-integration-completion` | Merged (`bd707ef`) and deleted |
