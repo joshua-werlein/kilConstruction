@@ -1514,6 +1514,135 @@ async function graphRequest(env, method, path, params = {}, budget = null, signa
   return data;
 }
 
+// --- targeted historical import (admin only; caller enforces requireAdmin) ---
+//
+// Imports an explicit list of reviewed photo IDs from ONE album into ONE
+// existing project, without scanning the Page. Every photo is checked before
+// anything is written; a real run refuses the whole batch unless every photo
+// passes and the number of new photos equals `expectedCount`.
+// Writes only facebook_photos rows, R2 objects for the new photos, and the
+// usual sync timestamps. Never touches album mappings, projects, posts,
+// review decisions, discovery jobs or the backfill cursor.
+//
+// POST /api/gallery-api/facebook/backfill
+//   { targeted: true, dryRun: true|false, albumId, projectId, photoIds: [...], expectedCount }
+
+const MAX_TARGETED_PHOTOS = 10;
+
+async function runTargetedImport(env, input) {
+  const dryRun = input.dryRun !== false;
+  const pageId = configuredPageId(env);
+  if (!pageId || !env.DB) return jsonResult({ error: "Missing Facebook configuration" }, 500);
+
+  const albumId = cleanId(input.albumId);
+  const projectId = Number.isSafeInteger(input.projectId) && input.projectId > 0 ? input.projectId : null;
+  const raw = Array.isArray(input.photoIds) ? input.photoIds : null;
+  if (!albumId || !projectId || !raw) return jsonResult({ error: "albumId, projectId and photoIds are required" }, 400);
+  if (!raw.length || raw.length > MAX_TARGETED_PHOTOS) return jsonResult({ error: `photoIds must list 1-${MAX_TARGETED_PHOTOS} photos` }, 400);
+  const photoIds = raw.map(cleanId);
+  if (photoIds.some((id) => !id) || new Set(photoIds).size !== photoIds.length) {
+    return jsonResult({ error: "photoIds must be unique Facebook photo IDs" }, 400);
+  }
+  if (!dryRun && !(Number.isSafeInteger(input.expectedCount) && input.expectedCount > 0)) {
+    return jsonResult({ error: "expectedCount is required for a real run" }, 400);
+  }
+
+  // Destination: an existing, visible project already linked to this album.
+  const project = await env.DB
+    .prepare(`SELECT id, slug, name, kind, hidden, fb_album_id FROM facebook_projects WHERE id = ?`)
+    .bind(projectId)
+    .first();
+  if (!project) return jsonResult({ error: "Project not found" }, 404);
+  if (project.kind !== "project" || project.hidden) return jsonResult({ error: "Project must be a visible portfolio project" }, 409);
+  const mapped = await env.DB
+    .prepare(`SELECT 1 AS ok FROM facebook_album_mappings WHERE album_id = ? AND project_id = ?`)
+    .bind(albumId, projectId)
+    .first();
+  if (project.fb_album_id !== albumId && !mapped) {
+    return jsonResult({ error: "This album is not linked to that project" }, 409);
+  }
+
+  const budget = newBudget(FETCH_BUDGET);
+  const photos = [];
+  try {
+    for (const id of photoIds) {
+      const entry = { id, outcome: "new", reason: null };
+      photos.push(entry);
+      const review = await env.DB
+        .prepare(`SELECT decision, album_id FROM facebook_photo_reviews WHERE fb_photo_id = ?`)
+        .bind(id)
+        .first();
+      if (review?.decision !== "import") { entry.outcome = "refused"; entry.reason = review ? `review-${review.decision}` : "review-unreviewed"; continue; }
+      if (review.album_id !== albumId) { entry.outcome = "refused"; entry.reason = "review-album-mismatch"; continue; }
+      const existing = await getPhotoRow(env.DB, id);
+      if (existing && existing.status !== "failed") {
+        entry.outcome = "existing";
+        entry.reason = existing.hidden || existing.removed_on_facebook_at ? "suppressed" : "already-imported";
+        continue;
+      }
+      const photo = await graphGet(env, id, { fields: PHOTO_FIELDS }, budget);
+      if (cleanId(photo?.id) !== id) { entry.outcome = "refused"; entry.reason = "graph-id-mismatch"; continue; }
+      if (cleanId(photo?.from?.id) && photo.from.id !== pageId) { entry.outcome = "refused"; entry.reason = "not-page-photo"; continue; }
+      if (cleanId(photo?.album?.id) !== albumId) { entry.outcome = "refused"; entry.reason = "album-mismatch"; continue; }
+      const best = pickLargestImage(photo.images);
+      try { if (!best) throw new Error(); assertFacebookCdnUrl(best.source); }
+      catch { entry.outcome = "refused"; entry.reason = "no-facebook-image"; continue; }
+      entry.createdTime = toIso(photo.created_time);
+      entry.width = Number(best.width) || null;
+      entry.height = Number(best.height) || null;
+      entry.photo = photo;
+    }
+  } catch (e) {
+    return jsonResult({ error: redact(e?.message || e, env) }, 502);
+  }
+
+  const count = (o) => photos.filter((p) => p.outcome === o).length;
+  const report = {
+    targeted: true,
+    dryRun,
+    album: albumId,
+    destination: { id: project.id, slug: project.slug, name: project.name },
+    requested: photoIds.length,
+    new: count("new"),
+    existing: count("existing"),
+    refused: count("refused"),
+    imported: 0,
+    failed: [],
+  };
+  const out = () => ({ ...report, photos: photos.map(({ photo, ...p }) => p) });
+
+  if (dryRun) return jsonResult(out());
+  if (report.refused) return jsonResult({ ...out(), error: "Some photos failed the checks; nothing was imported" }, 409);
+  if (report.new !== input.expectedCount) {
+    return jsonResult({ ...out(), error: `Expected ${input.expectedCount} new photos but found ${report.new}; nothing was imported` }, 409);
+  }
+
+  for (const entry of photos) {
+    if (entry.outcome !== "new") continue;
+    try {
+      const r = await importPhoto(env, entry.photo, {
+        context: { postId: null, message: "", createdTime: entry.createdTime, permalink: null },
+        projectId: project.id,
+        source: "backfill",
+        budget,
+        reviewMode: "historical",
+      });
+      if (r.imported) { entry.outcome = "imported"; report.imported++; }
+      else { entry.outcome = "existing"; entry.reason = r.reason; }
+    } catch (e) {
+      entry.outcome = "failed";
+      entry.reason = redact(e?.message || e, env);
+      report.failed.push({ id: entry.id, error: entry.reason });
+      if (e instanceof BudgetExhausted) break;
+    }
+  }
+  const stamp = new Date().toISOString();
+  await setState(env.DB, "last_backfill_at", stamp);
+  if (report.imported) await setState(env.DB, "last_success_at", stamp);
+  console.log("[facebook] targeted import", { album: albumId, project: project.id, imported: report.imported, failed: report.failed.length });
+  return jsonResult(out(), report.failed.length ? 207 : 200);
+}
+
 // --- historical backfill (admin only; caller enforces requireAdmin) ----
 //
 // Walks the Page's own posts newest → oldest, using the same ingestPost +
@@ -1528,6 +1657,7 @@ export async function runFacebookBackfill(request, env) {
     return jsonResult({ error: "Historical importing is disabled. Preview is available." }, 403);
   }
   if (input.discovery === true) return await runFacebookDiscovery(env, input);
+  if (input.targeted === true) return await runTargetedImport(env, input);
   const pageId = configuredPageId(env);
   if (!pageId) return { status: 500, body: { error: "FB_PAGE_ID is not configured" } };
   if (!env.DB) return { status: 500, body: { error: "Missing DB binding" } };

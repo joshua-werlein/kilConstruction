@@ -492,3 +492,162 @@ test("image endpoints are rate limited before any Graph call or R2 read", async 
   assert.deepEqual(keysSeen, ["review-image", "review-site-image"], "one key per endpoint");
   assert.ok(!fetchCalls.some((c) => c.url.hostname === "graph.facebook.com"), "no Graph call when throttled");
 });
+
+// --- targeted import: one album, explicit photo IDs, existing project --------
+
+const GANZ = "122234637104318503";
+const seven = Array.from({ length: 7 }, (_, i) => String(9700 + i));
+const BACKFILL = `${SITE}/api/gallery-api/facebook/backfill`;
+const targeted = (body, env) => call(BACKFILL, { method: "POST", body: { targeted: true, albumId: GANZ, photoIds: seven, ...body }, env });
+
+// Production-like state: Ganz Garage (8 imported by webhook) plus 7 older album
+// photos approved for import, an approved photo in another album, and an
+// unreviewed photo in the Ganz album.
+async function ganzSetup() {
+  stubPageAlbums([[GANZ, "Ganz Garage", 16], ["600", "Ganz", 2]]);
+  stubAlbum(GANZ, "Ganz Garage", [...ganzLike, ...seven, "9799"], { created: OLD });
+  for (const id of ganzLike) stubPhoto(id, { created: NEW, album: { id: GANZ, name: "Ganz Garage" } });
+  stubAlbum("600", "Ganz", ["9601", "9602"], { created: OLD });
+  stubPost(`${PAGE_ID}_95`, ganzLike, NEW);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_95`, published: 1, from: { id: PAGE_ID } }]);
+  const [project] = await rows("SELECT id, fb_album_id FROM facebook_projects");
+  assert.equal(project.fb_album_id, GANZ);
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 8);
+  assert.equal((await decide([
+    ...seven.map((photoId) => ({ photoId, albumId: GANZ, decision: "import" })),
+    { photoId: "9601", albumId: "600", decision: "import" },
+    { photoId: "9602", albumId: "600", decision: "later" },
+  ])).status, 200);
+  return project.id;
+}
+const snapshotAll = async () => ({
+  photos: await rows("SELECT fb_photo_id, status, hidden, project_id, master_key, public_key, updated_at FROM facebook_photos ORDER BY fb_photo_id"),
+  projects: await rows("SELECT * FROM facebook_projects ORDER BY id"),
+  mappings: await rows("SELECT * FROM facebook_album_mappings ORDER BY album_id"),
+  posts: await rows("SELECT * FROM facebook_posts ORDER BY fb_post_id"),
+  reviews: await rows("SELECT * FROM facebook_photo_reviews ORDER BY fb_photo_id"),
+  jobs: await rows("SELECT * FROM facebook_discovery_jobs"),
+  albums: await rows("SELECT * FROM facebook_albums"),
+  cursor: await rows("SELECT * FROM facebook_sync_state WHERE key = 'backfill_cursor'"),
+  priv: await keys(baseEnv.PRIVATE_BUCKET), pub: await keys(baseEnv.GALLERY_BUCKET),
+});
+
+test("targeted dry run reports exactly the approved album photos and changes nothing, even with historical import off", async () => {
+  const projectId = await ganzSetup();
+  const before = await snapshotAll();
+  const calls = fetchCalls.length;
+  const res = await targeted({ dryRun: true, projectId }, makeEnv({ FB_HISTORICAL_IMPORT_ENABLED: "false" }));
+  assert.equal(res.status, 200);
+  const r = await res.json();
+  assert.equal(r.dryRun, true);
+  assert.deepEqual(r.destination, { id: projectId, slug: "ganz-garage", name: "Ganz Garage" });
+  assert.deepEqual([r.requested, r.new, r.existing, r.refused, r.imported], [7, 7, 0, 0, 0]);
+  assert.deepEqual(r.photos.map((p) => [p.id, p.outcome]), seven.map((id) => [id, "new"]));
+  assert.ok(!JSON.stringify(r).includes("fbcdn"), "no Graph payloads or CDN URLs in the response");
+  const made = fetchCalls.slice(calls);
+  assert.ok(!made.some((c) => c.url.hostname.endsWith("fbcdn.net")), "no image downloads");
+  assert.deepEqual(made.map((c) => c.url.pathname.split("/").pop()), seven,
+    "only the seven requested photos are looked up; no Page, album or post scan");
+  assert.deepEqual(await snapshotAll(), before, "dry run writes nothing");
+});
+
+test("targeted real run needs the historical-import switch", async () => {
+  const projectId = await ganzSetup();
+  const before = await snapshotAll();
+  const res = await targeted({ dryRun: false, projectId, expectedCount: 7 }, makeEnv({ FB_HISTORICAL_IMPORT_ENABLED: "false" }));
+  assert.equal(res.status, 403);
+  assert.deepEqual(await snapshotAll(), before);
+});
+
+test("targeted import adds exactly the seven photos to the existing project and leaves everything else unchanged", async () => {
+  const projectId = await ganzSetup();
+  const before = await snapshotAll();
+  const res = await targeted({ dryRun: false, projectId, expectedCount: 7 });
+  assert.equal(res.status, 200);
+  const r = await res.json();
+  assert.deepEqual([r.imported, r.failed.length], [7, 0]);
+  assert.deepEqual(r.photos.map((p) => p.outcome), Array(7).fill("imported"));
+
+  const after = await snapshotAll();
+  const added = after.photos.filter((p) => !before.photos.some((b) => b.fb_photo_id === p.fb_photo_id));
+  assert.deepEqual(added.map((p) => p.fb_photo_id), seven);
+  assert.ok(added.every((p) => p.status === "imported" && p.project_id === projectId && p.hidden === 0 && p.public_key), "published in Ganz Garage");
+  assert.deepEqual(after.photos.filter((p) => ganzLike.includes(p.fb_photo_id)), before.photos, "the eight existing photos are untouched");
+  for (const k of ["projects", "mappings", "posts", "reviews", "jobs", "albums", "cursor"]) assert.deepEqual(after[k], before[k], `${k} unchanged`);
+  assert.deepEqual(after.priv, [...before.priv, ...seven.map((id) => `Facebook/${id}.jpg`)].sort());
+  assert.ok(!after.photos.some((p) => ["9601", "9602", "9799"].includes(p.fb_photo_id)), "other albums and unreviewed photos are not imported");
+  const gallery = await (await call(`${SITE}/api/gallery-api?project=ganz-garage`, { admin: false })).json();
+  assert.equal(gallery.items.length, 15);
+
+  // Re-running is a no-op: duplicates are detected before any Graph call or download.
+  const calls = fetchCalls.length;
+  const dry = await (await targeted({ dryRun: true, projectId })).json();
+  assert.deepEqual([dry.new, dry.existing], [0, 7]);
+  const rerun = await targeted({ dryRun: false, projectId, expectedCount: 7 });
+  assert.equal(rerun.status, 409, "expected count no longer matches");
+  assert.equal(fetchCalls.length, calls, "no Graph calls or downloads for already-imported photos");
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 15);
+});
+
+test("targeted import refuses the whole batch when any photo or the destination fails a check", async () => {
+  const projectId = await ganzSetup();
+  const before = await snapshotAll();
+  const attempt = async (body, env) => {
+    const res = await targeted({ dryRun: false, projectId, expectedCount: 7, ...body }, env);
+    return [res.status, await res.json()];
+  };
+  const reason = (r, id) => r.photos?.find((p) => p.id === id)?.reason;
+  const last = seven[6];
+  const others = seven.slice(0, 6);
+
+  let [status, r] = await attempt({ photoIds: [...others, "9799"] });
+  assert.equal(status, 409); assert.equal(reason(r, "9799"), "review-unreviewed");
+  [status, r] = await attempt({ photoIds: [...others, "9602"] });
+  assert.equal(status, 409); assert.equal(reason(r, "9602"), "review-later");
+  [status, r] = await attempt({ photoIds: [...others, "9601"] });
+  assert.equal(status, 409); assert.equal(reason(r, "9601"), "review-album-mismatch", "approved, but in another album");
+
+  // Facebook reports a different album, a different owner, or a non-Facebook image host.
+  stubPhoto(last, { album: { id: "600", name: "Ganz" } });
+  [status, r] = await attempt({});
+  assert.equal(status, 409); assert.equal(reason(r, last), "album-mismatch");
+  stubPhoto(last, { album: { id: GANZ, name: "Ganz Garage" }, fromId: "999" });
+  [status, r] = await attempt({});
+  assert.equal(status, 409); assert.equal(reason(r, last), "not-page-photo");
+  stubPhoto(last, { album: { id: GANZ, name: "Ganz Garage" } });
+  graph.get(last).images = [{ width: 2048, height: 1536, source: "https://evil.example/x.jpg" }];
+  [status, r] = await attempt({});
+  assert.equal(status, 409); assert.equal(reason(r, last), "no-facebook-image");
+  stubPhoto(last, { album: { id: GANZ, name: "Ganz Garage" } });
+
+  [status, r] = await attempt({ expectedCount: 6 });
+  assert.equal(status, 409); assert.match(r.error, /Expected 6 new photos but found 7/);
+  assert.equal((await targeted({ dryRun: false, projectId })).status, 400, "expectedCount is required");
+
+  // Destination checks.
+  assert.equal((await attempt({ albumId: "600" }))[0], 409, "album not linked to the project");
+  assert.equal((await attempt({ projectId: 999 }))[0], 404);
+  await baseEnv.DB.prepare("UPDATE facebook_projects SET hidden = 1 WHERE id = ?").bind(projectId).run();
+  assert.equal((await attempt({}))[0], 409, "hidden project");
+  await baseEnv.DB.prepare("UPDATE facebook_projects SET hidden = 0 WHERE id = ?").bind(projectId).run();
+
+  // Input validation.
+  for (const body of [{ photoIds: [] }, { photoIds: Array.from({ length: 11 }, (_, i) => String(9000 + i)) },
+    { photoIds: [seven[0], seven[0]] }, { photoIds: ["1 OR 1=1"] }, { albumId: "x" }, { projectId: "1" }]) {
+    assert.equal((await attempt(body))[0], 400, JSON.stringify(body));
+  }
+  assert.equal((await call(BACKFILL, { method: "POST", admin: false, body: { targeted: true, dryRun: true } })).status, 401);
+
+  assert.deepEqual(await snapshotAll(), before, "every refusal wrote nothing");
+});
+
+test("automatic import of new posts still works after a targeted import", async () => {
+  const projectId = await ganzSetup();
+  assert.equal((await targeted({ dryRun: false, projectId, expectedCount: 7 })).status, 200);
+  stubPhoto("9790", { created: NEW, album: { id: GANZ, name: "Ganz Garage" } });
+  stubPost(`${PAGE_ID}_97`, ["9790"], NEW);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_97`, published: 1, from: { id: PAGE_ID } }]);
+  const row = (await rows("SELECT status, project_id FROM facebook_photos WHERE fb_photo_id = '9790'"))[0];
+  assert.deepEqual([row.status, row.project_id], ["imported", projectId], "new post imports with no review into the same project");
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 16);
+});
