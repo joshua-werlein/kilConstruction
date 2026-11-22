@@ -20,29 +20,29 @@
 
 A production website and custom content platform built for a construction business. Its owner can organize project imagery, manage customer reviews, and maintain public content without editing code or relying on a third-party CMS.
 
-The Astro site uses two Cloudflare Workers in this repository. The gallery Worker handles media, reviews, and Facebook events. The contact Worker verifies Turnstile challenges and delivers messages through Resend.
+The Astro 5 website runs on Cloudflare Pages, with two separately deployed Workers in this repository. The gallery Worker handles media, reviews, Facebook webhooks, and import controls; the contact Worker verifies Turnstile challenges and delivers messages through Resend. D1 holds project/photo metadata while R2 holds image files.
 
 ## 🚀 Features
 
 | Area | What it does |
 | :--- | :--- |
-| 🖼️ **Project galleries** | Categorized project and service pages, uploads, image management, and responsive presentation |
+| 🖼️ **Project galleries** | Categorized Projects and Services pages, manual R2 uploads, Facebook-managed galleries, and image management |
 | 🔐 **Admin dashboard** | Authenticated content administration with signed sessions and protected mutations |
 | ⭐ **Customer reviews** | Review submission, moderation, featured reviews, and private review-photo storage |
-| ☁️ **Cloud media** | R2 public gallery storage alongside separately restricted customer media |
+| ☁️ **Cloud media** | R2 image files, private Facebook masters, protected review attachments, and visibility-gated image delivery |
 | 📩 **Contact workflow** | Cloudflare Turnstile checks and Resend delivery through a separate Worker |
-| 📘 **Facebook integration** | Signed Meta webhook handling, deduplication, new-post import tooling, and admin preview/reconciliation workflows |
+| 📘 **Facebook integration** | Signed Meta Page webhooks, automatic new-post imports, per-photo duplicate comparison and review, and guarded historical imports |
 | 🛡️ **Security controls** | Input checks, scoped media access, rate limits, and regression tests for path/URL variations |
 
 ## 🧩 Architecture
 
 ```mermaid
 flowchart TB
-    A[Astro website] --> B[Gallery + Reviews Worker]
+    A[Astro 5 on Cloudflare Pages] --> B[Gallery + Reviews Worker]
     A --> C[Contact Worker]
-    B --> D[(D1)]
-    B --> E[(R2 public galleries)]
-    B --> F[(R2 private customer media)]
+    B --> D[(D1 project + review metadata)]
+    B --> E[(R2 public gallery assets)]
+    B --> F[(R2 private reviews + Facebook masters)]
     C --> G[Turnstile + Resend]
     H[Meta Page webhook] --> B
 ```
@@ -59,7 +59,7 @@ flowchart TB
 
 The gallery Worker validates signed admin sessions for privileged operations. Project images and private review uploads use separate R2 storage. The review photo endpoint requires approval for public viewing and authorizes admins to inspect pending submissions.
 
-Production receives signature-verified Meta webhooks and deduplicates eligible new-post imports. Broader album discovery and historical import are disabled in the documented production configuration. The admin preview supports reviewing matches before a historical import is considered.
+Production receives signature-verified Meta Page webhooks and deduplicates eligible new-post imports. Photos are stored in R2; D1 stores Facebook project records, album mappings, per-photo review decisions, captions, import state, and visibility. The **Manage Images** page lists both manual R2 folders and Facebook-managed D1 projects. Facebook projects remain independently manageable through **Facebook Gallery Sync**.\n\nThe admin **Facebook Photo Review** page compares Facebook photos against existing website galleries (including visual duplicate hints) and saves **Import**, **Duplicate / Skip**, or **Review later** decisions. Saving **Import** is an approval, not an upload. Historical imports require a separately authorized, bounded operation; unrestricted historical import and automatic album discovery remain disabled in the documented production configuration. Existing signed webhook imports of new Page posts continue automatically.\n\n**In progress, not yet deployed:** self-service **Import Approved Photos** within the review page and optional caption-hashtag categorization. These must not be described as live until their separate rollout is verified.
 
 <details>
 <summary><strong>Implementation and rollout details</strong></summary>
@@ -67,6 +67,8 @@ Production receives signature-verified Meta webhooks and deduplicates eligible n
 - [Gallery and review access checks](workers/kilcon-gallery-worker/src/index.js)
 - [Webhook verification and imports](docs/facebook-webhook.md)
 - [Album discovery, preview, and release gates](docs/facebook-album-implementation.md)
+- [Historical photo review and duplicate decisions](docs/facebook-photo-review.md)
+- [Current handoff and feature flags](docs/RESUME.md)
 - [Verified production flags](docs/security-release-2026-11-19.md)
 
 </details>
@@ -92,7 +94,7 @@ Production receives signature-verified Meta webhooks and deduplicates eligible n
 
 ## 💻 Development
 
-The site uses **Astro 5**. See [package.json](package.json) for dependencies and commands.
+The Pages-hosted site currently uses **Astro 5**, with separate Workers for the gallery/reviews and contact APIs. See [package.json](package.json) for dependencies and commands. An Astro 7 migration has not been deployed.
 
 ```bash
 npm ci
