@@ -8,7 +8,7 @@ Production is stable and verified. Start here; the linked docs hold the details.
 | Component | Live | Rollback target |
 |---|---|---|
 | Pages (`kilconstruction`) | `e828a3b5` from `main` `2d8f323` (Import Approved Photos) | `584403a7` (`bd707ef`), then `02aaaf2a` |
-| Gallery Worker (`kilcon-gallery-worker`) | `33c469b5-1c20-449f-bb7c-859358f93693`, tag `2d8f323` (`import-plan`, `import-run`, mixed albums) | `npx wrangler versions deploy 93b9f92b-a549-443d-b6f1-19cb527e9f8e@100%`, then `8c893925` |
+| Gallery Worker (`kilcon-gallery-worker`) | `fc198011-3d43-4be5-af96-dcf691da44fc`, tag `e4369de` (scoped reviewed import **on**) | `npx wrangler versions deploy 33c469b5-1c20-449f-bb7c-859358f93693@100%` (switch off), then `93b9f92b` |
 | D1 `kilcon-db` | Migrations through **017**. 018 (Highlights) is written on branch `task/facebook-hashtags` and not applied | Bookmark before `2d8f323`: `000006f3-00000000-0000512b-7d027c724b7152aa3ec2ef66f0d1f5cc`. Before the Ganz import: `000006d6-00000000-0000512b-2269b9f882efa19e8fc0885a612689b6` |
 | Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |
 
@@ -17,8 +17,9 @@ Production is stable and verified. Start here; the linked docs hold the details.
   - `FB_AUTO_IMPORT=true`
   - `FB_DISCOVERY_ENABLED=false`
   - `FB_HISTORICAL_IMPORT_ENABLED=false` (stays off permanently)
-  - `FB_REVIEWED_IMPORT_ENABLED=false`: the scoped switch for Import Approved Photos. It is
-    turned on only with the owner's approval.
+  - `FB_REVIEWED_IMPORT_ENABLED=true`: the scoped switch for Import Approved Photos. The owner
+    approved turning it on, and it went on 2026-11-22 at 19:52 UTC. After that, 122/122
+    production checks passed and D1 was unchanged.
 - **Verified after `2d8f323`** (2026-11-22, 18:35 UTC):
   - 122/122 production checks passed.
   - `import-plan` and `import-run` return 401 `no-store` signed out, and a form-encoded POST is
