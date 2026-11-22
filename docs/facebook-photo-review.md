@@ -298,7 +298,48 @@ historical scan. `FB_HISTORICAL_IMPORT_ENABLED` stays `"false"`.
 
 **Rollback:** set the scoped switch back to `"false"`, or redeploy the previous versions.
 
-### Mixed albums (local, branch `task/mixed-album-import`, not deployed)
+### Importing into existing website galleries (local, branch `task/import-manual-galleries`, not deployed)
+
+**The problem.** The destination dropdown listed only Facebook galleries (D1 projects). A manual
+R2 gallery, such as Furniture/Cutting Boards, could only be chosen after someone linked it on
+`/admin/facebook`.
+
+**The fix:**
+- **`import-plan` lists every eligible website gallery**, grouped by category (Projects, New
+  Construction, Remodels, Furniture). It comes from the R2 folders, plus the visible Facebook
+  galleries.
+  - Highlights and Apparel are never offered, and hidden galleries are left out.
+  - A website gallery that's already linked appears once, by its record (`project:<id>`).
+  - An unlinked one appears as `manual:<folder>`.
+- **The check** (`import-run`, dry run) can name an unlinked website gallery by `linkedPrefix`.
+  - It runs every per-photo check and creates nothing.
+  - The folder must be one of the listed website galleries.
+  - A real run by folder is refused (409) until the link exists.
+- **Confirm** first creates or reuses the link with the existing `project-create { name,
+  linkedPrefix }`. That reuses an existing link and never makes a second one. Then it links the
+  album (unless the album holds several projects), then imports by record.
+  - The linked record takes the folder's category.
+  - Its photos appear **inside the existing website gallery**. No duplicate images, and no
+    second public gallery.
+- **Unchanged:** album mappings, existing gallery categories, duplicate protection, review
+  decisions and mixed-album behaviour.
+- **Internal only:** the preview destination used for the check is an internal parameter, so the
+  historical backfill route can't be given one in a request body.
+
+**Tests:**
+- **Worker, 4 new:**
+  - the grouped list: manual galleries included, Highlights, Apparel and hidden galleries left out,
+    linked galleries listed once;
+  - a check-then-import straight into Furniture/Cutting Boards: link reused, 1 manual + 2
+    imported photos in that gallery, still one gallery card, Duplicate / Skip photo left out;
+  - a mixed album into a website gallery, with no mapping;
+  - folder validation, and the preview can't be injected.
+- **Site, 2 new:** the grouping and destination fields; on confirm the order is link record, then
+  album link, then import, and the check never writes.
+- **Browser harness:** the grouped dropdown and the full flow behaved as described.
+- **Totals:** site 88/88, Worker 187/187.
+
+### Mixed albums (deployed in `2d8f323`)
 
 Some albums hold several projects. Mobile uploads is one; the "Ganz" album holds 3D Autobody
 and Ganz Re-Deck.

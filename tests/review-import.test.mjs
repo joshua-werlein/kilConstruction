@@ -93,3 +93,36 @@ test("the scoped switch is on; the global historical import and discovery stay o
   assert.match(worker, /export const IMPORT_CONFIRMATION = "IMPORT APPROVED";/);
   assert.match(worker, /if \(env\.FB_REVIEWED_IMPORT_ENABLED !== "true"\) return jsonResult\(\{ error: "Reviewed importing is switched off" \}, 403\);/);
 });
+
+test("the destination list groups website and Facebook galleries by category", async () => {
+  const { galleryGroups, destinationBody } = await import("../src/lib/review-import.js");
+  const groups = galleryGroups([
+    { value: "project:1", id: 1, name: "Ganz Garage", category: "projects", source: "facebook" },
+    { value: "manual:Furniture/Cutting Boards/", id: null, name: "Cutting Boards", category: "furniture", linkedPrefix: "Furniture/Cutting Boards/", source: "website" },
+    { value: "project:9", id: 9, name: "Schwennson House", category: "projects", linkedPrefix: "Projects/Schwennson House/", source: "website" },
+    { value: "manual:Remodels/3D_Autobody/", id: null, name: "3D Autobody", category: "remodels", source: "website" },
+    { value: "", name: "bad" }, null,
+  ]);
+  assert.deepEqual(groups.map((g) => [g.label, g.items.map((i) => i.label)]), [
+    ["Projects", ["Ganz Garage (Facebook gallery)", "Schwennson House (website gallery)"]],
+    ["Remodels", ["3D Autobody (website gallery)"]],
+    ["Furniture", ["Cutting Boards (website gallery)"]],
+  ]);
+  assert.deepEqual(destinationBody({ id: 9, linkedPrefix: "Projects/Schwennson House/" }), { projectId: 9 }, "a linked gallery is named by its record");
+  assert.deepEqual(destinationBody({ id: null, linkedPrefix: "Furniture/Cutting Boards/" }), { linkedPrefix: "Furniture/Cutting Boards/" });
+  assert.deepEqual(destinationBody({}), {});
+});
+
+test("confirming into a website gallery creates or reuses its link before importing; the check never does", () => {
+  const s = code(script);
+  const check = s.slice(s.indexOf('importCheck.addEventListener("click"'), s.indexOf('importCancel.addEventListener'));
+  const confirm = s.slice(s.indexOf('importConfirm.addEventListener("click"'));
+  assert.match(check, /\.\.\.destinationBody\(g\)/);
+  assert.doesNotMatch(check, /project-create|album-link/, "the check writes nothing");
+  const create = confirm.indexOf('postJson("project-create", { name: dry.gallery.name, linkedPrefix: dry.gallery.linkedPrefix })');
+  const link = confirm.indexOf('postJson("album-link"');
+  const run = confirm.indexOf("postBatch({ dryRun: false");
+  assert.ok(create > 0 && create < link && link < run, "link record, then album link, then import");
+  assert.match(confirm, /if \(dry\.gallery\.id === null\)/, "only for a gallery that isn't linked yet");
+  assert.match(s, /el\("optgroup", \{ label: group\.label \}\)/);
+});

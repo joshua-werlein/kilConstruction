@@ -1060,7 +1060,7 @@ async function getOrCreateLinkedProject(env, prefix, name, createdBy) {
     .bind(prefix)
     .first();
   if (row) return row;
-  return await createProject(env, { name, reason: "linked", createdBy, linkedPrefix: prefix });
+  return await createProject(env, { name, reason: "linked", createdBy, linkedPrefix: prefix, category: categoryForPrefix(prefix) });
 }
 
 async function getRecentProject(env) {
@@ -1536,7 +1536,7 @@ async function graphRequest(env, method, path, params = {}, budget = null, signa
 
 const MAX_TARGETED_PHOTOS = 10;
 
-async function runTargetedImport(env, input) {
+async function runTargetedImport(env, input, { previewProject = null } = {}) {
   const dryRun = input.dryRun !== false;
   const pageId = configuredPageId(env);
   if (!pageId || !env.DB) return jsonResult({ error: "Missing Facebook configuration" }, 500);
@@ -1544,7 +1544,8 @@ async function runTargetedImport(env, input) {
   const albumId = cleanId(input.albumId);
   const projectId = Number.isSafeInteger(input.projectId) && input.projectId > 0 ? input.projectId : null;
   const raw = Array.isArray(input.photoIds) ? input.photoIds : null;
-  if (!albumId || !projectId || !raw) return jsonResult({ error: "albumId, projectId and photoIds are required" }, 400);
+  if (previewProject && input.dryRun === false) return jsonResult({ error: "A gallery that isn't linked yet can only be checked" }, 400);
+  if (!albumId || (!projectId && !previewProject) || !raw) return jsonResult({ error: "albumId, projectId and photoIds are required" }, 400);
   if (!raw.length || raw.length > MAX_TARGETED_PHOTOS) return jsonResult({ error: `photoIds must list 1-${MAX_TARGETED_PHOTOS} photos` }, 400);
   const photoIds = raw.map(cleanId);
   if (photoIds.some((id) => !id) || new Set(photoIds).size !== photoIds.length) {
@@ -1559,7 +1560,8 @@ async function runTargetedImport(env, input) {
   // never linked: with mixedAlbum: true each batch names its own project, and
   // no mapping is written, so later photos in that album are not affected.
   const mixed = input.mixedAlbum === true;
-  const project = await env.DB
+  // previewProject: a manual gallery with no linked record yet (dry run only).
+  const project = previewProject || await env.DB
     .prepare(`SELECT id, slug, name, kind, hidden, fb_album_id FROM facebook_projects WHERE id = ?`)
     .bind(projectId)
     .first();
@@ -1569,7 +1571,7 @@ async function runTargetedImport(env, input) {
     env.DB.prepare(`SELECT project_id FROM facebook_album_mappings WHERE album_id = ?`).bind(albumId).first(),
     env.DB.prepare(`SELECT id FROM facebook_projects WHERE fb_album_id = ?`).bind(albumId).first(),
   ]);
-  if (mixed) {
+  if (mixed || previewProject) {
     if (mappedTo || ownedBy) return jsonResult({ error: "This album is linked to a gallery; import it without mixedAlbum" }, 409);
   } else if (project.fb_album_id !== albumId && mappedTo?.project_id !== projectId) {
     return jsonResult({ error: "This album is not linked to that project" }, 409);
@@ -1616,7 +1618,7 @@ async function runTargetedImport(env, input) {
     dryRun,
     mixedAlbum: mixed,
     album: albumId,
-    destination: { id: project.id, slug: project.slug, name: project.name },
+    destination: { id: project.id ?? null, slug: project.slug ?? null, name: project.name, ...(project.linked_prefix ? { linkedPrefix: project.linked_prefix } : {}) },
     requested: photoIds.length,
     new: count("new"),
     existing: count("existing"),
@@ -1700,7 +1702,7 @@ async function adminImportPlan(env, request) {
   const [mapped, owner, projects] = await Promise.all([
     env.DB.prepare(`SELECT p.id, p.name, p.slug, p.kind, p.hidden FROM facebook_album_mappings m JOIN facebook_projects p ON p.id = m.project_id WHERE m.album_id = ?`).bind(albumId).first(),
     env.DB.prepare(`SELECT id, name, slug, kind, hidden FROM facebook_projects WHERE fb_album_id = ?`).bind(albumId).first(),
-    env.DB.prepare(`SELECT id, name, slug, category, linked_prefix FROM facebook_projects WHERE kind = 'project' AND hidden = 0 ORDER BY name`).all(),
+    env.DB.prepare(`SELECT id, name, slug, category, linked_prefix, hidden FROM facebook_projects WHERE kind = 'project'`).all(),
   ]);
   const linked = mapped || owner;
   return jsonResult({
@@ -1710,7 +1712,7 @@ async function adminImportPlan(env, request) {
     pending,
     imported,
     linked: linked ? { id: linked.id, name: linked.name, slug: linked.slug, usable: linked.kind === "project" && !linked.hidden } : null,
-    galleries: (projects.results || []).map((p) => ({ id: p.id, name: p.name, slug: p.slug, category: p.category, linkedPrefix: p.linked_prefix || null })),
+    galleries: importDestinations(projects.results || [], await listManualProjects(env)),
     confirmation: IMPORT_CONFIRMATION,
   });
 }
@@ -1729,14 +1731,58 @@ async function adminImportRun(env, request, body) {
   } else if (!dryRun) {
     return jsonResult({ error: "Import rate limiter is not configured" }, 503);
   }
+  // A manual website gallery chosen by its folder. If it is already linked,
+  // that record is used. If not, only a check is possible here; the page
+  // first creates the link with project-create { linkedPrefix } (which reuses
+  // an existing link), then imports by projectId.
+  let projectId = body?.projectId;
+  let previewProject = null;
+  if (body?.linkedPrefix !== undefined) {
+    const prefix = typeof body.linkedPrefix === "string" ? body.linkedPrefix : "";
+    const manual = (await listManualProjects(env)).find((m) => m.prefix === prefix);
+    if (!manual) return jsonResult({ error: "Unknown website gallery" }, 400);
+    const linked = await env.DB.prepare(`SELECT id FROM facebook_projects WHERE linked_prefix = ?`).bind(prefix).first();
+    if (linked) projectId = linked.id;
+    else if (!dryRun) return jsonResult({ error: "Link this website gallery first (project-create with linkedPrefix)" }, 409);
+    else previewProject = { id: null, slug: null, name: manual.name, kind: "project", hidden: 0, fb_album_id: null, linked_prefix: prefix };
+  }
   return await runTargetedImport(env, {
     dryRun,
     albumId: body?.albumId,
-    projectId: body?.projectId,
+    projectId,
     photoIds: body?.photoIds,
     expectedCount: body?.expectedCount,
     mixedAlbum: body?.mixedAlbum === true,
-  });
+  }, { previewProject });
+}
+
+const ROOT_CATEGORY = { "Projects/": "projects", "New Construction/": "new-construction", "Remodels/": "remodels", "Furniture/": "furniture" };
+const CATEGORY_ORDER = ["projects", "new-construction", "remodels", "furniture"];
+
+function categoryForPrefix(prefix) {
+  const root = Object.keys(ROOT_CATEGORY).find((r) => String(prefix || "").startsWith(r));
+  return root ? ROOT_CATEGORY[root] : "projects";
+}
+
+// Destinations for Import Approved Photos: visible Facebook galleries plus
+// every manual website gallery (Projects, New Construction, Remodels,
+// Furniture; never Highlights or Apparel). A manual gallery already linked
+// appears once, with its record id; an unlinked one has id null and is
+// linked on confirmation. Hidden galleries are left out.
+export function importDestinations(projects, manual) {
+  const linkedByPrefix = new Map(projects.filter((p) => p.linked_prefix).map((p) => [p.linked_prefix, p]));
+  const out = [];
+  for (const m of manual) {
+    const p = linkedByPrefix.get(m.prefix);
+    if (p?.hidden) continue;
+    out.push({ value: p ? `project:${p.id}` : `manual:${m.prefix}`, id: p ? p.id : null, name: m.name, slug: p?.slug ?? null,
+      category: categoryForPrefix(m.prefix), linkedPrefix: m.prefix, source: "website" });
+  }
+  for (const p of projects) {
+    if (p.linked_prefix || p.hidden) continue;
+    out.push({ value: `project:${p.id}`, id: p.id, name: p.name, slug: p.slug, category: CATEGORY_ORDER.includes(p.category) ? p.category : "projects", linkedPrefix: null, source: "facebook" });
+  }
+  return out.sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category) || a.name.localeCompare(b.name));
 }
 
 // --- historical backfill (admin only; caller enforces requireAdmin) ----

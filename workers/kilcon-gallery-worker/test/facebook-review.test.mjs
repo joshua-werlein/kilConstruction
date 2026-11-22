@@ -917,3 +917,106 @@ test("import-run into a chosen gallery for a mixed album, and webhook auto-impor
   await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_105`, published: 1, from: { id: PAGE_ID } }], reviewEnv());
   assert.equal((await rows("SELECT project_id FROM facebook_photos WHERE fb_photo_id = '9895'"))[0].project_id, ganzId, "new posts still import automatically");
 });
+
+// --- Import Approved Photos into existing manual website galleries -------------
+
+const putManual = (key) => baseEnv.GALLERY_BUCKET.put(key, JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+async function manualSetup() {
+  const ganzId = await ganzSetup();
+  for (const k of ["Furniture/Cutting Boards/Davis_Cutting_Board.jpg", "Furniture/Cabinets/Sandberg_1.jpg", "Furniture/Epoxy/Table_1.jpg",
+    "Remodels/3D_Autobody/Exterior_1.jpg", "New Construction/Kitelinger Shell/1.jpg", "Projects/Schwennson House/1.jpg",
+    "Highlights/home.jpg", "Apparel/Coats/coat.jpg"]) await putManual(k);
+  stubPageAlbums([[GANZ, "Ganz Garage", 16], ["760", "Cutting boards", 3], ["890", "Mobile uploads", 2]]);
+  stubAlbum("760", "Cutting boards", ["9761", "9762", "9763"], { created: OLD });
+  stubAlbum("890", "Mobile uploads", ["9891", "9892"], { created: OLD });
+  await decide([{ photoId: "9761", albumId: "760", decision: "import" }, { photoId: "9762", albumId: "760", decision: "import" },
+    { photoId: "9763", albumId: "760", decision: "skip", duplicateOf: "Furniture/Cutting Boards/Davis_Cutting_Board.jpg" },
+    { photoId: "9891", albumId: "890", decision: "import" }]);
+  return ganzId;
+}
+
+test("import-plan lists every website gallery by category, once, without Highlights, Apparel or hidden galleries", async () => {
+  const ganzId = await manualSetup();
+  // Schwennson House is already linked; a hidden Facebook gallery must not be offered.
+  const linked = (await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "Schwennson House", linkedPrefix: "Projects/Schwennson House/" } })).json()).project.id;
+  const hidden = (await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "Old Hidden", category: "projects" } })).json()).project.id;
+  await baseEnv.DB.prepare("UPDATE facebook_projects SET hidden = 1 WHERE id = ?").bind(hidden).run();
+  const plan = await (await call(PLAN("760"), { env: reviewEnv() })).json();
+  const rowsOut = plan.galleries.map((g) => [g.category, g.name, g.source, g.id === null ? null : "id"]);
+  assert.deepEqual(rowsOut, [
+    ["projects", "Ganz Garage", "facebook", "id"],
+    ["projects", "Schwennson House", "website", "id"],
+    ["new-construction", "Kitelinger Shell", "website", null],
+    ["remodels", "3D Autobody", "website", null],
+    ["furniture", "Cabinets", "website", null],
+    ["furniture", "Cutting Boards", "website", null],
+    ["furniture", "Epoxy", "website", null],
+  ]);
+  assert.equal(plan.galleries.find((g) => g.name === "Schwennson House").value, `project:${linked}`, "a linked website gallery appears once, by its record");
+  assert.equal(plan.galleries.find((g) => g.name === "Cutting Boards").value, "manual:Furniture/Cutting Boards/");
+  assert.ok(plan.galleries.some((g) => g.id === ganzId));
+  assert.ok(!plan.galleries.some((g) => /Highlights|Apparel|Old Hidden/.test(g.name + g.linkedPrefix)));
+});
+
+test("approved photos import straight into an existing manual gallery: no duplicate images, no new public gallery", async () => {
+  await manualSetup();
+  const prefix = "Furniture/Cutting Boards/";
+  const base = { albumId: "760", photoIds: ["9761", "9762"] };
+  const before = await snapshotAll();
+
+  // Check: names the website gallery by folder, writes nothing.
+  const dry = await (await runImport({ ...base, linkedPrefix: prefix, mixedAlbum: true, dryRun: true })).json();
+  assert.deepEqual([dry.new, dry.refused, dry.destination], [2, 0, { id: null, slug: null, name: "Cutting Boards", linkedPrefix: prefix }]);
+  assert.deepEqual(await snapshotAll(), before, "the check created no link and no mapping");
+  assert.equal((await runImport({ ...base, linkedPrefix: prefix, dryRun: false, expectedCount: 2, confirm: "IMPORT APPROVED" })).status, 409,
+    "a real run needs the link record first");
+
+  // Confirm, as the page does: create or reuse the link, link the album, import.
+  const first = await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "Cutting Boards", linkedPrefix: prefix } })).json();
+  const again = await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "Cutting Boards", linkedPrefix: prefix } })).json();
+  assert.equal(again.project.id, first.project.id, "the existing link is reused, never duplicated");
+  const pid = first.project.id;
+  assert.equal((await call(`${ADMIN}/album-link`, { method: "POST", body: { albumId: "760", projectId: pid } })).status, 200);
+  const run = await (await runImport({ ...base, projectId: pid, dryRun: false, expectedCount: 2, confirm: "IMPORT APPROVED" })).json();
+  assert.equal(run.imported, 2);
+
+  // The photos appear inside the existing gallery; no extra gallery card anywhere.
+  const page = await (await call(`${SITE}/api/gallery-api?project=furniture/cutting-boards`, { admin: false })).json();
+  assert.equal(page.items.length, 3, "1 manual photo + 2 imported");
+  const furniture = await (await call(`${SITE}/api/gallery-api?list=furniture`, { admin: false })).json();
+  assert.equal(furniture.furniture.filter((p) => /cutting/i.test(p.name)).length, 1, "still one Cutting Boards gallery"); // category lists are keyed by category
+  assert.deepEqual(await rows("SELECT category, linked_prefix FROM facebook_projects WHERE id = ?", pid), [{ category: "furniture", linked_prefix: prefix }]);
+  assert.deepEqual(await keys(baseEnv.GALLERY_BUCKET).then((k) => k.filter((x) => x.startsWith("Furniture/Cutting Boards/"))), ["Furniture/Cutting Boards/Davis_Cutting_Board.jpg"], "manual files untouched");
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE fb_photo_id = '9763'")).length, 0, "the Duplicate / Skip photo stays out");
+  // The plan now offers the same gallery by its record, still once.
+  const plan = await (await call(PLAN("760"), { env: reviewEnv() })).json();
+  assert.deepEqual(plan.linked, { id: pid, name: "Cutting Boards", slug: first.project.slug, usable: true });
+});
+
+test("a mixed album can send approved photos to a manual gallery without linking the album", async () => {
+  await manualSetup();
+  const prefix = "Remodels/3D_Autobody/";
+  const dry = await (await runImport({ albumId: "890", photoIds: ["9891"], linkedPrefix: prefix, mixedAlbum: true, dryRun: true })).json();
+  assert.deepEqual([dry.new, dry.destination.name], [1, "3D Autobody"]);
+  const pid = (await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "3D Autobody", linkedPrefix: prefix } })).json()).project.id;
+  const run = await (await runImport({ albumId: "890", photoIds: ["9891"], projectId: pid, mixedAlbum: true, dryRun: false, expectedCount: 1, confirm: "IMPORT APPROVED" })).json();
+  assert.equal(run.imported, 1);
+  assert.deepEqual(await rows("SELECT album_id FROM facebook_album_mappings WHERE album_id = '890'"), [], "Mobile uploads stays unmapped");
+  assert.equal((await rows("SELECT category FROM facebook_projects WHERE id = ?", pid))[0].category, "remodels");
+});
+
+test("website gallery destinations are validated; the preview path can't be reached from a request body", async () => {
+  await manualSetup();
+  const before = await snapshotAll();
+  for (const bad of ["Highlights/", "Apparel/Coats/", "Furniture/Nope/", "../Furniture/Epoxy/", "Furniture/Epoxy", 5, null]) {
+    const r = await runImport({ albumId: "760", photoIds: ["9761"], linkedPrefix: bad, mixedAlbum: true, dryRun: true });
+    assert.equal(r.status, 400, String(bad));
+  }
+  // An album already linked to a gallery can't be checked against another website gallery.
+  assert.equal((await runImport({ albumId: GANZ, photoIds: [seven[0]], linkedPrefix: "Furniture/Epoxy/", dryRun: true })).status, 409);
+  // The historical route ignores any previewProject in the body.
+  const injected = await call(BACKFILL, { method: "POST", body: { targeted: true, dryRun: true, albumId: "760", photoIds: ["9761"], projectId: 999,
+    previewProject: { id: null, name: "x", kind: "project", hidden: 0 } } });
+  assert.equal(injected.status, 404);
+  assert.deepEqual(await snapshotAll(), before);
+});
