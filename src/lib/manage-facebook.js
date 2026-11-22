@@ -74,6 +74,8 @@ export function actionTargets(photos) {
     restore: ids((p) => !p.deleted && p.hidden && !p.removedOnFacebook),
     move: ids((p) => !p.deleted),
     purge: ids((p) => !p.deleted),
+    highlightOn: ids((p) => !p.deleted && !p.highlight),
+    highlightOff: ids((p) => !p.deleted && p.highlight),
   };
 }
 

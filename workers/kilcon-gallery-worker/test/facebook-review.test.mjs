@@ -120,7 +120,7 @@ async function historyRun(env = makeEnv(), extra = {}) {
 before(async () => {
   proxy = await getPlatformProxy({ configPath: path.join(repoRoot, "workers/kilcon-gallery-worker/wrangler.toml"), persist: false });
   baseEnv = proxy.env;
-  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql", "017_facebook_photo_reviews.sql"]) {
+  for (const file of ["013_facebook_sync.sql", "014_facebook_removal_retention.sql", "015_facebook_discovery.sql", "016_facebook_project_descriptions.sql", "017_facebook_photo_reviews.sql", "018_facebook_highlights.sql"]) {
     const sql = await readFile(path.join(repoRoot, "migrations", file), "utf8");
     const statements = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n").split(";").map((s) => s.trim()).filter(Boolean);
     await baseEnv.DB.batch(statements.map((s) => baseEnv.DB.prepare(s)));
@@ -916,4 +916,102 @@ test("import-run into a chosen gallery for a mixed album, and webhook auto-impor
   stubPost(`${PAGE_ID}_105`, ["9895"], NEW);
   await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_105`, published: 1, from: { id: PAGE_ID } }], reviewEnv());
   assert.equal((await rows("SELECT project_id FROM facebook_photos WHERE fb_photo_id = '9895'"))[0].project_id, ganzId, "new posts still import automatically");
+});
+
+// --- caption control tags (docs/facebook-hashtags.md) -------------------------
+
+function taggedPost(postId, ids, message, album, created = NEW) {
+  for (const id of ids) stubPhoto(id, { created, album });
+  stubPost(postId, ids, created);
+  graph.get(postId).message = message;
+}
+const addPost = (postId, env) => webhook([{ item: "status", verb: "add", post_id: postId, published: 1, from: { id: PAGE_ID } }], env);
+let editSeq = 0;
+const editPost = (postId, env) => webhook([{ item: "status", verb: "edited", post_id: postId, published: 1, from: { id: PAGE_ID }, message: `edit ${++editSeq}` }], env); // distinct payloads: identical ones are deduplicated
+const highlights = async () => (await (await call(`${SITE}/api/gallery-api?list=highlights`, { admin: false })).json()).items;
+
+test("a category tag names the category of a NEW gallery only; existing galleries keep theirs", async () => {
+  taggedPost(`${PAGE_ID}_201`, ["9201", "9202"], "Bisek barn is up #NewConstruction", { id: "720", name: "Bisek Barn" });
+  await addPost(`${PAGE_ID}_201`);
+  assert.deepEqual((await rows("SELECT name, category FROM facebook_projects"))[0], { name: "Bisek Barn", category: "new-construction" });
+  const page = await (await call(`${SITE}/api/gallery-api?project=new-construction/bisek-barn`, { admin: false })).json();
+  assert.equal(page.items.length, 2);
+  assert.equal(page.project.description, "Bisek barn is up", "the tag is hidden from the description");
+
+  // A later post into the same album with a different tag doesn't recategorise it.
+  taggedPost(`${PAGE_ID}_202`, ["9203"], "Trim work #remodels", { id: "720", name: "Bisek Barn" });
+  await addPost(`${PAGE_ID}_202`);
+  assert.deepEqual(await rows("SELECT name, category FROM facebook_projects"), [{ name: "Bisek Barn", category: "new-construction" }]);
+
+  // Two category tags: nothing is guessed.
+  taggedPost(`${PAGE_ID}_203`, ["9204"], "Shop shelves #furniture #remodels", { id: "721", name: "Pongratz Shop" });
+  await addPost(`${PAGE_ID}_203`);
+  assert.equal((await rows("SELECT category FROM facebook_projects WHERE name = 'Pongratz Shop'"))[0].category, "projects");
+  assert.equal((await rows("SELECT COUNT(*) AS n FROM facebook_projects"))[0].n, 2, "no duplicate galleries");
+});
+
+test("a completed-build post without an album uses its category tag; untagged posts still go to Recent", async () => {
+  taggedPost(`${PAGE_ID}_210`, ["9211", "9212", "9213"], "Finished the Ripley kitchen remodel! #remodels", undefined);
+  for (const id of ["9211", "9212", "9213"]) delete graph.get(id).album;
+  await addPost(`${PAGE_ID}_210`);
+  const [p] = await rows("SELECT category, kind FROM facebook_projects");
+  assert.deepEqual(p, { category: "remodels", kind: "project" });
+  taggedPost(`${PAGE_ID}_211`, ["9214"], "Progress today #furniture", undefined);
+  delete graph.get("9214").album;
+  await addPost(`${PAGE_ID}_211`);
+  assert.equal((await rows("SELECT p.kind FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id WHERE ph.fb_photo_id = '9214'"))[0].kind, "recent",
+    "a tag never forces a gallery");
+});
+
+test("#highlight adds photos to Highlights; an edit can remove it; an admin choice locks it", async () => {
+  await baseEnv.GALLERY_BUCKET.put("Highlights/manual.jpg", JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+  taggedPost(`${PAGE_ID}_220`, ["9221", "9222"], "Deck done #highlight #DeckLife", { id: "730", name: "Rieck Deck" });
+  await addPost(`${PAGE_ID}_220`);
+  let h = await highlights();
+  assert.deepEqual(h.map((x) => x.source || "manual"), ["manual", "facebook", "facebook"], "manual Highlights first, then Facebook");
+  assert.ok(h.filter((x) => x.source === "facebook").every((x) => x.thumb.includes("/Facebook/w/480/")), "gated thumbnails");
+  const items = (await (await call(`${SITE}/api/gallery-api?project=rieck-deck`, { admin: false })).json());
+  assert.equal(items.project.description, "Deck done #DeckLife", "only control tags are hidden");
+
+  // The admin keeps one photo in Highlights, then the caption drops the tag.
+  assert.equal((await (await call(`${ADMIN}/photo-update`, { method: "POST", body: { photoIds: ["9221"], highlight: true } })).json()).updated, 1);
+  graph.get(`${PAGE_ID}_220`).message = "Deck done";
+  await editPost(`${PAGE_ID}_220`);
+  assert.deepEqual(await rows("SELECT fb_photo_id, highlight, highlight_locked FROM facebook_photos ORDER BY fb_photo_id"),
+    [{ fb_photo_id: "9221", highlight: 1, highlight_locked: 1 }, { fb_photo_id: "9222", highlight: 0, highlight_locked: 0 }]);
+
+  // The admin removes it; a later #highlight edit can't bring it back.
+  await call(`${ADMIN}/photo-update`, { method: "POST", body: { photoIds: ["9221"], highlight: false } });
+  graph.get(`${PAGE_ID}_220`).message = "Deck done again #highlight";
+  await editPost(`${PAGE_ID}_220`);
+  assert.deepEqual((await rows("SELECT fb_photo_id, highlight FROM facebook_photos ORDER BY fb_photo_id")).map((r) => r.highlight), [0, 1]);
+
+  // Hidden photos never appear in Highlights.
+  await call(`${ADMIN}/photo-update`, { method: "POST", body: { photoIds: ["9222"], hidden: true } });
+  assert.deepEqual((await highlights()).map((x) => x.source || "manual"), ["manual"]);
+  assert.equal((await call(`${ADMIN}/photo-update`, { method: "POST", body: { photoIds: ["9222"], highlight: "yes" } })).status, 400);
+  const listed = (await (await call(`${ADMIN}/photos?projectId=${(await rows("SELECT project_id FROM facebook_photos LIMIT 1"))[0].project_id}`)).json()).photos;
+  assert.deepEqual(listed.map((p) => [p.photoId, p.highlight, p.highlightLocked]).sort(), [["9221", false, true], ["9222", true, false]]);
+});
+
+test("historical imports ignore caption tags", async () => {
+  const projectId = await ganzSetup();
+  graph.get(seven[0]).name = "Old garage photo #highlight #furniture";
+  const r = await (await call(BACKFILL, { method: "POST", body: { targeted: true, dryRun: false, albumId: GANZ, projectId, photoIds: [seven[0]], expectedCount: 1 } })).json();
+  assert.equal(r.imported, 1);
+  assert.equal((await rows("SELECT highlight FROM facebook_photos WHERE fb_photo_id = ?", seven[0]))[0].highlight, 0);
+  assert.equal((await rows("SELECT category FROM facebook_projects WHERE id = ?", projectId))[0].category, "projects");
+  const item = (await (await call(`${SITE}/api/gallery-api?project=ganz-garage`, { admin: false })).json()).items.find((i) => i.id === seven[0]);
+  assert.equal(item.description, "Old garage photo", "tags are still hidden in the caption");
+});
+
+test("the full historical scan ignores caption tags (they apply to live content only)", async () => {
+  stubPageAlbums([["745", "Kelly Barn", 1]]);
+  stubAlbum("745", "Kelly Barn", ["9245"], { created: OLD });
+  graph.get("9245").name = "Old barn job #highlight #remodels";
+  await decide([{ photoId: "9245", albumId: "745", decision: "import" }]);
+  const r = await historyRun();
+  assert.equal(r.photos.find((p) => p.id === "9245").outcome, "imported");
+  assert.equal((await rows("SELECT highlight FROM facebook_photos WHERE fb_photo_id = '9245'"))[0].highlight, 0, "no Highlights from a historical caption");
+  assert.equal((await rows("SELECT category FROM facebook_projects WHERE name = 'Kelly Barn'"))[0].category, "projects", "no category from a historical caption");
 });

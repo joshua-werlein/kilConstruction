@@ -14,6 +14,7 @@ import {
   runFacebookBackfill,
   handleFacebookAdmin,
   listFacebookProjects,
+  listFacebookHighlights,
   getFacebookProject,
   getLinkedFacebookGallery,
   runRetention,
@@ -619,6 +620,9 @@ async function listHighlights(env, request) {
 
     // Optional: stable order
     items.sort((a, b) => a.name.localeCompare(b.name));
+
+    // Facebook photos tagged #highlight (or chosen on /admin/manage), newest first.
+    if (fbEnabled(env)) items.push(...(await listFacebookHighlights(env, galleryUrls(env))));
 
     return json({ items }, 200, request);
   } catch (err) {

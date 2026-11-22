@@ -967,7 +967,7 @@ test("Manage Images: Facebook galleries are managed only through the Facebook ad
   assert.equal((await (await purge(fbManage.PURGE_PHRASE)).json()).purged, 1);
   const gone = (await photos()).find((p) => p.photoId === list[0].photoId);
   assert.equal(fbManage.photoState(gone).key, "deleted");
-  assert.deepEqual(fbManage.actionTargets([gone]), { hide: [], restore: [], move: [], purge: [] });
+  assert.deepEqual(fbManage.actionTargets([gone]), { hide: [], restore: [], move: [], purge: [], highlightOn: [], highlightOff: [] });
   assert.ok(!(await keys(baseEnv.PRIVATE_BUCKET)).includes(fbKey));
 });
 
@@ -976,6 +976,19 @@ test("Manage Images Facebook actions require the admin cookie", async () => {
     const res = await call(`/api/gallery-api/facebook/admin/${sub}`, { method, body: method === "POST" ? { photoIds: ["1"], hidden: true, confirm: "PERMANENTLY DELETE" } : undefined });
     assert.equal(res.status, 401, sub);
   }
+});
+
+test("caption tags fail soft before migration 018 (this suite runs without it)", async () => {
+  stubPost(`${PAGE_ID}_450`, ["5451"], { message: "Shop done #highlight #furniture", album: { id: "995", name: "Ripley Shop" } });
+  await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_450`)]));
+  assert.deepEqual((await rows("SELECT status FROM facebook_photos WHERE fb_photo_id = '5451'")).map((r) => r.status), ["imported"], "the import itself is unaffected");
+  assert.equal((await rows("SELECT category FROM facebook_projects WHERE name = 'Ripley Shop'"))[0].category, "furniture", "category tags need no migration");
+  const h = await call("/api/gallery-api?list=highlights");
+  assert.equal(h.status, 200);
+  assert.ok((await h.json()).items.every((i) => i.source !== "facebook"), "no Facebook highlights without the columns");
+  const res = await call("/api/gallery-api/facebook/admin/photo-update", { method: "POST", admin: true, body: { photoIds: ["5451"], highlight: true } });
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /migration 018/);
 });
 
 test("admin endpoints require the admin cookie", async () => {
