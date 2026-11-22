@@ -62,10 +62,24 @@ if (!isAdmin) {
 
         <div id="status" class="status-row">Loading projects…</div>
 
+        <h2 class="admin-subtitle">Manual galleries (R2 folders)</h2>
         <ul id="results" class="results-list" data-public-api={PUBLIC_GALLERY_API} data-admin-api={ADMIN_API_BASE}></ul>
+    </section>
+
+    <section class="panel" id="mf-section" data-fb-api="/api/gallery-api/facebook/admin" hidden>
+        <h2 class="admin-subtitle">Facebook galleries</h2>
+        <p class="image-meta">
+            Imported from the Facebook Page. Their photos are managed here through the Facebook
+            controls (hide, restore, move, permanent deletion), not as R2 folders. Names,
+            categories and new galleries are set on <a href="/admin/facebook">Facebook sync</a>.
+        </p>
+        <div id="mf-status" class="status-row" role="status" aria-live="polite"></div>
+        <ul id="mf-results" class="results-list"></ul>
     </section>
     <script>
         import initManagePage from "./manage-script";
+        import initManageFacebook from "./manage-facebook";
         initManagePage();
+        initManageFacebook();
     </script>
 </AdminLayout>

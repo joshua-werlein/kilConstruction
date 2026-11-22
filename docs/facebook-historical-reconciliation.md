@@ -1,8 +1,12 @@
 # Historical Facebook album reconciliation — Phase 2 report (2026-11-21)
 
-**Status: analysis only.** Nothing has been imported. Discovery and historical import remain
-disabled. No D1, R2, mapping, Meta or Cloudflare changes were made. This file is uncommitted
-pending review.
+**Status (2026-11-22):**
+- **Imported:** Ganz Garage only (7 approved photos, 15 in total; see docs/facebook-photo-review.md).
+- **Duplicates:** the visual duplicate check is done (§10).
+- **Remaining:** about 109 importable photos, pending the owner's decisions in §10.
+- **Switches:** historical import and discovery remain disabled.
+
+§1–§9 are the original 2026-11-21 analysis.
 
 ## 1. Sources
 
@@ -201,3 +205,111 @@ continuing; large-image validation is the risk.
 The analyzer, inventory, hashes and duplicate pairs are in the session scratchpad `phase2/`
 folder. They are regenerable from the public site, and the Facebook-side comparison needs only the
 images from §4.
+
+## 10. Visual duplicate check, done 2026-11-22 (resolves §4)
+
+**Method.** I ran a read-only pass in the owner's signed-in browser, using the same admin
+endpoints, image sizes and dHash code as the comparison page (`src/lib/photo-hash.js`):
+- `review-albums` and `review-album` for every album, photo, import state and decision;
+- `review-site-gallery?all=1` and `review-site-image` for all **310** manual website images;
+- `review-image` for all **394** non-branding Facebook photos, including the 15 already
+  imported.
+
+Each Facebook photo was compared with every website image and with every other Facebook photo.
+There were 0 errors, and no D1, R2 or Meta writes. The per-photo results are kept in the owner's
+browser, in local storage under `kil-recon-2026-11-22` on kilcon.work, for the decisions step.
+
+**The distances separate cleanly.** For the 379 photos not yet imported, the nearest website
+image is at:
+
+| Distance | Photos | Meaning |
+|---|---|---|
+| 0–2 | 179 | the same picture |
+| 3–5 | 20 | the same picture (recompressed or resized) |
+| 6 | 1 | probably the same picture (a Ganz album photo against 3D Autobody) |
+| 11–13 | 9 | unrelated pictures (for example cutting boards against a Wheelman exterior); treated as new |
+| 14+ | 170 | new |
+
+The 9 photos at 11–13 are listed in the browser results. A glance on the review page settles
+them. Fingerprints can miss heavy crops or rotations, so "new" still means "check by eye before
+Import".
+
+### Albums that already have a website gallery (211 photos)
+
+| Album | Photos | Duplicates of the website | New | The duplicates match |
+|---|---|---|---|---|
+| Schwennson | 31 | 23 | **8** | Projects/Schwennson House 22, New Construction 1 |
+| Ford kitchen | 20 | 17 | **3** | Projects/Ford Kitchen 17 |
+| Gibson | 19 | 18 | **1** | Projects/Gibson House 16, New Construction 2 |
+| Pfafe | 19 | 16 | **3** | Projects/Pfaffe House 14, New Construction 2 |
+| Kiley porch | 17 | 17 | 0 | Projects/Kiley Enclosed Porch |
+| D.Dahl Porch | 16 | 10 | **6** | Projects/D. Dahl Porch |
+| Pritchard | 14 | 14 | 0 | Projects/Pritchard Airplane Hanger |
+| Cabinets | 13 | 13 | 0 | Furniture/Cabinets |
+| Wheelman Performance | 9 | 4 | **5** | Projects/Wheelman_Performance |
+| Loretta | 9 | 7 | **2** | Projects/Lorretta_s Shed |
+| Kiley Lean-to | 8 | 7 | **1** | Projects/Kiley Lean-to |
+| Kitelinger House | 8 | 7 | **1** | New Construction/Kitelinger Shell |
+| Cutting boards | 7 | 2 | **5** | Furniture/Cutting Boards |
+| Tyman | 6 | 3 | **3** | Projects/Tyman Shop and House Shell |
+| Fox Hollow Retriever | 6 | 6 | 0 | Projects/Fox_Hollow_Retriever |
+| Riesman | 5 | 5 | 0 | Projects/Riesman Shed |
+| Dahl | 4 | 4 | 0 | Remodels/J&A_Dahl |
+| **Total** | **211** | **173** | **38** | |
+
+### Albums with no website gallery (77 photos)
+
+| Album | Photos | New | Notes |
+|---|---|---|---|
+| Bisek | 15 | 15 | |
+| Pongratz | 13 | 13 | 10 are also in Mobile uploads |
+| Jsme | 13 | 13 | all 13 are also in Mobile uploads; the name is still unexplained |
+| Rieck Deck | 12 | 12 | 4 are also in Mobile uploads |
+| Home | 7 | 7 | 2 are also in Mobile uploads; still unidentified |
+| E. Fankhauser | 3 | 3 | |
+| Fankhauser | 2 | 2 | both are also in Mobile uploads |
+| Zingshiem | 3 | 3 | |
+| Ripley | 2 | 2 | |
+| **Ganz** | 7 | **0–1** | **Not the deck job.** 5 photos duplicate Remodels/3D_Autobody (distances 0–6), and 1 is the Ganz Re-Deck website photo (distance 0). The 7th (`…648318503`) is a 3D Autobody exterior that isn't on the site; it is also in Mobile uploads. |
+
+### Mobile uploads (91 photos)
+
+| Group | Photos | Treatment |
+|---|---|---|
+| Duplicates a website photo | 21 | never import (9 Furniture/Cabinets, 3 Remodels/3D_Autobody, …) |
+| Duplicates a photo in a project album | 37 | never import from Mobile uploads; import the album copy instead (Jsme 13, Pongratz 10, Ganz Garage 5 already imported, Rieck 4, Fankhauser 2, Home 2, Ganz 1) |
+| Appears nowhere else | 33 | **hold**, kept separate until each can be matched to a project |
+
+**Totals:**
+- **Group A:** 38 new (plus at most 1 grey-zone photo).
+- **Group B:** 70 new (plus at most 1 in Ganz).
+- **Mobile uploads:** 33 unique, held.
+
+That is **about 109 importable photos**, not 379, and no project needs a second gallery. The
+branding albums (Profile pictures 4, Cover photos 1) stay excluded.
+
+### Decisions for the owner (replaces §8)
+
+1. **Canonical gallery for projects that exist in two categories.** The Facebook duplicates
+   match the Projects copies almost entirely, so I recommend:
+   - Projects/ for Schwennson, Gibson, Pfaffe, Ford, Wheelman, Loretta, Tyman, Pritchard and
+     Riesman;
+   - New Construction/Kitelinger Shell, the only copy;
+   - Remodels/J&A_Dahl.
+
+   The twin in the other category won't show the new Facebook photos. Removing the twin folders
+   would delete R2 files, so it needs its own decision; I recommend leaving them for now.
+2. **New galleries.** For each, confirm or give a display name and category:
+   - Bisek, Pongratz and Rieck Deck;
+   - **Jsme**, which needs a real name;
+   - Zingshiem and Ripley;
+   - **Fankhauser**: one gallery for "E. Fankhauser" + "Fankhauser"?
+   - **Home**: what is it, or should it be excluded?
+3. **Ganz album.** Skip the 6 duplicates. The 7th: import it into Remodels/3D_Autobody, or skip it?
+4. **Recording the duplicates.** Do you approve saving **Skip** decisions with `duplicate_of`
+   for the duplicates? That's the 173 from Group A, 6 from Ganz, and the 58 duplicate copies in
+   Mobile uploads. Then the review page shows them as decided.
+   - This only writes `facebook_photo_reviews` rows.
+   - It never approves anything.
+   - Import decisions stay yours, photo by photo.
+5. **Mobile uploads:** keep the 33 unique photos held (recommended).

@@ -780,10 +780,12 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
   // Grouping needs one photo's details (album); the rest are fetched one at a
   // time while importing, so a large album makes steady progress per run.
   const isForeign = (photo) => cleanId(photo?.from?.id) && photo.from.id !== pageId;
+  // Profile pictures and cover photos are branding, never portfolio content.
+  const isExcluded = (photo) => isForeign(photo) || isBrandingPhoto(photo);
   let first = null;
   while (pending.length && !first) {
     const photo = await graphGet(env, pending[0].id, { fields: PHOTO_FIELDS }, budget);
-    if (isForeign(photo)) {
+    if (isExcluded(photo)) {
       pending.shift();
       skipped++;
     } else {
@@ -835,7 +837,7 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
   let imported = 0;
   for (const { id } of pending) {
     const photo = id === first.id ? first : await graphGet(env, id, { fields: PHOTO_FIELDS }, budget);
-    if (isForeign(photo)) {
+    if (isExcluded(photo)) {
       skipped++;
       continue;
     }
@@ -1097,6 +1099,10 @@ async function getPhotoRow(db, photoId) {
     .first();
 }
 
+function isBrandingPhoto(photo) {
+  return albumCollectionKind(photo?.album?.name) === "branding";
+}
+
 function pickLargestImage(images) {
   if (!Array.isArray(images)) return null;
   let best = null;
@@ -1131,6 +1137,7 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
   // Callers must say "live" explicitly; anything else counts as historical.
   const excluded = await reviewGate(env, photoId, { mode: reviewMode });
   if (excluded) return { imported: false, reason: excluded };
+  if (isBrandingPhoto(photo)) return { imported: false, reason: "branding-album" };
 
   // Claim: a new row, or a previously failed one. A failed row keeps any
   // admin-chosen project and hidden flag.
@@ -1818,6 +1825,7 @@ export async function handleFacebookAdmin(request, env, sub, urls) {
     if (sub === "purge") return await adminPurge(env, body);
     if (sub === "project-update") return await adminProjectUpdate(env, body);
     if (sub === "project-create") return await adminProjectCreate(env, body);
+    if (sub === "album-link") return await adminAlbumLink(env, body);
     if (sub === "photo-update") return await adminPhotoUpdate(env, body);
     if (sub === "retry") return await adminRetry(env);
     return jsonResult({ error: "Not found" }, 404);
@@ -2020,6 +2028,55 @@ async function adminProjectCreate(env, body) {
   if (!FB_CATEGORIES.includes(category)) return jsonResult({ error: "Invalid category" }, 400);
   const p = await createProject(env, { name, reason: "admin", category, createdBy: "admin" });
   return jsonResult({ ok: true, project: projectOut(await loadProject(env.DB, p.id)) });
+}
+
+// Link one Page album to one existing portfolio gallery, without importing
+// anything. Needed before a targeted import into a gallery that was created
+// by hand or linked to a manual folder. Writes one locked album mapping row;
+// later photos added to the album on Facebook follow it (normal live rule).
+// Refuses branding and generic albums (Mobile uploads stays unmapped), the
+// Recent Project Updates gallery, albums the Page doesn't own, and albums
+// already linked to a different gallery.
+async function adminAlbumLink(env, body) {
+  const albumId = cleanId(body?.albumId);
+  const projectId = Number.isSafeInteger(body?.projectId) && body.projectId > 0 ? body.projectId : null;
+  if (!albumId || !projectId) return jsonResult({ error: "albumId and projectId required" }, 400);
+  const pageId = configuredPageId(env);
+  if (!pageId) return jsonResult({ error: "FB_PAGE_ID is not configured" }, 500);
+
+  const project = await env.DB.prepare(`SELECT id, slug, name, kind, fb_album_id FROM facebook_projects WHERE id = ?`).bind(projectId).first();
+  if (!project) return jsonResult({ error: "Project not found" }, 404);
+  if (project.kind !== "project") return jsonResult({ error: "Albums can't be linked to Recent Project Updates" }, 409);
+
+  const [mapped, owner] = await Promise.all([
+    env.DB.prepare(`SELECT project_id FROM facebook_album_mappings WHERE album_id = ?`).bind(albumId).first(),
+    env.DB.prepare(`SELECT id FROM facebook_projects WHERE fb_album_id = ?`).bind(albumId).first(),
+  ]);
+  const linkedTo = mapped?.project_id ?? owner?.id ?? null;
+  if (linkedTo !== null && linkedTo !== projectId) return jsonResult({ error: "This album is already linked to another gallery", projectId: linkedTo }, 409);
+
+  let album;
+  try {
+    album = await graphGet(env, albumId, { fields: "id,name,from" }, newBudget(2));
+  } catch (e) {
+    return jsonResult({ error: redact(e?.message || e, env) }, 502);
+  }
+  if (cleanId(album?.id) !== albumId || cleanId(album?.from?.id) !== pageId) return jsonResult({ error: "Album not found on this Page" }, 404);
+  const kind = albumCollectionKind(album.name);
+  if (kind !== "project") return jsonResult({ error: `${kind === "branding" ? "Branding" : "Unsorted"} albums can't be linked to a gallery` }, 409);
+
+  if (mapped?.project_id === projectId || project.fb_album_id === albumId) {
+    return jsonResult({ ok: true, changed: false, albumId, project: { id: project.id, slug: project.slug, name: project.name } });
+  }
+  await env.DB
+    .prepare(`INSERT INTO facebook_album_mappings (album_id, project_id, locked) VALUES (?, ?, 1)
+              ON CONFLICT(album_id) DO NOTHING`)
+    .bind(albumId, projectId)
+    .run();
+  const now = await env.DB.prepare(`SELECT project_id FROM facebook_album_mappings WHERE album_id = ?`).bind(albumId).first();
+  if (now?.project_id !== projectId) return jsonResult({ error: "This album is already linked to another gallery", projectId: now?.project_id ?? null }, 409);
+  console.log("[facebook] album linked", { albumId, projectId });
+  return jsonResult({ ok: true, changed: true, albumId, album: String(album.name || "").slice(0, 200), project: { id: project.id, slug: project.slug, name: project.name } });
 }
 
 async function adminPhotoUpdate(env, body) {
@@ -2479,6 +2536,7 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
         }
         return { outcome: 'existing', project: improved ? previewProposal(improved) : null };
       }
+      if (isBrandingPhoto({ album: photo.album || task.album })) return { outcome: 'excluded', project: { name: 'Excluded', reason: 'branding-album', action: 'exclude' } };
       const albumIds = [task.album?.id, photo.album?.id].filter(Boolean);
       if (albumIds.some(id => mappings?.[id] === 'exclude')) return { outcome: 'excluded', project: { name: 'Excluded', reason: 'admin', action: 'exclude' } };
       // Per-photo review gate (preview and import alike), before any project

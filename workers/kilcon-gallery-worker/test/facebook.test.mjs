@@ -906,6 +906,78 @@ async function seedAlbumProject() {
   return (await rows("SELECT id FROM facebook_projects WHERE slug = 'baker-porch'"))[0].id;
 }
 
+test("Manage Images: Facebook galleries are managed only through the Facebook admin API", async () => {
+  const fbManage = await import("../../../src/lib/manage-facebook.js");
+  const projectId = await seedAlbumProject();
+  const ov = await getJson("/api/gallery-api/facebook/admin/overview", { admin: true });
+  const gallery = fbManage.facebookGalleries(ov).find((g) => g.id === projectId);
+  assert.deepEqual([gallery.name, gallery.badge, gallery.category, gallery.publicPath, gallery.photoCount, gallery.visibleCount],
+    ["Baker Porch", "Facebook", "Projects", "/projects/baker-porch", 2, 2]);
+
+  // The manual folder listing never shows Facebook/ as a folder (it isn't one).
+  const manual = await getJson("/api/gallery-api?all=1", { admin: true });
+  assert.ok(!manual.projects.some((p) => /^Facebook\b/i.test(p.prefix || "")), "no Facebook folder among manual galleries");
+
+  const photos = async () => (await getJson(`/api/gallery-api/facebook/admin/photos?projectId=${projectId}`, { admin: true })).photos;
+  let list = await photos();
+  assert.ok(list.every((p) => fbManage.safeAdminPath(p.previewUrl)), "the page accepts every preview URL the API returns");
+  assert.deepEqual(list.map((p) => fbManage.photoState(p).key), ["visible", "visible"]);
+
+  // Hide, then restore, using exactly the IDs the page would send.
+  const update = (body) => call("/api/gallery-api/facebook/admin/photo-update", { method: "POST", admin: true, body });
+  const targets = fbManage.actionTargets([list[0]]);
+  assert.equal((await (await update({ photoIds: targets.hide, hidden: true })).json()).updated, 1);
+  list = await photos();
+  const hidden = list.find((p) => p.photoId === targets.hide[0]);
+  assert.equal(fbManage.photoState(hidden).key, "hidden");
+  assert.ok(!(await keys(baseEnv.GALLERY_BUCKET)).includes(`Facebook/${hidden.photoId}.jpg`), "hidden photo leaves public storage");
+  assert.deepEqual(fbManage.actionTargets([hidden]).restore, [hidden.photoId]);
+  assert.equal((await (await update({ photoIds: [hidden.photoId], hidden: false })).json()).updated, 1);
+  assert.ok((await keys(baseEnv.GALLERY_BUCKET)).includes(`Facebook/${hidden.photoId}.jpg`), "restored photo is public again");
+
+  // Move into another gallery; it stays there (project_locked).
+  const other = await (await call("/api/gallery-api/facebook/admin/project-create", { method: "POST", admin: true, body: { name: "Baker Deck", category: "projects" } })).json();
+  const otherId = other.project?.id ?? other.id;
+  assert.ok(fbManage.moveTargets(await getJson("/api/gallery-api/facebook/admin/overview", { admin: true }), projectId).some((t) => t.id === otherId));
+  assert.equal((await (await update({ photoIds: [list[1].photoId], projectId: otherId })).json()).updated, 1);
+  assert.deepEqual((await rows("SELECT project_id, project_locked FROM facebook_photos WHERE fb_photo_id = ?", list[1].photoId))[0], { project_id: otherId, project_locked: 1 });
+
+  // Manual R2 endpoints refuse Facebook keys in every direction; nothing changes.
+  const before = [await keys(baseEnv.GALLERY_BUCKET), await keys(baseEnv.PRIVATE_BUCKET)];
+  const fbKey = `Facebook/${list[0].photoId}.jpg`;
+  for (const [sub, body] of [
+    ["delete", { key: fbKey }],
+    ["delete-project", { prefix: "Facebook/" }],
+    ["rename", { oldKey: fbKey, newKey: "Projects/Stolen/1.jpg" }],
+    ["rename", { oldKey: "Projects/Baker/1.jpg", newKey: fbKey }],
+    ["rename-prefix", { oldPrefix: "Facebook/", newPrefix: "Projects/Stolen/" }],
+    ["rename-prefix", { oldPrefix: "Projects/Baker/", newPrefix: "Facebook/" }],
+  ]) {
+    const res = await call(`/api/gallery-api/${sub}`, { method: "POST", admin: true, body });
+    assert.equal(res.status, 400, `${sub} ${JSON.stringify(body)}`);
+  }
+  assert.ok([400, 404].includes((await call("/api/gallery-api/list-images?prefix=Facebook/", { admin: true })).status));
+  assert.deepEqual([await keys(baseEnv.GALLERY_BUCKET), await keys(baseEnv.PRIVATE_BUCKET)], before);
+
+  // Permanent deletion needs the exact phrase the page asks for.
+  const purge = (confirm) => call("/api/gallery-api/facebook/admin/purge", { method: "POST", admin: true, body: { photoIds: [list[0].photoId], confirm } });
+  assert.equal((await purge("permanently delete")).status, 400);
+  assert.equal(fbManage.purgeConfirmed(" PERMANENTLY DELETE "), true);
+  assert.equal(fbManage.PURGE_PHRASE, "PERMANENTLY DELETE");
+  assert.equal((await (await purge(fbManage.PURGE_PHRASE)).json()).purged, 1);
+  const gone = (await photos()).find((p) => p.photoId === list[0].photoId);
+  assert.equal(fbManage.photoState(gone).key, "deleted");
+  assert.deepEqual(fbManage.actionTargets([gone]), { hide: [], restore: [], move: [], purge: [] });
+  assert.ok(!(await keys(baseEnv.PRIVATE_BUCKET)).includes(fbKey));
+});
+
+test("Manage Images Facebook actions require the admin cookie", async () => {
+  for (const [method, sub] of [["GET", "overview"], ["GET", "photos?projectId=1"], ["POST", "photo-update"], ["POST", "purge"]]) {
+    const res = await call(`/api/gallery-api/facebook/admin/${sub}`, { method, body: method === "POST" ? { photoIds: ["1"], hidden: true, confirm: "PERMANENTLY DELETE" } : undefined });
+    assert.equal(res.status, 401, sub);
+  }
+});
+
 test("admin endpoints require the admin cookie", async () => {
   for (const [method, sub] of [["GET", "overview"], ["GET", "photos?projectId=1"], ["GET", "photo-file?id=1"],
     ["POST", "project-update"], ["POST", "photo-update"], ["POST", "project-create"], ["POST", "retry"]]) {

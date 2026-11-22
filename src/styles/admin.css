@@ -599,6 +599,78 @@ ul.results-list ul.children-list > li.child-item > input.select-checkbox {
     flex-shrink: 0;
 }
 
+/* ===== Facebook galleries in Manage Images ===== */
+#mf-section[hidden] { display: none; }
+
+.mf-badge {
+    display: inline-block;
+    margin-left: 0.35rem;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: #e7f0ff;
+    color: #1d4ed8;
+    font-size: 0.72rem;
+    font-weight: 600;
+    vertical-align: middle;
+}
+
+.mf-gallery .item-header > a { margin-right: 1rem; white-space: nowrap; }
+
+.mf-gallery-body { padding: 0.5rem 1rem 0.25rem 1.8rem; }
+.mf-gallery-body[hidden] { display: none; }
+
+.mf-actions {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+    margin-bottom: 0.4rem;
+}
+
+.mf-purge-phrase { min-width: 13rem; padding: 0.25rem 0.4rem; font-size: 0.85rem; }
+
+ul.mf-photo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 0.6rem;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.mf-photo {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.35rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+    position: relative;
+}
+
+.mf-photo input { position: absolute; top: 0.5rem; left: 0.5rem; }
+
+.mf-photo img,
+.mf-thumb-missing {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    border-radius: 6px;
+    background: #f3f4f6;
+}
+
+.mf-thumb-missing { display: flex; align-items: center; justify-content: center; color: #6b7280; font-size: 0.8rem; }
+
+.mf-state { font-size: 0.78rem; font-weight: 600; color: #166534; }
+.mf-photo--hidden .mf-state,
+.mf-photo--removed .mf-state,
+.mf-photo--importing .mf-state { color: #92400e; }
+.mf-photo--failed .mf-state,
+.mf-photo--deleted .mf-state { color: #b91c1c; }
+.mf-photo--hidden img,
+.mf-photo--removed img { opacity: 0.55; }
+
 /* ===== Invisible labels for screen readers ===== */
 .sr-only {
     position: absolute;

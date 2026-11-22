@@ -1,20 +1,16 @@
 # Historical Facebook photo review
 
-Status: **deployed 2026-11-21.**
+Status: **deployed 2026-11-21; comparison UI and targeted import added 2026-11-22.**
 
 | Component | Version |
 |---|---|
 | Migration 017 | Applied (D1 restore bookmark from before it: `0000069f-00000000-0000512a-70c3e47bc9e5d69d289848bace0ac932`) |
-| Worker | `18177ff4` (tag `780127e`) |
-| Pages | `c9e92942` (`780127e`), then the layout fix `dccbe970` (`47dc2e7`) |
+| Worker | `8c893925` (tag `d8ff7a9`, targeted import; historical import off). Before it: `18177ff4` (`780127e`) |
+| Pages | `02aaaf2a` (`9aa5b0a`, side-by-side comparison cards). Rollback: `dccbe970` (`47dc2e7`) |
 
-Production checks passed 67/67. Signed-out access is refused, and the hourly cron is verified.
-The owner confirmed the page lists 31 albums.
-
-**Pending:**
-
-- the comparison-UI commit `eca9ad3` (branch `task/review-comparison-ui`, not deployed);
-- the owner's save-and-clear decision test.
+- **2026-11-21:** production checks 67/67; signed-out access refused; the hourly cron was verified; 31 albums listed.
+- **2026-11-22, comparison UI:** deployed with 94/94 production checks. The owner tested the page and saved 7 Import decisions for Ganz Garage, after checking duplicates by eye.
+- **2026-11-22, first historical import:** the 7 Ganz Garage photos were imported (see [Targeted import](#targeted-import-one-album-explicit-photo-ids)).
 
 See docs/RESUME.md. The sections below describe the design as built.
 
@@ -180,6 +176,82 @@ Run from `workers/kilcon-gallery-worker` with `CLOUDFLARE_ACCOUNT_ID=8481dbc471a
    - one decision persists after reload, and is then cleared;
    - `/admin/facebook` → *Preview (dry run)* shows unreviewed photos as excluded.
 8. **Cleanup:** after verification, `git branch -d task/historical-photo-review`. The branch was never pushed.
+
+## Targeted import (one album, explicit photo IDs)
+
+The full historical import scans every album, and its button stays disabled until every album
+has a destination. To import one reviewed album without touching the others, the admin-only
+backfill endpoint has a targeted mode (`d8ff7a9`):
+
+```
+POST /api/gallery-api/facebook/backfill
+{ "targeted": true, "dryRun": true|false, "albumId": "<album>", "projectId": <existing project>,
+  "photoIds": ["…", …], "expectedCount": <n, required for a real run> }
+```
+
+**Checks, done before anything is written.** A real run refuses the whole batch if any check
+fails:
+- **Destination:** an existing, visible project already linked to the album, through
+  `fb_album_id` or an album mapping.
+- **Each photo:**
+  - has an **Import** decision recorded for that same album;
+  - Graph confirms the album and that the Page owns the photo;
+  - its largest image is on a Facebook CDN host;
+  - 1–10 unique IDs per request.
+- **Count:** `expectedCount` must equal the number of new photos.
+
+**Duplicates.** Photos already on the site are reported as `existing` before any Graph call
+or download. The usual claim step stops two runs from importing the same photo twice.
+
+**Writes.** A run writes only:
+- the `facebook_photos` rows for new photos;
+- their R2 objects (private master, plus a public copy while public copies are still written);
+- `last_backfill_at` and `last_success_at`.
+
+It never touches album mappings, projects, posts, review decisions, discovery jobs or the
+backfill cursor. Webhook auto-import is unchanged.
+
+**Dry run.** It works with historical import off. It looks up only the requested photos,
+downloads nothing and writes nothing.
+
+**Tests.** 5 tests in `test/facebook-review.test.mjs`. One is a mutation check that proved the
+album checks are enforced.
+
+### Procedure (used 2026-11-22 for Ganz Garage)
+
+1. **Dry run:** signed in, from the browser console. It must show `new = n`, `existing 0` and
+   `refused 0`.
+2. **Turn the import on:** `wrangler versions upload --var FB_HISTORICAL_IMPORT_ENABLED:true`,
+   then `versions deploy <id>@100%`.
+3. **Real run:** use `expectedCount: n`.
+4. **Turn it off at once:** `versions deploy <flag-off version>@100%`.
+5. **Verify:** compare a per-table D1 snapshot with the baseline. Check the gallery count, that
+   every image loads, and the production checks.
+
+Never use `wrangler deploy` for this Worker. The flag in `wrangler.toml` stays `"false"`.
+
+### 2026-11-22 run: Ganz Garage
+
+- **Album and destination:** `122234637104318503` into project 1, Ganz Garage.
+- **Photos:**
+  - `122234637260318503`
+  - `122234637308318503`
+  - `122234637350318503`
+  - `122234637404318503`
+  - `122234637452318503`
+  - `122234637494318503`
+  - `122234637542318503`
+- **Dry run:** 7 new / 0 existing / 0 refused, and D1 was unchanged afterwards.
+- **Import window:** version `64c8142e` was live from 15:49:09 to 15:51:36 UTC. The run returned
+  `imported: 7` with no failures.
+- **Result:** Ganz Garage went from 8 to 15 photos, and all 30 image URLs (full size and
+  thumbnail) load.
+  - **Changed:** only `facebook_photos` (+7) and the two sync timestamps.
+  - **Unchanged:** projects, mappings, posts, decisions, jobs, albums, events, and the original
+    8 rows (byte-identical).
+  - **Checks:** 122/122 production checks passed.
+- **Restore bookmark** from before the import:
+  `000006d6-00000000-0000512b-2269b9f882efa19e8fc0885a612689b6`.
 
 ## Rollback
 

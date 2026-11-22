@@ -1,114 +1,138 @@
-# KIL Construction — resume / handoff (paused 2026-11-21)
+# KIL Construction — resume / handoff (updated 2026-11-22)
 
-Development is **paused**. Production is stable and verified. One reviewed-but-undeployed UI
-commit is waiting on a local branch. Start here; the linked docs hold the details.
+Work is in progress on completing the Facebook gallery integration (Phases A–D), before the
+Astro 7 migration. Production is stable and verified. Changes awaiting approval are on the local
+branch `task/facebook-integration-completion` (uncommitted). Start here; the linked docs hold
+the details.
 
 ## Production now
 
 | Component | Live | Rollback target |
 |---|---|---|
-| Pages (`kilconstruction`) | `dccbe970` from `main` `47dc2e7` (review-page layout fix) | `c9e92942` (`780127e`), then `bd120cd6` (`4040b3f`) |
-| Gallery Worker (`kilcon-gallery-worker`) | `18177ff4-7e57-46cd-89bb-7857b84b3ab1`, tag `780127e` (photo review + per-photo import gate) | `npx wrangler rollback 1494935c-6fae-419f-bc87-0b4f66456a93` |
-| D1 `kilcon-db` | Migrations through **017** (`facebook_photo_reviews`); none pending | Time Travel bookmark from before 017: `0000069f-00000000-0000512a-70c3e47bc9e5d69d289848bace0ac932`. Leave 017 in place on any rollback; the old code ignores it. |
-| Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` set to **Fail closed**; hourly cron `17 * * * *` (verified running 21:17 UTC on `18177ff4`) | Image-gate rollback order: docs/facebook-image-cache.md §8 |
+| Pages (`kilconstruction`) | `02aaaf2a` from `main` `9aa5b0a` (comparison UI) | `dccbe970` (`47dc2e7`) |
+| Gallery Worker (`kilcon-gallery-worker`) | `8c893925-6546-41fd-ad68-16e056de7d39`, tag `d8ff7a9` (targeted import) | `npx wrangler versions deploy 18177ff4-7e57-46cd-89bb-7857b84b3ab1@100%` |
+| D1 `kilcon-db` | Migrations through **017**; none pending | Bookmark from before the Ganz import: `000006d6-00000000-0000512b-2269b9f882efa19e8fc0885a612689b6` |
+| Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |
 
-- **Unchanged by design:** zone Browser Cache TTL (4 h), the 8 public Facebook R2 copies, Workers **Free** plan.
 - **Worker flags:**
   - `FB_INTEGRATION_ENABLED=true`
   - `FB_AUTO_IMPORT=true`
   - `FB_DISCOVERY_ENABLED=false`
-  - `FB_HISTORICAL_IMPORT_ENABLED=false` (no historical import has run)
-- **Bindings:** `IMAGES`, and `REVIEW_LIMITER` (namespace 1003, 300 per 60 s per endpoint).
-- **Data:** 8 Facebook photos (Ganz Garage, project ID 1), all imported and visible. 0 review decisions are saved.
+  - `FB_HISTORICAL_IMPORT_ENABLED=false`
+- **Plan and bindings:** Workers **Free** plan. Bindings `IMAGES` and `REVIEW_LIMITER`.
+- **Data:** Ganz Garage (project 1) has **15** photos: 8 from the webhook, plus 7 from the
+  targeted import on 2026-11-22. Review decisions: 7 Import (Ganz Garage). There are no album
+  mappings.
+- **Last verified:** 2026-11-22. 122/122 production checks passed, and all 30 Ganz image URLs
+  load.
 
-### Verified 2026-11-21
+## Done on 2026-11-22
 
-- **Production checks:** 67/67. All 8 photos load through the gate. These are blocked:
-  - old `/cdn-cgi/image` URLs on both hosts;
-  - arbitrary widths;
-  - encoded and lower-case paths.
+1. **Comparison UI** deployed to Pages (`02aaaf2a`). The owner checked it.
+2. **Targeted import** mode added (`d8ff7a9`, Worker `8c893925`). The 7 Ganz Garage photos were
+   imported with historical import on for about 2½ minutes. See docs/facebook-photo-review.md
+   §Targeted import.
+3. **Phase A, Manage Images** (local, not deployed): Facebook galleries now appear on
+   `/admin/manage`, with hide, restore, move and permanent deletion through the Facebook admin
+   API. See docs/facebook-manage-images.md.
+4. **Phase B, visual duplicate check** (read-only) of all 379 remaining photos: about 109
+   importable, the rest duplicates. See docs/facebook-historical-reconciliation.md §10.
+5. **Phase C preparation** (local): a new `POST /facebook/admin/album-link` links an album to an
+   existing gallery without importing. It refuses branding and unsorted albums, Recent Project
+   Updates, foreign albums and albums already linked elsewhere.
+6. **Phase D preparation** (local): **fix.** Profile pictures and cover photos were not
+   excluded on the live webhook path, nor in scheduled discovery; only the historical import
+   excluded them. They are now refused on every path (ingestPost, discovery visit, importPhoto).
 
-  Reviews, admin endpoints and the webhook are protected; galleries, apparel and the site work.
-- **Signed out:** `/admin/facebook-review` redirects to `/admin`, and every `review-*` endpoint returns 401 `no-store`.
-- **Owner check:** the review page loads, lists **31 albums**, and Ganz Garage displays.
-- **Not yet verified:** the owner's temporary Review later save and clear on Ganz Garage (step 3 below).
+## Branch `task/facebook-integration-completion` (uncommitted, from `main` `d8ff7a9`)
 
-## Outstanding work: branch `task/review-comparison-ui`, commit `eca9ad3`
+| Area | Files |
+|---|---|
+| Manage Images (Pages) | `src/pages/admin/manage.astro`, `src/pages/admin/manage-facebook.ts`, `src/lib/manage-facebook.js`, `src/styles/admin.css` |
+| Worker | `workers/kilcon-gallery-worker/src/facebook.js` (`album-link`, branding guard) |
+| Tests | `tests/manage-facebook.test.mjs` (7), `test/facebook.test.mjs` (+2), `test/facebook-review.test.mjs` (+4) |
+| Docs | this file, `facebook-manage-images.md`, `facebook-photo-review.md`, `facebook-historical-reconciliation.md` §10 |
 
-Local only, never pushed. Based on `main` `47dc2e7`. Presentation-only (review page, its script and tests):
+**Tests:** site 80/80, Worker 174/174, `tsc` 0 errors, `astro build` OK, Worker bundle dry run OK.
 
-- **Comparison cards:** each Facebook photo shown beside its closest existing-website photo, at the same size, labelled **Facebook** / **Existing website**.
-- **Sources:** album, date and ID; gallery, file, and "Manually uploaded" or "Previously imported from Facebook".
-- **No match:** the card says why there is no match.
-- **Large view:** a clickable duplicate badge opens a side-by-side dialog.
-- **Buttons:** decision buttons under each pair.
-- **Separate section:** photos already imported (Ganz Garage's 8) are listed apart from the 7 needing review.
+**Mutation checks:**
+- breaking the targeted-import album checks fails a test;
+- disabling the branding guard fails both branding tests.
 
-Tests on `eca9ad3`: site **73/73**, Worker **163/163**, `tsc` 0 errors, `astro build` OK. On `main` `47dc2e7`: site 66/66, Worker 163/163.
+## Remaining steps, in order (each needs the owner's approval)
 
-The local preview HTML files and their generator scripts are in the paused session's scratchpad, which is temporary. Rebuild them, or simply deploy and look.
+1. **Approve and deploy the branch.**
+   - Commit and merge to `main`.
+   - **Pages:** a push without `[CF-Pages-Skip]` deploys Manage Images.
+   - **Worker:** `versions upload`, then `versions deploy`, with the flags unchanged (album-link and
+     the branding guard).
+   - Run the production checks.
+   - **Owner check:** `/admin/manage` lists Ganz Garage with 15 photos.
+2. **Owner decisions** in docs/facebook-historical-reconciliation.md §10:
+   - canonical galleries for the cross-category projects;
+   - names for the new galleries (Jsme, Home, Fankhauser merge);
+   - the 7th Ganz photo;
+   - recording Skip decisions for the 237 duplicates (Group A 173 + Ganz 6 + Mobile uploads 58).
+3. **The owner marks Import** on the review page, photo by photo, for the approved new photos.
+4. **Phase C, per album, in small batches:**
+   1. create the gallery (`project-create`), or link it to its manual folder;
+   2. run `album-link`;
+   3. targeted dry run;
+   4. turn historical import on, then run;
+   5. turn it off at once;
+   6. verify.
+5. **Phase D, after the archive is reconciled.** Enable `FB_DISCOVERY_ENABLED`; it needs
+   approval. The effects:
+   - Webhook events then go through the discovery engine.
+   - The hourly cron adds a bounded reconcile scan, with a future-only cutoff fixed at the
+     first run.
+   - Verify:
+     - the webhook subscription;
+     - retries;
+     - photos added only to an album;
+     - removals;
+     - that branding albums are excluded.
+6. **Cleanup and the remaining deferred items:**
+   - delete `task/review-comparison-ui` (merged);
+   - private-only Facebook storage;
+   - sharper comparison images;
+   - CSP enforcement;
+   - `npm audit` (Astro 7);
+   - the localhost CORS origin;
+   - WAF rate limiting.
 
-**Known limitation:** the large view uses the existing preview sizes (Facebook ≥ 320 px, website 400 px). Sharper images need a small Worker change, a size option on `review-image`, which has not been made.
+## Rules that must survive
 
-## Remaining steps, in order
+- **Historical import needs an explicit per-photo Import decision.** Duplicate / Skip and Review
+  later never import. New webhook posts import automatically. Branding albums never import.
+- **Never run `wrangler deploy` or `wrangler triggers deploy` for the gallery Worker.** Use
+  `versions upload` then `versions deploy`. Turn historical import on only through a `--var`
+  version, and back off right after.
+- **Before any push to `main`, run `git fetch`.** The owner sometimes edits README on GitHub.
+- **Use the pinned Node.** `C:\Users\Jwerl\dev\.tools\node-security-20261111\node-v22.23.5-win-x64`.
+  Wrangler needs `CLOUDFLARE_ACCOUNT_ID=8481dbc471ac3a4aa14cc26ea366f956`.
+- **Use the owner's browser for signed-in work** (Chrome extension). Screenshots time out in that
+  session, so check pages by script.
 
-1. **Review `eca9ad3`.** Check out `task/review-comparison-ui`, run `npm run test:site` and `npm run test:gallery-worker` with Node 22.23.5, then `npm run build`. Approve the presentation.
-2. **Deploy it (Pages only).**
-   - `git fetch`. `main` has moved ahead by docs-only commits since `47dc2e7`, starting with this handoff.
-   - Run `git switch task/review-comparison-ui && git rebase origin/main`. No conflicts are expected: the branch only touches the review page, its script and tests.
-   - Re-run both suites and the build.
-   - Then `git switch main && git merge --ff-only task/review-comparison-ui`, and push without `[CF-Pages-Skip]`.
-   - Confirm the new Pages deployment, run the 67 production checks, and confirm the signed-out redirect.
-   - Rollback: Pages `dccbe970`.
-3. **Owner check on the live page.** On `/admin/facebook-review`, open Ganz Garage:
-   - the 7 photos needing review and the 8 already imported should appear in separate sections;
-   - mark one photo **Review later**, reload and confirm it persisted, then click again to clear it and confirm.
-4. **Close out the code work.**
-   - Record the comparison-UI deployment in `docs/facebook-photo-review.md` with a docs-only `[CF-Pages-Skip]` commit.
-   - Delete `task/review-comparison-ui` with `git branch -d`; it was never pushed.
-5. **The owner reviews all albums** on `/admin/facebook-review`: Duplicate / Skip, Import or Review later for each of the **386** new photos.
-   - Resolve the open mapping decisions in docs/facebook-historical-reconciliation.md §8: the canonical gallery per cross-category project, new project names and categories ("Jsme", Fankhauser merge), "Ganz" (7), "Home" (7), and Mobile uploads (91).
-   - Expected: about 26–211 genuinely new photos in albums that already have a gallery, and 84 in albums that do not.
-6. **Prepare and approve the historical import** (separate approval).
-   - Create the new projects with admin *project-create*.
-   - Re-run *Preview (dry run)*: only photos marked Import should show as new.
-   - Then enable `FB_HISTORICAL_IMPORT_ENABLED` (a Worker deploy) and run a small first batch to check Free-plan CPU before continuing.
-   - Keep `FB_DISCOVERY_ENABLED=false` unless that is approved separately.
-7. **Deferred follow-ups** (each needs its own approval):
-   - private-only Facebook storage (stop writing public copies, delete the 8 existing ones);
-   - sharper large comparison images (Worker size option);
-   - CSP enforcement after the report-only period;
-   - `npm audit` (Astro 7 / adapter 14);
-   - remove the `http://localhost:4321` credentialed CORS origin;
-   - a WAF rate-limiting rule if Worker request usage approaches the Free limit.
-
-## Rules that must survive the pause
-
-- **Historical import needs an explicit per-photo Import decision.** Duplicate / Skip and Review later never import by any route. New webhook posts (`add`, or edits of posts already on the site) still import automatically. **No date cutoff is used.** Rules: docs/facebook-photo-review.md.
-- **Never run `wrangler deploy` or `wrangler triggers deploy` for the gallery Worker.** Use `versions upload` then `versions deploy`, so the dashboard-created Fail-closed image route stays as it is. Re-check the route after any trigger change.
-- **Before any push to `main`, check for owner commits.** The owner sometimes edits README directly on GitHub (`ff36da0`, `776df6e`), so run `git fetch` first.
-- **Use the pinned Node.** `C:\Users\Jwerl\dev\.tools\node-security-20261111\node-v22.23.5-win-x64`. Wrangler needs `CLOUDFLARE_ACCOUNT_ID=8481dbc471ac3a4aa14cc26ea366f956`.
-- **Use the owner's browser for dashboard and signed-in work.** The wrangler token cannot read or change WAF, routes or zone settings, and calling the Cloudflare API with its OAuth token is blocked in auto mode. Dashboard steps and signed-in admin checks are done by the owner, or through the Chrome extension when it is connected.
-
-## Repository state at pause
+## Repository state
 
 | Item | State |
 |---|---|
-| `main` | `= origin/main`, plus this handoff (docs only) |
-| `task/review-comparison-ui` | Unmerged, local (`eca9ad3`); **keep** |
-| `backup-pre-revert` | Unmerged, 30 commits, owner's backup; keep |
-| `codex/facebook-album-integration` | Fully merged; created by another agent, so delete only with owner approval |
-| Worktree `.tools/node-security-20261111/kil-release-main` | Not created in this work; left alone |
-| Worktree `.worktrees/kil-construction/readme-refresh` | Not created in this work; left alone |
+| `main` | `= origin/main` at `d8ff7a9` |
+| `task/facebook-integration-completion` | Local and uncommitted; this work; **keep** |
+| `task/review-comparison-ui` | Merged; delete after the owner approves |
+| `backup-pre-revert` | Unmerged; the owner's backup; keep |
+| `codex/facebook-album-integration` | Merged; another agent's branch; delete only with the owner's approval |
+| Worktrees `kil-release-main`, `readme-refresh` | Not created in this work; left alone |
 
 ## Document map
 
 | Topic | Document |
 |---|---|
-| Photo review design, rules, deploy and rollback | docs/facebook-photo-review.md |
-| Phase 2 reconciliation (31 albums, 399 photos, decisions) | docs/facebook-historical-reconciliation.md |
+| Manage Images: Facebook galleries | docs/facebook-manage-images.md |
+| Photo review, targeted import, deploy and rollback | docs/facebook-photo-review.md |
+| Historical reconciliation and the duplicate check (§10) | docs/facebook-historical-reconciliation.md |
 | Image gate, WAF, cache and costs | docs/facebook-image-cache.md |
 | Security headers (CSP report-only) | docs/security-headers.md |
-| Security release (2026-11-19) | docs/security-release-2026-11-19.md |
-| Album discovery and preview mechanics | docs/facebook-album-implementation.md |
+| Album discovery mechanics | docs/facebook-album-implementation.md |
 | Webhook setup | docs/facebook-webhook.md |

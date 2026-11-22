@@ -651,3 +651,111 @@ test("automatic import of new posts still works after a targeted import", async 
   assert.deepEqual([row.status, row.project_id], ["imported", projectId], "new post imports with no review into the same project");
   assert.equal((await rows("SELECT * FROM facebook_photos")).length, 16);
 });
+
+// --- album-link: connect an album to an existing gallery without importing ----
+
+const LINK = `${ADMIN}/album-link`;
+const link = (body, opts = {}) => call(LINK, { method: "POST", body, ...opts });
+
+test("album-link connects an album to a manual-folder gallery, then a targeted import fills it", async () => {
+  const projectId = await ganzSetup();
+  // A manual gallery and the Facebook gallery linked to it (admin project-create).
+  await baseEnv.GALLERY_BUCKET.put("Projects/Schwennson House/1_Schwennson_Exterior_1.jpg", JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+  const created = await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "Schwennson House", linkedPrefix: "Projects/Schwennson House/" } })).json();
+  const schwennsonId = created.project.id;
+  stubPageAlbums([[GANZ, "Ganz Garage", 16], ["700", "Schwennson", 3]]);
+  stubAlbum("700", "Schwennson", ["9901", "9902", "9903"], { created: OLD });
+  await decide([{ photoId: "9901", albumId: "700", decision: "import" }, { photoId: "9902", albumId: "700", decision: "import" }, { photoId: "9903", albumId: "700", decision: "skip", duplicateOf: "Projects/Schwennson House/1_Schwennson_Exterior_1.jpg" }]);
+
+  const before = await snapshotAll();
+  const body = { targeted: true, albumId: "700", projectId: schwennsonId, photoIds: ["9901", "9902"] };
+  assert.equal((await call(BACKFILL, { method: "POST", body: { ...body, dryRun: true } })).status, 409, "not linked yet: refused");
+
+  const res = await link({ albumId: "700", projectId: schwennsonId });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, changed: true, albumId: "700", album: "Schwennson", project: { id: schwennsonId, slug: created.project.slug, name: "Schwennson House" } });
+  const after = await snapshotAll();
+  assert.deepEqual(after.mappings, [{ album_id: "700", project_id: schwennsonId, locked: 1 }]);
+  for (const k of ["photos", "projects", "posts", "reviews", "jobs", "priv", "pub"]) assert.deepEqual(after[k], before[k], `${k} unchanged by linking`);
+  assert.equal((await (await link({ albumId: "700", projectId: schwennsonId })).json()).changed, false, "re-linking is a no-op");
+
+  const dry = await (await call(BACKFILL, { method: "POST", body: { ...body, dryRun: true } })).json();
+  assert.deepEqual([dry.new, dry.existing, dry.refused, dry.destination.id], [2, 0, 0, schwennsonId]);
+  const run = await (await call(BACKFILL, { method: "POST", body: { ...body, dryRun: false, expectedCount: 2 } })).json();
+  assert.equal(run.imported, 2);
+  const page = await (await call(`${SITE}/api/gallery-api?project=schwennson-house`, { admin: false })).json();
+  assert.equal(page.items.length, 3, "the manual gallery now shows its photo plus the 2 imported ones");
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE fb_photo_id = '9903'")).length, 0, "the Skip photo stays out");
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE project_id = ?", projectId)).length, 8, "Ganz Garage untouched");
+});
+
+test("album-link refuses unsorted, branding, foreign and already-linked albums and Recent Project Updates", async () => {
+  const projectId = await ganzSetup();
+  const other = (await (await call(`${ADMIN}/project-create`, { method: "POST", body: { name: "Bisek", category: "projects" } })).json()).project.id;
+  stubAlbum("801", "Mobile uploads", ["9811"]);
+  stubAlbum("802", "Profile pictures", ["9812"]);
+  stubAlbum("803", "Someone Else", ["9813"]);
+  graph.set("803", { id: "803", name: "Someone Else", from: { id: "999" } });
+  stubAlbum("804", "Bisek", ["9814"]);
+  await baseEnv.DB.prepare("INSERT INTO facebook_projects (slug, name, kind) VALUES ('recent', 'Recent Project Updates', 'recent')").run();
+  const recent = (await rows("SELECT id FROM facebook_projects WHERE kind = 'recent'"))[0].id;
+  const before = await snapshotAll();
+
+  const expect = async (body, status, opts) => { const r = await link(body, opts); assert.equal(r.status, status, JSON.stringify(body)); };
+  await expect({ albumId: "801", projectId: other }, 409);
+  await expect({ albumId: "802", projectId: other }, 409);
+  await expect({ albumId: "803", projectId: other }, 404);
+  await expect({ albumId: "805", projectId: other }, 502, undefined); // unknown on Graph
+  await expect({ albumId: GANZ, projectId: other }, 409); // Ganz Garage's album belongs to project 1
+  await expect({ albumId: "804", projectId: 999 }, 404);
+  await expect({ albumId: "804", projectId: recent }, 409);
+  for (const body of [{}, { albumId: "x", projectId: other }, { albumId: "804", projectId: "1" }, { albumId: "804", projectId: 0 }]) await expect(body, 400);
+  await expect({ albumId: "804", projectId: other }, 401, { admin: false });
+  assert.deepEqual(await snapshotAll(), before, "every refusal wrote nothing");
+
+  await expect({ albumId: "804", projectId: other }, 200);
+  await expect({ albumId: "804", projectId: projectId }, 409, undefined); // now linked to Bisek
+  assert.equal((await (await link({ albumId: GANZ, projectId })).json()).changed, false, "an album that owns its project is already linked");
+});
+
+// --- branding albums: never imported by any path ------------------------------
+
+test("a new profile picture or cover photo post never imports or creates a gallery (live webhook)", async () => {
+  stubPhoto("9951", { created: NEW, album: { id: "880", name: "Profile pictures" } });
+  stubPhoto("9952", { created: NEW, album: { id: "881", name: "Cover photos" } });
+  stubPost(`${PAGE_ID}_98`, ["9951"], NEW);
+  stubPost(`${PAGE_ID}_99`, ["9952"], NEW);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_98`, published: 1, from: { id: PAGE_ID } },
+    { item: "photo", verb: "add", photo_id: "9952", post_id: `${PAGE_ID}_99`, published: 1, from: { id: PAGE_ID } }]);
+  for (const t of ["facebook_photos", "facebook_projects"]) assert.equal((await rows(`SELECT * FROM ${t}`)).length, 0, t);
+  assert.deepEqual(await keys(baseEnv.PRIVATE_BUCKET), []);
+  assert.ok(!fetchCalls.some((c) => c.url.hostname.endsWith("fbcdn.net")), "nothing downloaded");
+  // Ordinary new posts still import automatically.
+  stubPhoto("9953", { created: NEW, album: { id: "882", name: "Harper Barn" } });
+  stubPost(`${PAGE_ID}_100`, ["9953"], NEW);
+  await webhook([{ item: "status", verb: "add", post_id: `${PAGE_ID}_100`, published: 1, from: { id: PAGE_ID } }]);
+  assert.deepEqual((await rows("SELECT fb_photo_id, status FROM facebook_photos")).map((r) => [r.fb_photo_id, r.status]), [["9953", "imported"]]);
+});
+
+test("scheduled discovery (reconcile) is future-only and never imports branding albums", async () => {
+  stubPageAlbums([["500", "Harper Barn", 2], ["880", "Profile pictures", 1], ["881", "Mobile uploads", 1]]);
+  stubAlbum("500", "Harper Barn", ["9961"], { created: OLD });
+  stubAlbum("500", "Harper Barn", ["9961", "9962"], { created: OLD });
+  stubPhoto("9962", { created: NEW, album: { id: "500", name: "Harper Barn" } });
+  stubAlbum("880", "Profile pictures", ["9963"], { created: NEW });
+  stubAlbum("881", "Mobile uploads", ["9964"], { created: OLD });
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: "true" });
+  const now = new Date("2026-11-01T00:00:00Z"); // cutoff: OLD (2025) is before it, NEW (2026-11-20) after
+  let report;
+  for (let n = 0; n < 30; n++) {
+    report = (await runFacebookDiscovery(env, { dryRun: false }, { mode: "reconcile", now })).body;
+    if (report.complete || report.errors?.length || report.busy) break;
+  }
+  assert.equal(report.errors?.length || 0, 0);
+  const job = (await rows("SELECT mode, state FROM facebook_discovery_jobs"))[0];
+  assert.equal(job.mode, "reconcile");
+  assert.equal(JSON.parse(job.state).cutoff, now.toISOString(), "the cutoff is the first run's time");
+  assert.deepEqual((await rows("SELECT fb_photo_id, status FROM facebook_photos ORDER BY fb_photo_id")).map((r) => [r.fb_photo_id, r.status]), [["9962", "imported"]],
+    "only the photo added after the cutoff; older photos and the profile picture stay out");
+  assert.equal((await rows("SELECT * FROM facebook_photo_reviews")).length, 0, "no review decisions are written");
+});
