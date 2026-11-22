@@ -9,7 +9,7 @@ import {
 
 type Gallery = ReturnType<typeof facebookGalleries>[number];
 type Photo = {
-    photoId: string; projectId: number | null; hidden: boolean; status: string; caption: string | null;
+    photoId: string; projectId: number | null; hidden: boolean; status: string; caption: string | null; highlight?: boolean;
     createdTime: string | null; removedOnFacebook: boolean; deleted: boolean; deleteAfter: string | null;
     previewUrl: string | null; error: string | null;
 };
@@ -140,7 +140,7 @@ export default function initManageFacebook() {
                 const thumb = src ? el("img", { src, alt: p.caption ? p.caption.slice(0, 120) : `Facebook photo ${p.photoId}`, loading: "lazy", decoding: "async" })
                     : el("div", { className: "mf-thumb-missing", textContent: "No file" });
                 const label = el("label", { className: `mf-photo mf-photo--${state.key}` }, box, thumb,
-                    el("span", { className: "mf-state", textContent: state.label }),
+                    el("span", { className: "mf-state", textContent: state.label + (p.highlight && state.key !== "deleted" ? " · ★ Highlight" : "") }),
                     el("span", { className: "image-meta", textContent: p.photoId }));
                 if (p.error && state.key === "failed") label.title = p.error.slice(0, 300);
                 grid.appendChild(el("li", {}, label));
@@ -152,6 +152,8 @@ export default function initManageFacebook() {
             selectAll.addEventListener("change", () => { for (const b of boxes.values()) if (!b.disabled) b.checked = selectAll.checked; });
             const hideBtn = el("button", { type: "button", className: "btn-small", textContent: "Hide" });
             const restoreBtn = el("button", { type: "button", className: "btn-small", textContent: "Restore" });
+            const hlOnBtn = el("button", { type: "button", className: "btn-small", textContent: "Add to Highlights" });
+            const hlOffBtn = el("button", { type: "button", className: "btn-small", textContent: "Remove from Highlights" });
             const target = el("select", { className: "mf-move-target" });
             target.setAttribute("aria-label", "Move selected photos to");
             target.appendChild(el("option", { value: "", textContent: "Move to…" }));
@@ -161,11 +163,11 @@ export default function initManageFacebook() {
             phrase.setAttribute("aria-label", `Type ${PURGE_PHRASE} to enable permanent deletion`);
             const purgeBtn = el("button", { type: "button", className: "btn-small btn-danger", textContent: "Permanently delete", disabled: true });
             phrase.addEventListener("input", () => { purgeBtn.disabled = !purgeConfirmed(phrase.value); });
-            const note = el("p", { className: "image-meta", textContent: "Hide removes a photo from the website and can be undone. Move keeps it in the chosen gallery from now on. Permanent deletion removes the files and cannot be undone." });
+            const note = el("p", { className: "image-meta", textContent: "Hide removes a photo from the website and can be undone. Highlights also show a photo on the homepage; your choice there overrides #highlight tags. Move keeps it in the chosen gallery from now on. Permanent deletion removes the files and cannot be undone." });
             const actions = el("div", { className: "toolbar-actions mf-actions" },
-                el("label", {}, selectAll, " Select all"), hideBtn, restoreBtn, target, moveBtn, phrase, purgeBtn);
+                el("label", {}, selectAll, " Select all"), hideBtn, restoreBtn, hlOnBtn, hlOffBtn, target, moveBtn, phrase, purgeBtn);
 
-            const buttons = [hideBtn, restoreBtn, moveBtn, purgeBtn, target, phrase] as (HTMLButtonElement | HTMLInputElement | HTMLSelectElement)[];
+            const buttons = [hideBtn, restoreBtn, hlOnBtn, hlOffBtn, moveBtn, purgeBtn, target, phrase] as (HTMLButtonElement | HTMLInputElement | HTMLSelectElement)[];
             async function run(label: string, ids: string[], send: (batch: string[]) => Promise<number>, batchSize: number) {
                 if (!ids.length) { say(`${label}: none of the selected photos can be changed that way.`, "error"); return; }
                 for (const b of buttons) b.disabled = true;
@@ -183,6 +185,10 @@ export default function initManageFacebook() {
             }
             hideBtn.addEventListener("click", () => run("Hide", actionTargets(selected()).hide,
                 async (photoIds) => (await api<{ updated: number }>("/photo-update", { photoIds, hidden: true })).updated, UPDATE_BATCH));
+            hlOnBtn.addEventListener("click", () => run("Add to Highlights", actionTargets(selected()).highlightOn,
+                async (photoIds) => (await api<{ updated: number }>("/photo-update", { photoIds, highlight: true })).updated, UPDATE_BATCH));
+            hlOffBtn.addEventListener("click", () => run("Remove from Highlights", actionTargets(selected()).highlightOff,
+                async (photoIds) => (await api<{ updated: number }>("/photo-update", { photoIds, highlight: false })).updated, UPDATE_BATCH));
             restoreBtn.addEventListener("click", () => run("Restore", actionTargets(selected()).restore,
                 async (photoIds) => (await api<{ updated: number }>("/photo-update", { photoIds, hidden: false })).updated, UPDATE_BATCH));
             moveBtn.addEventListener("click", () => {

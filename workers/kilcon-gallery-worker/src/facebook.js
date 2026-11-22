@@ -24,6 +24,7 @@
 import { classifyAlbum, albumCollectionKind } from './facebook-album-matching.js';
 import { reviewGate, handleReviewAdmin, webhookReviewMode } from './facebook-review.js';
 import { initialDiscovery, validateDiscovery, discoveryBatch, DISCOVERY_POST_FIELDS } from './facebook-discovery.js';
+import { parseControlTags, stripControlTags } from './facebook-hashtags.js';
 
 export const FACEBOOK_PREFIX = "Facebook/";
 export const RECENT_SLUG = "recent-project-updates";
@@ -800,6 +801,10 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
     createdTime: toIso(post?.created_time) || toIso(first.created_time),
     permalink: typeof post?.permalink_url === "string" ? post.permalink_url : null,
   };
+  // Caption control tags (docs/facebook-hashtags.md): live content only.
+  const tags = liveTags(context.message, reviewMode);
+  context.category = tags.category;
+  context.highlight = tags.highlight;
 
   const project = await assignProject(env, {
     context,
@@ -880,6 +885,9 @@ async function refreshPostText(db, post) {
       )
       .bind(message, typeof post.permalink_url === "string" ? post.permalink_url : null, postId),
   ]);
+  // An edited caption can add or remove #highlight. Category tags are not
+  // re-applied: they only name the category of a new gallery.
+  await setTagHighlight(db, "fb_post_id = ? AND master_key IS NOT NULL", [postId], parseControlTags(message).highlight);
   return true;
 }
 
@@ -923,7 +931,7 @@ async function assignProject(env, { context, photos, photoCount = photos.length,
     if (existing) return { ...existing, reason: "album", action: "reuse" };
     if (dryRun) return { id: null, slug: null, name: albumName, reason: "album", action: "create" };
     return {
-      ...(await createProject(env, { name: albumName, albumId, reason: "album" })),
+      ...(await createProject(env, { name: albumName, albumId, reason: "album", category: context.category || "projects" })),
       reason: "album",
       action: "create",
     };
@@ -943,7 +951,7 @@ async function assignProject(env, { context, photos, photoCount = photos.length,
     const name = projectNameFromCaption(context.message, context.createdTime);
     if (dryRun) return { id: null, slug: null, name, reason: "completed-build", action: "create" };
     return {
-      ...(await createProject(env, { name, reason: "completed-build" })),
+      ...(await createProject(env, { name, reason: "completed-build", category: context.category || "projects" })),
       reason: "completed-build",
       action: "create",
     };
@@ -1099,6 +1107,23 @@ async function getPhotoRow(db, photoId) {
     .first();
 }
 
+// Caption control tags apply to live content only; historical imports ignore them.
+function liveTags(message, reviewMode) {
+  return reviewMode === "live" ? parseControlTags(message) : { category: null, highlight: false, conflict: false, tags: [] };
+}
+
+// Sets highlight from a caption tag on rows the admin hasn't locked. Fails
+// soft (returns false) when migration 018 isn't applied.
+async function setTagHighlight(db, where, binds, on) {
+  try {
+    await db.prepare(`UPDATE facebook_photos SET highlight = ? WHERE ${where} AND highlight_locked = 0`).bind(on ? 1 : 0, ...binds).run();
+    return true;
+  } catch (e) {
+    if (/no such column/i.test(String(e?.message || e))) return false;
+    throw e;
+  }
+}
+
 function isBrandingPhoto(photo) {
   return albumCollectionKind(photo?.album?.name) === "branding";
 }
@@ -1237,6 +1262,7 @@ async function importPhoto(env, photo, { context = {}, projectId, source, budget
       return { imported: false, reason: 'suppressed-during-import' };
     }
 
+    if (context.highlight === true) await setTagHighlight(db, "fb_photo_id = ?", [photoId], true);
     await reconcilePhoto(env, photoId);
     return { imported: true, key: masterKey };
   } catch (e) {
@@ -1346,7 +1372,7 @@ function toItem(row, urls) {
     name: `${date}_${row.fb_photo_id}.${ext}`,
     full,
     thumb: urls.thumbUrl(full),
-    description: uniquePhotoCaption(row),
+    description: stripControlTags(uniquePhotoCaption(row)) || null,
     createdTime: row.fb_created_time || null,
     id: row.fb_photo_id,
     source: "facebook",
@@ -1356,6 +1382,32 @@ function toItem(row, urls) {
 // Shared with facebook-image.js: the image gate must agree with the listings.
 export const VISIBLE_PHOTO_SQL = `ph.status = 'imported' AND ph.hidden = 0 AND ph.public_key IS NOT NULL
   AND p.hidden = 0`;
+
+// Homepage Highlights from Facebook: visible photos with highlight = 1.
+// Fails soft (no Facebook highlights) when migration 018 isn't applied.
+const MAX_FACEBOOK_HIGHLIGHTS = 60;
+export async function listFacebookHighlights(env, urls) {
+  if (!env.DB) return [];
+  try {
+    const { results = [] } = await env.DB
+      .prepare(
+        `SELECT ph.fb_photo_id, ph.public_key, ph.fb_created_time
+           FROM facebook_photos ph JOIN facebook_projects p ON p.id = ph.project_id
+          WHERE ph.highlight = 1 AND ${VISIBLE_PHOTO_SQL}
+          ORDER BY ph.fb_created_time DESC LIMIT ?`
+      )
+      .bind(MAX_FACEBOOK_HIGHLIGHTS)
+      .all();
+    return results.map((r) => {
+      const full = urls.publicUrl(r.public_key);
+      const date = (r.fb_created_time || "").slice(0, 10) || "0000-00-00";
+      return { name: `facebook_${date}_${r.fb_photo_id}.${r.public_key.split(".").pop()}`, full, thumb: urls.thumbUrl(full), source: "facebook" };
+    });
+  } catch (e) {
+    console.error("[facebook] listFacebookHighlights error:", e?.message || e);
+    return [];
+  }
+}
 
 export async function listFacebookProjects(env, category, urls) {
   if (!env.DB || !FB_CATEGORIES.includes(category)) return [];
@@ -1419,7 +1471,7 @@ async function publicProjectDescription(db, project) {
         )
       ORDER BY fp.rowid LIMIT 1`
   ).bind(project.id).first();
-  return post?.message?.trim() || "";
+  return stripControlTags(post?.message?.trim() || "") || "";
 }
 
 async function publicProjectPhotos(db, projectId, urls) {
@@ -2071,6 +2123,8 @@ async function adminPhotos(env, request, urls) {
       projectId: r.project_id,
       hidden: !!r.hidden,
       projectLocked: !!r.project_locked,
+      highlight: !!r.highlight,
+      highlightLocked: !!r.highlight_locked,
       status: r.status,
       caption: r.caption ? r.caption.slice(0, 500) : null,
       createdTime: r.fb_created_time,
@@ -2240,14 +2294,28 @@ async function adminPhotoUpdate(env, body) {
     sets.push("project_id = ?", "project_locked = 1");
     binds.push(target.id);
   }
+  if (body.highlight !== undefined) {
+    if (typeof body.highlight !== "boolean") return jsonResult({ error: "highlight must be true or false" }, 400);
+    // An admin choice is final: caption tags never change it again.
+    sets.push("highlight = ?", "highlight_locked = 1");
+    binds.push(body.highlight ? 1 : 0);
+  }
   if (!sets.length) return jsonResult({ error: "Nothing to update" }, 400);
 
   let updated = 0;
   for (const id of ids) {
-    const r = await env.DB
-      .prepare(`UPDATE facebook_photos SET ${sets.join(", ")}, updated_at = ${NOW_SQL} WHERE ${where}`)
-      .bind(...binds, id)
-      .run();
+    let r;
+    try {
+      r = await env.DB
+        .prepare(`UPDATE facebook_photos SET ${sets.join(", ")}, updated_at = ${NOW_SQL} WHERE ${where}`)
+        .bind(...binds, id)
+        .run();
+    } catch (e) {
+      if (body.highlight !== undefined && /no such column/i.test(String(e?.message || e))) {
+        return jsonResult({ error: "Highlights need D1 migration 018" }, 409);
+      }
+      throw e;
+    }
     if (r?.meta?.changes) {
       updated++;
       await reconcilePhoto(env, id);
@@ -2570,7 +2638,7 @@ async function discoveryProject(env, photo, task, context, dryRun, mappings, tar
     if (match.kind === 'review') return await fallback('review-album', match.candidates);
     if (match.kind === 'unmatched' && significantName(name) && /\b(deck|kitchen|bath|bathroom|remodel|garage|addition|porch|roof|basement|house|home|barn|build|construction|cabinets|furniture)\b/i.test(name)) {
       return dryRun ? { id: null, name, reason: 'album', action: 'create' }
-        : { ...(await createProject(env, { name, albumId, reason: 'album' })), reason: 'album', action: 'create' };
+        : { ...(await createProject(env, { name, albumId, reason: 'album', category: context.category || 'projects' })), reason: 'album', action: 'create' };
     }
     if (match.kind === 'unmatched') return await fallback('ambiguous-album');
   }
@@ -2640,6 +2708,9 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
     visit: async (photo, task, cutoff, b) => {
       let existing = await getPhotoRow(env.DB, photo.id);
       const context = { postId: cleanId(task.post?.id), message: task.post?.message || photo.name || task.album?.description || '', createdTime: toIso(task.post?.created_time) || toIso(photo.created_time), permalink: task.post?.permalink_url || photo.link || null };
+      const tags = liveTags(task.post?.message || photo.name || '', reviewMode);
+      context.category = tags.category;
+      context.highlight = tags.highlight;
       const date = toIso(photo.created_time);
       if (cutoff && (!date || date < cutoff)) return { outcome: 'outside-cutoff', project: null };
       if (!dryRun && source === 'webhook' && existing?.removed_on_facebook_at && task.post?.is_published === true && task.post?.is_hidden !== true) {

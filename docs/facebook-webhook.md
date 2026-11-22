@@ -86,7 +86,7 @@ await bf({ dryRun: false, limit: 5, resume: true }); // repeat until next === nu
 
 ## 3. Project grouping rules
 
-The contractor never has to use hashtags, special captions or another app. Each post is placed by the first rule that applies:
+The contractor never has to use hashtags, special captions or another app. Each post is placed by the first rule that applies. Optional caption tags (see below) only fine-tune it:
 
 | # | Evidence | Result |
 |---|---|---|
@@ -100,6 +100,13 @@ The contractor never has to use hashtags, special captions or another app. Each 
 - **Fixing placement:** an admin can move photos later, and the moves stick.
 - **Slugs:** a new project never takes the slug of an existing manual gallery; it gets a numbered suffix such as `lake-house-2`.
 - **Where projects appear:** on `/projects` by default. An admin can change the category to new-construction, remodels or furniture.
+- **Optional caption tags.** They apply to new posts and to edits of posts already on the site; historical imports ignore them. Details are in docs/facebook-hashtags.md.
+  - **Category:** `#project`, `#newconstruction`, `#remodels` or `#furniture` sets the category of a gallery the post **creates** (rules 2 and 4).
+    - It never changes an existing gallery.
+    - It never forces a gallery: rule 5 still applies.
+    - Two different category tags are ignored.
+  - **`#highlight`** also shows the post's photos in the homepage Highlights. An admin choice on `/admin/manage` overrides it permanently.
+  - **Captions:** these control tags are hidden on the website. Other hashtags are shown as written.
 
 ---
 

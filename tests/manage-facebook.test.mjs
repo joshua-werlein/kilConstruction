@@ -53,8 +53,11 @@ test("photo states and which photos each action changes", () => {
     restore: ["2"], // photos removed on Facebook can't be restored here (the Worker refuses too)
     move: ["1", "2", "3", "5"],
     purge: ["1", "2", "3", "5"],
+    highlightOn: ["1", "2", "3", "5"],
+    highlightOff: [],
   });
-  assert.deepEqual(actionTargets(null), { hide: [], restore: [], move: [], purge: [] });
+  assert.deepEqual(actionTargets([{ ...visible, highlight: true }, { ...deleted, highlight: true }]).highlightOff, ["1"], "deleted photos are left alone");
+  assert.deepEqual(actionTargets(null), { hide: [], restore: [], move: [], purge: [], highlightOn: [], highlightOff: [] });
 });
 
 test("move targets exclude the current gallery; permanent deletion needs the exact phrase", () => {
