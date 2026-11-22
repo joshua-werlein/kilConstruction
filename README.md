@@ -63,9 +63,16 @@ Production receives signature-verified Meta Page webhooks and deduplicates eligi
 
 The admin **Facebook Photo Review** page compares Facebook photos against existing website galleries (including visual duplicate hints) and saves **Import**, **Duplicate / Skip**, or **Review later** decisions. Saving **Import** is an approval, not an upload. **Import Approved Photos** then imports an album's approved photos into the chosen gallery:
 - a dry-run check, a confirmation dialog, and confirmed batches of at most 10 photos, with progress and a summary;
-- albums that hold several projects can send each batch to a different gallery.
+- albums that hold several projects can send each batch to a different gallery;
+- the destination can be any existing gallery, including the manual website galleries, which are linked automatically and never duplicated;
+- a new gallery can be created on the spot, after a check for an existing match and a confirmation.
 
-It is a scoped, authenticated operation (`FB_REVIEWED_IMPORT_ENABLED`) that takes explicit approved photo IDs only and can't start a historical scan. Unrestricted historical import and automatic album discovery remain disabled. Signed webhook imports of new Page posts continue automatically.
+It is a scoped, authenticated operation (`FB_REVIEWED_IMPORT_ENABLED`) that takes explicit approved photo IDs only and can't start a historical scan. Unrestricted historical import and automatic album discovery remain disabled.
+
+Signed webhook imports of new Page posts continue automatically:
+- a new Facebook album with a distinctive name becomes its own gallery;
+- an album named exactly like an existing gallery joins it;
+- ambiguous cases (similar or vague names, several galleries named, a finished job with no album) are **held for admin review** instead of being guessed. See [grouping rules](docs/facebook-webhook.md).
 
 **Optional caption hashtags** on new Facebook posts:
 - `#project`, `#newconstruction`, `#remodels` and `#furniture` choose the category of a gallery the post creates.
