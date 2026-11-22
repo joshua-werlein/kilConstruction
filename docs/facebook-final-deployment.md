@@ -84,7 +84,7 @@ last resort only, because it would also undo imports and decisions made after it
      reports it exists. Don't create one during validation.
    - **Don't use Add to Highlights during validation:** it permanently locks that photo's
      choice.
-6. **README:** push `f8e2b46` to the PR #2 branch (no force), mark it ready, and merge.
+6. **README:** push `f8e2b46` and `2e80705` to the PR #2 branch (no force), mark it ready, and merge.
 7. **First real use:**
    - the contractor's next post into a new named album creates its gallery, in the tagged
      category;
