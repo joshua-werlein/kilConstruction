@@ -26,6 +26,30 @@ export function destinationMode(plan, album) {
   return { mode: "choose", gallery: null, usable: true, galleries, mixedLocked: unsorted, mixedDefault: unsorted };
 }
 
+const GROUPS = [
+  ["projects", "Projects"],
+  ["new-construction", "New Construction"],
+  ["remodels", "Remodels"],
+  ["furniture", "Furniture"],
+];
+
+/** Destination options grouped by category; website (manual) galleries are labelled as such. */
+export function galleryGroups(galleries) {
+  const list = Array.isArray(galleries) ? galleries.filter((g) => g && typeof g.value === "string" && g.value) : [];
+  return GROUPS.map(([key, label]) => ({
+    label,
+    items: list.filter((g) => (GROUPS.some(([k]) => k === g.category) ? g.category : "projects") === key)
+      .map((g) => ({ value: g.value, label: g.source === "website" ? `${g.name} (website gallery)` : `${g.name} (Facebook gallery)` })),
+  })).filter((g) => g.items.length);
+}
+
+/** Request fields naming the destination: a record id, or a website folder that isn't linked yet. */
+export function destinationBody(gallery) {
+  if (Number.isInteger(gallery?.id) && gallery.id > 0) return { projectId: gallery.id };
+  if (typeof gallery?.linkedPrefix === "string" && gallery.linkedPrefix) return { linkedPrefix: gallery.linkedPrefix };
+  return {};
+}
+
 /** Request flags for a destination: dry runs on an unlinked album always use mixed mode. */
 export function runFlags(dest, { mixed, dryRun }) {
   if (dest.mode === "linked") return { mixedAlbum: false, linkFirst: false };

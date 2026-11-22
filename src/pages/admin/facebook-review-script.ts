@@ -3,7 +3,7 @@
 // sees the Page token or Facebook CDN URLs. Same-origin images also let the
 // page compute perceptual hashes in a canvas without tainting it.
 import { dHashFromRgba, bestMatch } from "../../lib/photo-hash.js";
-import { chunk, confirmText, destinationMode, runFlags, summarizeDryRun, summarizeImport } from "../../lib/review-import.js";
+import { chunk, confirmText, destinationBody, destinationMode, galleryGroups, runFlags, summarizeDryRun, summarizeImport } from "../../lib/review-import.js";
 
 type Decision = "import" | "skip" | "later";
 type Target = { value: string; name: string; category: string; prefix: string | null; source: string; id: number | null };
@@ -518,8 +518,7 @@ async function start() {
     function selectedGallery() {
         if (!dest) return null;
         if (dest.mode === "linked") return dest.gallery;
-        const id = Number(importGallery.value);
-        return dest.galleries.find((g: any) => g.id === id) || null;
+        return dest.galleries.find((g: any) => g.value === importGallery.value) || null;
     }
     function updateImportButton() {
         const g = selectedGallery();
@@ -549,9 +548,13 @@ async function start() {
         if (dest.mode === "choose") {
             const keep = importGallery.value;
             importGallery.replaceChildren();
-            put(importGallery, el("option", { value: "" }, "Choose a gallery…"),
-                ...dest.galleries.map((g: any) => el("option", { value: String(g.id) }, `${g.name}${g.linkedPrefix ? ` (website gallery ${g.linkedPrefix.replace(/\/$/, "")})` : ""}`)));
-            if (keep && dest.galleries.some((g: any) => String(g.id) === keep)) importGallery.value = keep;
+            put(importGallery, el("option", { value: "" }, "Choose a gallery…"));
+            for (const group of galleryGroups(dest.galleries)) {
+                const og = el("optgroup", { label: group.label });
+                for (const g of group.items) put(og, el("option", { value: g.value }, g.label));
+                put(importGallery, og);
+            }
+            if (keep && dest.galleries.some((g: any) => g.value === keep)) importGallery.value = keep;
             importMixed.checked = dest.mixedDefault || importMixed.checked;
             importMixed.disabled = dest.mixedLocked;
         }
@@ -569,7 +572,7 @@ async function start() {
         try {
             for (let i = 0; i < batches.length; i++) {
                 importStatus.textContent = `Checking batch ${i + 1} of ${batches.length}…`;
-                responses.push(await postBatch({ dryRun: true, albumId: a.id, projectId: g.id, photoIds: batches[i], mixedAlbum: flags.mixedAlbum }));
+                responses.push(await postBatch({ dryRun: true, albumId: a.id, ...destinationBody(g), photoIds: batches[i], mixedAlbum: flags.mixedAlbum }));
             }
         } catch (e) {
             responses.push({ error: (e as Error).message });
@@ -601,6 +604,13 @@ async function start() {
         const flags = runFlags(dest, { mixed: importMixed.checked, dryRun: false });
         const responses: any[] = [];
         try {
+            if (dry.gallery.id === null) {
+                // A website gallery with no link record yet: create or reuse it (never a new public gallery).
+                importStatus.textContent = `Connecting ${dry.gallery.name} to Facebook imports…`;
+                const made = await postJson("project-create", { name: dry.gallery.name, linkedPrefix: dry.gallery.linkedPrefix });
+                if (!made?.project?.id) throw new Error("Could not connect that website gallery");
+                dry.gallery = { ...dry.gallery, id: made.project.id };
+            }
             if (flags.linkFirst) {
                 importStatus.textContent = `Linking this album to ${dry.gallery.name}…`;
                 await postJson("album-link", { albumId: a.id, projectId: dry.gallery.id });
