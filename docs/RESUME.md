@@ -7,16 +7,24 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 | Component | Live | Rollback target |
 |---|---|---|
-| Pages (`kilconstruction`) | `584403a7` from `main` `bd707ef` (Manage Images: Facebook galleries) | `02aaaf2a` (`9aa5b0a`) |
-| Gallery Worker (`kilcon-gallery-worker`) | `93b9f92b-a549-443d-b6f1-19cb527e9f8e`, tag `bd707ef` (`album-link`, branding guard) | `npx wrangler versions deploy 8c893925-6546-41fd-ad68-16e056de7d39@100%`, then `18177ff4` |
-| D1 `kilcon-db` | Migrations through **017**; none pending | Bookmark before `bd707ef`: `000006e3-00000000-0000512b-9128b0a3d2077a6bb6b92f31849e5d44`. Before the Ganz import: `000006d6-00000000-0000512b-2269b9f882efa19e8fc0885a612689b6` |
+| Pages (`kilconstruction`) | `e828a3b5` from `main` `2d8f323` (Import Approved Photos) | `584403a7` (`bd707ef`), then `02aaaf2a` |
+| Gallery Worker (`kilcon-gallery-worker`) | `33c469b5-1c20-449f-bb7c-859358f93693`, tag `2d8f323` (`import-plan`, `import-run`, mixed albums) | `npx wrangler versions deploy 93b9f92b-a549-443d-b6f1-19cb527e9f8e@100%`, then `8c893925` |
+| D1 `kilcon-db` | Migrations through **017**. 018 (Highlights) is written on branch `task/facebook-hashtags` and not applied | Bookmark before `2d8f323`: `000006f3-00000000-0000512b-7d027c724b7152aa3ec2ef66f0d1f5cc`. Before the Ganz import: `000006d6-00000000-0000512b-2269b9f882efa19e8fc0885a612689b6` |
 | Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |
 
 - **Worker flags:**
   - `FB_INTEGRATION_ENABLED=true`
   - `FB_AUTO_IMPORT=true`
   - `FB_DISCOVERY_ENABLED=false`
-  - `FB_HISTORICAL_IMPORT_ENABLED=false`
+  - `FB_HISTORICAL_IMPORT_ENABLED=false` (stays off permanently)
+  - `FB_REVIEWED_IMPORT_ENABLED=false`: the scoped switch for Import Approved Photos. It is
+    turned on only with the owner's approval.
+- **Verified after `2d8f323`** (2026-11-22, 18:35 UTC):
+  - 122/122 production checks passed.
+  - `import-plan` and `import-run` return 401 `no-store` signed out, and a form-encoded POST is
+    also refused.
+  - D1 was unchanged by the deploy.
+  - The signed-in check is pending: the owner's admin session had expired.
 - **Plan and bindings:** Workers **Free** plan. Bindings are unchanged; I diffed them against
   the previous version before deploying.
 - **Data:**
@@ -67,41 +75,33 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 ## Next actionable step
 
-**The owner reviews the new *Import Approved Photos* workflow and approves deploying it.**
-It lives on local branch `task/review-import-workflow`, uncommitted, and includes the mixed-album
-change. See docs/facebook-photo-review.md on that branch.
+1. **Ripley.** The owner signs in, opens Ripley on `/admin/facebook-review` and clicks
+   **Import Approved Photos**. Expect 2 new, 0 refused; the check writes nothing.
+2. **Turn on the scoped switch**, with the owner's approval:
+   - a version with `--var FB_REVIEWED_IMPORT_ENABLED:true`;
+   - the same change committed to `wrangler.toml`.
+3. **The owner confirms the Ripley import** from the button. After that, every batch is: approve
+   photos, click, confirm. See docs/facebook-photo-review.md.
 
-The button replaces manual batches:
-- a check (dry run);
-- a confirmation dialog;
-- bounded batches of 10;
-- a progress display and summary;
-- refreshing the album afterwards.
+**Hashtags.** These are implemented and tested on local branch `task/facebook-hashtags`
+(uncommitted). Deploying them needs approval and migration 018. See docs/facebook-hashtags.md
+on that branch.
 
-It uses a scoped switch, `FB_REVIEWED_IMPORT_ENABLED`, which ships `"false"`.
-`FB_HISTORICAL_IMPORT_ENABLED` stays `"false"` permanently.
-
-The owner has marked Import on both Ripley photos (gallery 5, linked). The Ripley dry run hasn't
-run yet, because the admin session had expired. It runs from the button once the workflow is
-deployed, or by hand after the owner signs in.
-
-Backup of the mixed-album change on its own: `C:\Users\Jwerl\dev\.archives\kil-construction\mixed-album-import-2026-11-22.patch`.
+**README.** Draft PR #2 (`docs/kil-readme-align-20261122`, README only) is reconciled and merged
+once production is final. Never overwrite that branch.
 
 ## Remaining steps, in order (each needs the owner's approval)
 
 1. ~~Save the Skip plan~~: done (216 high-confidence Skips). The owner reviews the 20 medium-confidence matches by eye.
-2. **Phase C batches.** See the batch plan in reconciliation §10.
-   - **Order:** Ripley, Zingshiem, Rieck Deck, Pongratz, Bisek, then the Group A albums one at
-     a time.
-   - **Per batch:**
-     1. `project-create`, or the linked gallery;
-     2. `album-link`;
-     3. the owner marks Import;
-     4. dry run;
-     5. a `--var` flag-on version, then the run, then flag off;
-     6. verify.
-3. **Deploy mixed-album import.** Commit `task/mixed-album-import`, then `versions upload` and
-   `deploy`, before any Mobile uploads or Ganz batch.
+2. **Phase C, done by the owner from the review page** once the scoped switch is on.
+   - **Order:** Ripley, Zingshiem, Rieck Deck, Pongratz, Bisek, then the Group A albums. See the
+     batch plan in reconciliation §10.
+   - **Galleries:** a new gallery is created on `/admin/facebook`. The page links the album on
+     confirmation.
+   - **After each batch:** I verify on request (gallery count, images, D1 diff, production
+     checks).
+3. ~~Deploy mixed-album import~~: done (`2d8f323`). Mixed albums (Ganz, Mobile uploads) are
+   imported with the "several projects" option.
 4. **Held items:**
    - Jsme and Home (identity);
    - E. Fankhauser and Fankhauser (display names; separate galleries);
@@ -143,9 +143,10 @@ Backup of the mixed-album change on its own: `C:\Users\Jwerl\dev\.archives\kil-c
 
 | Item | State |
 |---|---|
-| `main` | `= origin/main` at `bd707ef` |
-| `task/review-import-workflow` | Local and uncommitted: Import Approved Photos + mixed-album import; **keep** |
-| `task/mixed-album-import` | Points at `main`; its change is carried by `task/review-import-workflow` and backed up as a patch in `.archives/kil-construction/` |
+| `main` | `= origin/main` (`2d8f323` plus docs) |
+| `task/facebook-hashtags` | Local and uncommitted: caption hashtags + migration 018; **keep** |
+| `task/review-import-workflow`, `task/mixed-album-import` | Merged into `2d8f323` and deleted |
+| `docs/kil-readme-align-20261122` (draft PR #2) | The owner's README branch; **don't overwrite**; merge last |
 | `task/facebook-integration-completion` | Merged (`bd707ef`) and deleted |
 | `task/review-comparison-ui` | Merged; delete |
 | `backup-pre-revert` | Unmerged; the owner's backup; keep |
