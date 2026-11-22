@@ -126,3 +126,27 @@ test("confirming into a website gallery creates or reuses its link before import
   assert.match(confirm, /if \(dry\.gallery\.id === null\)/, "only for a gallery that isn't linked yet");
   assert.match(s, /el\("optgroup", \{ label: group\.label \}\)/);
 });
+
+test("Create New Gallery: suggested names, check messages, and the confirmation phrase", async () => {
+  const { GALLERY_CONFIRMATION, suggestedGalleryName, galleryCheckText } = await import("../src/lib/review-import.js");
+  assert.match(worker, new RegExp(`export const GALLERY_CONFIRMATION = "${GALLERY_CONFIRMATION}";`));
+  assert.equal(suggestedGalleryName([{ note: null }, { note: "Held automatically 2026-11-22: a finished job with no album needs a gallery name; suggested name: Henderson sunroom; #remodels tag" }]), "Henderson sunroom");
+  assert.equal(suggestedGalleryName([{ note: "Visual duplicate" }]), "");
+  assert.match(galleryCheckText({ existing: [{ name: "Ganz Garage" }] }, "ganz garage", "Projects"), /already exists\. Choose it/);
+  assert.match(galleryCheckText({ similar: [{ name: "Ganz Garage" }] }, "Ganz Deck", "Remodels"), /Similar galleries exist: Ganz Garage/);
+  assert.equal(galleryCheckText({ ok: true }, "Zingshiem", "New Construction"), `"Zingshiem" doesn't exist yet. Create it under New Construction?`);
+});
+
+test("Create New Gallery is wired safely: check first, confirm, then select the new gallery", () => {
+  for (const id of ["rv-newgal", "rv-newgal-name", "rv-newgal-category", "rv-newgal-check", "rv-newgal-create", "rv-newgal-status"]) assert.match(page, new RegExp(`id="${id}"`), id);
+  for (const v of ["projects", "new-construction", "remodels", "furniture"]) assert.match(page, new RegExp(`<option value="${v}">`));
+  const s = code(script);
+  const check = s.slice(s.indexOf('newGalCheck.addEventListener("click"'), s.indexOf('newGalCreate.addEventListener("click"'));
+  const create = s.slice(s.indexOf('newGalCreate.addEventListener("click"'), s.indexOf('newGalCreate.addEventListener("click"') + 1800);
+  assert.match(check, /galleryRequest\(\{ dryRun: true, name, category \}\)/, "the check never creates");
+  assert.match(check, /if \(r\.existing\?\.length\) \{[\s\S]*importGallery\.value = match\.value[\s\S]*return;/, "an existing gallery is selected, not duplicated");
+  assert.match(create, /if \(!window\.confirm\(`Create the gallery/);
+  assert.match(create, /confirm: GALLERY_CONFIRMATION/);
+  assert.match(create, /await refreshImportPanel\(\);\s*importGallery\.value = `project:\$\{r\.project\.id\}`;/);
+  assert.match(s, /\/\^Held automatically\/\.test\(p\.note\)/, "held photos show why");
+});

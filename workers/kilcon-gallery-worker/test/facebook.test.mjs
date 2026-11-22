@@ -737,24 +737,27 @@ test("ambiguous posts appear in Recent Project Updates", async () => {
   assert.ok(page.items.some((i) => i.description === null));
 });
 
-test("a completed-build post with several photos creates a new project", async () => {
+test("a completed-build post with no album is held for the admin to name; nothing is invented or published", async () => {
   stubPost(`${PAGE_ID}_240`, ["3401", "3402", "3403"], {
     message: "Finished up the Henderson sunroom addition! #kilconstruction\nThanks to the whole crew.",
   });
   await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_240`)]));
-  const [project] = await rows("SELECT * FROM facebook_projects");
-  assert.equal(project.name, "Finished up the Henderson sunroom addition");
-  assert.equal(project.grouping_reason, "completed-build");
-  assert.equal((await getJson(`/api/gallery-api?project=${project.slug}`)).items.length, 3);
+  assert.equal((await rows("SELECT * FROM facebook_projects")).length, 0);
+  assert.equal((await rows("SELECT * FROM facebook_photos")).length, 0);
+  const held = await rows("SELECT fb_photo_id, decision, note FROM facebook_photo_reviews ORDER BY fb_photo_id");
+  assert.deepEqual(held.map((h) => [h.fb_photo_id, h.decision]), [["3401", "later"], ["3402", "later"], ["3403", "later"]]);
+  assert.match(held[0].note, /suggested name: Finished up the Henderson sunroom addition/);
+  assert.match((await rows("SELECT status, last_error FROM facebook_webhook_events"))[0].last_error, /held for review 3/);
 });
 
-test("project slugs never collide with existing manual galleries", async () => {
+test("an album named exactly like an existing website gallery joins it instead of creating a second gallery", async () => {
   await baseEnv.GALLERY_BUCKET.put("Projects/Lake House/1.jpg", "manual");
   stubPost(`${PAGE_ID}_245`, ["3451"], { message: "x", album: { id: "777", name: "Lake House" } });
   await postWebhook(autoEnv(), feedPayload([postAdd(`${PAGE_ID}_245`)]));
-  const [project] = await rows("SELECT slug FROM facebook_projects");
-  assert.equal(project.slug, "lake-house-2");
-  assert.equal((await getJson("/api/gallery-api?project=lake-house")).items.length, 1, "manual one untouched");
+  assert.deepEqual(await rows("SELECT slug, linked_prefix FROM facebook_projects"), [{ slug: "lake-house-2", linked_prefix: "Projects/Lake House/" }],
+    "a link record (its slug never collides), not a second public gallery");
+  assert.deepEqual((await rows("SELECT album_id FROM facebook_album_mappings")).map((r) => r.album_id), ["777"]);
+  assert.equal((await getJson("/api/gallery-api?project=lake-house")).items.length, 2, "the manual gallery shows its photo + the new one");
 });
 
 test("duplicate deliveries and overlapping workers never duplicate content", async () => {

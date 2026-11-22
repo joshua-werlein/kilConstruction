@@ -3,7 +3,7 @@
 // sees the Page token or Facebook CDN URLs. Same-origin images also let the
 // page compute perceptual hashes in a canvas without tainting it.
 import { dHashFromRgba, bestMatch } from "../../lib/photo-hash.js";
-import { chunk, confirmText, destinationBody, destinationMode, galleryGroups, runFlags, summarizeDryRun, summarizeImport } from "../../lib/review-import.js";
+import { GALLERY_CONFIRMATION, chunk, confirmText, destinationBody, destinationMode, galleryCheckText, galleryGroups, runFlags, suggestedGalleryName, summarizeDryRun, summarizeImport } from "../../lib/review-import.js";
 
 type Decision = "import" | "skip" | "later";
 type Target = { value: string; name: string; category: string; prefix: string | null; source: string; id: number | null };
@@ -257,6 +257,7 @@ async function start() {
         }
         if (p.decision) put(status, badge(p.decision === "skip" ? "Marked Duplicate / Skip" : p.decision === "import" ? "Marked Import" : "Marked Review later"));
         put(li, status);
+        if (p.note && /^Held automatically/.test(p.note)) put(li, el("p", { class: "hint rv-held-note" }, p.note));
         if (!isLocked(p)) put(li, decisionButtons(p));
         return li;
     }
@@ -559,8 +560,62 @@ async function start() {
             importMixed.disabled = dest.mixedLocked;
         }
         updateImportButton();
+        const suggestion = suggestedGalleryName(photos);
+        if (suggestion && !newGalName.value) newGalName.value = suggestion;
     }
     importGallery.addEventListener("change", updateImportButton);
+
+    // --- Create New Gallery ----------------------------------------------------
+    // Check (no write) -> show existing / similar galleries -> explicit Create
+    // with a confirmation -> refresh the destinations and select the new one.
+    const newGalName = $<HTMLInputElement>("rv-newgal-name"), newGalCategory = $<HTMLSelectElement>("rv-newgal-category");
+    const newGalCheck = $<HTMLButtonElement>("rv-newgal-check"), newGalCreate = $<HTMLButtonElement>("rv-newgal-create");
+    const newGalStatus = $("rv-newgal-status"), newGalMatches = $("rv-newgal-matches");
+    let newGalChecked: { name: string; category: string; allowSimilar: boolean } | null = null;
+    async function galleryRequest(body: unknown): Promise<any> {
+        const res = await fetch(`${API}/gallery-create`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        return await res.json().catch(() => ({ error: `Request failed (${res.status})` }));
+    }
+    const resetNewGal = () => { newGalChecked = null; newGalCreate.hidden = true; };
+    newGalName.addEventListener("input", resetNewGal);
+    newGalCategory.addEventListener("change", resetNewGal);
+    newGalCheck.addEventListener("click", async () => {
+        resetNewGal();
+        const name = newGalName.value.replace(/\s+/g, " ").trim(), category = newGalCategory.value;
+        const label = newGalCategory.selectedOptions[0]?.textContent || category;
+        newGalStatus.textContent = "Checking existing galleries…";
+        const r = await galleryRequest({ dryRun: true, name, category });
+        newGalStatus.textContent = galleryCheckText(r, name, label);
+        listItems(newGalMatches, [...(r.existing || []), ...(r.similar || [])].map((g: any) => `${g.name}${g.prefix ? " (website gallery)" : ""}`));
+        if (r.existing?.length) {
+            // Offer the existing gallery instead of creating a duplicate.
+            const match = dest?.galleries?.find((g: any) => g.value === r.existing[0].value);
+            if (match) { importGallery.value = match.value; updateImportButton(); }
+            return;
+        }
+        if (r.ok || r.similar?.length) {
+            newGalChecked = { name, category, allowSimilar: !!r.similar?.length };
+            newGalCreate.textContent = r.similar?.length ? `Create "${name}" anyway` : `Create "${name}" under ${label}`;
+            newGalCreate.hidden = false;
+        }
+    });
+    newGalCreate.addEventListener("click", async () => {
+        const c = newGalChecked;
+        if (!c) return;
+        const label = newGalCategory.selectedOptions[0]?.textContent || c.category;
+        if (!window.confirm(`Create the gallery "${c.name}" under ${label}? It stays off the website until photos are imported into it.`)) return;
+        newGalCreate.disabled = true;
+        const r = await galleryRequest({ dryRun: false, name: c.name, category: c.category, allowSimilar: c.allowSimilar, confirm: GALLERY_CONFIRMATION });
+        newGalCreate.disabled = false;
+        if (!r?.project?.id) { newGalStatus.textContent = galleryCheckText(r, c.name, label); return; }
+        resetNewGal();
+        newGalName.value = "";
+        newGalStatus.textContent = `Created "${r.project.name}". It is selected as the destination below.`;
+        listItems(newGalMatches, []);
+        await refreshImportPanel();
+        importGallery.value = `project:${r.project.id}`;
+        updateImportButton();
+    });
 
     importCheck.addEventListener("click", async () => {
         const a = current, g = selectedGallery();

@@ -580,7 +580,7 @@ async function processEvent(env, row, budget) {
   if (r.ignored) return { status: "ignored", note: r.ignored };
   return {
     status: "done",
-    note: `imported ${r.imported}, skipped ${r.skipped}; project ${r.project?.slug || "-"} (${r.project?.reason || "-"})`,
+    note: `imported ${r.imported}, skipped ${r.skipped}${r.held ? `, held for review ${r.held}` : ""}; project ${r.project?.slug || "-"} (${r.project?.reason || "-"})`,
   };
 }
 
@@ -805,6 +805,7 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
   const tags = liveTags(context.message, reviewMode);
   context.category = tags.category;
   context.highlight = tags.highlight;
+  context.live = reviewMode === "live";
 
   const project = await assignProject(env, {
     context,
@@ -815,6 +816,19 @@ async function ingestPost(env, { postId, hintPhotoIds = [], source, post = null,
   });
   if (dryRun) {
     return { imported: 0, skipped, project, newPhotos: pending.length, photos: photoIds.length, context };
+  }
+  // Ambiguous project: nothing is imported. Live photos are held as "Review
+  // later" with the reason, so they appear on /admin/facebook-review.
+  if (project.action === "hold") {
+    if (reviewMode !== "live") return { imported: 0, skipped: skipped + pending.length, project, photos: photoIds.length };
+    let held = 0;
+    for (const { id } of pending) {
+      const photo = id === first.id ? first : await graphGet(env, id, { fields: PHOTO_FIELDS }, budget);
+      if (isExcluded(photo)) { skipped++; continue; }
+      if (await holdForReview(db, photo, project, context)) held++;
+      else skipped++;
+    }
+    return { imported: 0, skipped, held, project, photos: photoIds.length };
   }
 
   if (context.postId) {
@@ -925,10 +939,22 @@ async function assignProject(env, { context, photos, photoCount = photos.length,
   if (albums.size === 1) {
     const [[albumId, albumName]] = [...albums];
     const existing = await db
-      .prepare(`SELECT id, slug, name FROM facebook_projects WHERE fb_album_id = ?`)
-      .bind(albumId)
+      .prepare(`SELECT id, slug, name FROM facebook_projects WHERE fb_album_id = ?
+                 UNION ALL SELECT p.id, p.slug, p.name FROM facebook_album_mappings m JOIN facebook_projects p ON p.id = m.project_id WHERE m.album_id = ?
+                 LIMIT 1`)
+      .bind(albumId, albumId)
       .first();
     if (existing) return { ...existing, reason: "album", action: "reuse" };
+    const decision = albumDestination(albumName, await readAlbumTargets(env));
+    if (decision.kind === "reuse") {
+      // The album's name is exactly an existing gallery: use it, never a second gallery.
+      const t = decision.target;
+      if (dryRun) return { id: t.id ?? null, slug: t.slug ?? null, name: t.name, reason: "album-match", action: t.id ? "reuse" : "link" };
+      const p = t.id ? { id: t.id, slug: t.slug, name: t.name } : await getOrCreateLinkedProject(env, t.prefix, t.name, "auto");
+      await db.prepare("INSERT OR IGNORE INTO facebook_album_mappings (album_id, project_id) VALUES (?, ?)").bind(albumId, p.id).run();
+      return { ...p, reason: "album-match", action: t.id ? "reuse" : "link" };
+    }
+    if (decision.kind === "hold") return { id: null, slug: null, name: albumName, reason: decision.reason, action: "hold", candidates: decision.candidates };
     if (dryRun) return { id: null, slug: null, name: albumName, reason: "album", action: "create" };
     return {
       ...(await createProject(env, { name: albumName, albumId, reason: "album", category: context.category || "projects" })),
@@ -938,6 +964,9 @@ async function assignProject(env, { context, photos, photoCount = photos.length,
   }
 
   const matches = await matchExistingProjects(env, context.message);
+  if (matches.length > 1) {
+    return { id: null, slug: null, name: null, reason: "several-galleries", action: "hold", candidates: matches.map((m) => m.name).slice(0, 5) };
+  }
   if (matches.length === 1) {
     const m = matches[0];
     if (m.id) return { id: m.id, slug: m.slug, name: m.name, reason: "caption", action: "reuse" };
@@ -948,13 +977,10 @@ async function assignProject(env, { context, photos, photoCount = photos.length,
   }
 
   if (photoCount >= 3 && COMPLETION_RE.test(context.message || "")) {
-    const name = projectNameFromCaption(context.message, context.createdTime);
-    if (dryRun) return { id: null, slug: null, name, reason: "completed-build", action: "create" };
-    return {
-      ...(await createProject(env, { name, reason: "completed-build", category: context.category || "projects" })),
-      reason: "completed-build",
-      action: "create",
-    };
+    // A finished job with no album: the caption doesn't reliably name the
+    // project, so the admin names it (the caption's first sentence is offered).
+    const suggested = projectNameFromCaption(context.message, context.createdTime);
+    return { id: null, slug: null, name: null, reason: "needs-name", action: "hold", suggested: /^Project – /.test(suggested) ? null : suggested };
   }
 
   if (dryRun) return { id: null, slug: RECENT_SLUG, name: RECENT_NAME, reason: "ambiguous", action: "recent" };
@@ -1120,6 +1146,48 @@ async function setTagHighlight(db, where, binds, on) {
     return true;
   } catch (e) {
     if (/no such column/i.test(String(e?.message || e))) return false;
+    throw e;
+  }
+}
+
+// Where a new album's photos go (live content):
+//   reuse  its name is exactly one existing gallery (Facebook or website)
+//   hold   it resembles existing galleries, or has no distinctive word
+//   create a new gallery named after the album
+function albumDestination(name, targets) {
+  const c = classifyAlbum(name, targets, GENERIC_WORDS);
+  if (c.kind === "exact") return { kind: "reuse", target: c.candidates[0] };
+  if (c.kind === "review") return { kind: "hold", reason: "similar-gallery", candidates: c.candidates.map((t) => t.name).slice(0, 5) };
+  if (c.kind !== "unmatched") return { kind: "hold", reason: "ambiguous-name", candidates: [] };
+  const distinctive = normalizeWords(name).split(" ").filter((w) => w.length >= 3 && !GENERIC_WORDS.has(w));
+  return distinctive.length ? { kind: "create" } : { kind: "hold", reason: "ambiguous-name", candidates: [] };
+}
+
+const HOLD_TEXT = {
+  "similar-gallery": "the album name resembles an existing gallery",
+  "ambiguous-name": "the album name doesn't identify a project",
+  "several-galleries": "the caption names several galleries",
+  "needs-name": "a finished job with no album needs a gallery name",
+};
+
+// Holds a live photo for the admin: a "Review later" decision (never over an
+// existing decision) explaining why, so it appears on /admin/facebook-review.
+// Returns true when held. Nothing is imported or published.
+async function holdForReview(db, photo, project, context = {}) {
+  const id = cleanId(photo?.id);
+  if (!id) return false;
+  const parts = [`Held automatically ${new Date().toISOString().slice(0, 10)}: ${HOLD_TEXT[project.reason] || "needs a gallery"}`];
+  if (project.candidates?.length) parts.push(`similar: ${project.candidates.join(", ")}`);
+  if (project.suggested) parts.push(`suggested name: ${project.suggested}`);
+  if (context.category) parts.push(`#${context.category.replace("-", "")} tag`);
+  try {
+    const r = await db
+      .prepare(`INSERT INTO facebook_photo_reviews (fb_photo_id, album_id, decision, note) VALUES (?, ?, 'later', ?) ON CONFLICT(fb_photo_id) DO NOTHING`)
+      .bind(id, cleanId(photo?.album?.id), parts.join("; ").slice(0, 500))
+      .run();
+    return !!r?.meta?.changes || !!(await db.prepare(`SELECT 1 FROM facebook_photo_reviews WHERE fb_photo_id = ?`).bind(id).first());
+  } catch (e) {
+    if (/no such table/i.test(String(e?.message || e))) { console.warn("[facebook] can't hold for review without migration 017; photo left unimported", id); return false; }
     throw e;
   }
 }
@@ -2014,6 +2082,7 @@ export async function handleFacebookAdmin(request, env, sub, urls) {
     if (sub === "project-update") return await adminProjectUpdate(env, body);
     if (sub === "project-create") return await adminProjectCreate(env, body);
     if (sub === "album-link") return await adminAlbumLink(env, body);
+    if (sub === "gallery-create") return await adminGalleryCreate(env, request, body);
     if (sub === "import-run") return await adminImportRun(env, request, body);
     if (sub === "photo-update") return await adminPhotoUpdate(env, body);
     if (sub === "retry") return await adminRetry(env);
@@ -2228,6 +2297,36 @@ async function adminProjectCreate(env, body) {
 // Refuses branding and generic albums (Mobile uploads stays unmapped), the
 // Recent Project Updates gallery, albums the Page doesn't own, and albums
 // already linked to a different gallery.
+// Create New Gallery from /admin/facebook-review. Checks every existing
+// gallery (Facebook and website) first: an exact name match is refused and
+// returned, a similar name needs allowSimilar, and a real create needs the
+// confirmation phrase. The new gallery is empty and stays off the website
+// until photos are imported into it.
+export const GALLERY_CONFIRMATION = "CREATE GALLERY";
+async function adminGalleryCreate(env, request, body) {
+  const type = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/json") return jsonResult({ error: "JSON body required" }, 415);
+  const name = typeof body?.name === "string" ? body.name.replace(/\s+/g, " ").trim() : "";
+  if (name.length < 2 || name.length > 80 || !/\p{L}/u.test(name)) return jsonResult({ error: "Enter a gallery name of 2-80 characters" }, 400);
+  const category = body?.category;
+  if (!FB_CATEGORIES.includes(category)) return jsonResult({ error: "Choose Projects, New Construction, Remodels or Furniture" }, 400);
+  const dryRun = body?.dryRun !== false;
+
+  const targets = await readAlbumTargets(env);
+  const key = normalizeWords(name);
+  const out = (t) => ({ value: t.value, id: t.id ?? null, name: t.name, category: t.category, prefix: t.prefix || null });
+  const existing = targets.filter((t) => normalizeWords(t.name) === key).map(out);
+  const c = classifyAlbum(name, targets, GENERIC_WORDS);
+  const similar = (c.kind === "review" ? c.candidates : []).map(out).filter((t) => !existing.some((e) => e.value === t.value)).slice(0, 8);
+  if (existing.length) return jsonResult({ error: "A gallery with this name already exists", existing, similar }, 409);
+  if (similar.length && body?.allowSimilar !== true) return jsonResult({ error: "Similar galleries exist; confirm it is a different project", existing, similar }, 409);
+  if (dryRun) return jsonResult({ ok: true, dryRun: true, wouldCreate: { name, category }, similar });
+  if (body?.confirm !== GALLERY_CONFIRMATION) return jsonResult({ error: `Confirmation required: {"confirm":"${GALLERY_CONFIRMATION}"}` }, 400);
+  const p = await createProject(env, { name, reason: "admin", category, createdBy: "admin" });
+  console.log("[facebook] gallery created from review page", { id: p.id, category });
+  return jsonResult({ ok: true, project: projectOut(await loadProject(env.DB, p.id)) });
+}
+
 async function adminAlbumLink(env, body) {
   const albumId = cleanId(body?.albumId);
   const projectId = Number.isSafeInteger(body?.projectId) && body.projectId > 0 ? body.projectId : null;
@@ -2635,6 +2734,15 @@ async function discoveryProject(env, photo, task, context, dryRun, mappings, tar
       if (!dryRun) await env.DB.prepare('INSERT OR IGNORE INTO facebook_album_mappings(album_id,project_id) VALUES (?,?)').bind(albumId, p.id).run();
       return { ...p, reason: 'album-match', action: m.id ? 'reuse' : 'link', destination: m.value };
     }
+    // Live discovery (no explicit mappings): same album rules as new posts.
+    if (mappings === null) {
+      const d = albumDestination(name, await targets());
+      if (d.kind === 'hold') return { id: null, name, reason: d.reason, action: 'hold', candidates: d.candidates };
+      if (d.kind === 'create') {
+        return dryRun ? { id: null, name, reason: 'album', action: 'create' }
+          : { ...(await createProject(env, { name, albumId, reason: 'album', category: context.category || 'projects' })), reason: 'album', action: 'create' };
+      }
+    }
     if (match.kind === 'review') return await fallback('review-album', match.candidates);
     if (match.kind === 'unmatched' && significantName(name) && /\b(deck|kitchen|bath|bathroom|remodel|garage|addition|porch|roof|basement|house|home|barn|build|construction|cabinets|furniture)\b/i.test(name)) {
       return dryRun ? { id: null, name, reason: 'album', action: 'create' }
@@ -2709,6 +2817,7 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       let existing = await getPhotoRow(env.DB, photo.id);
       const context = { postId: cleanId(task.post?.id), message: task.post?.message || photo.name || task.album?.description || '', createdTime: toIso(task.post?.created_time) || toIso(photo.created_time), permalink: task.post?.permalink_url || photo.link || null };
       const tags = liveTags(task.post?.message || photo.name || '', reviewMode);
+      context.live = reviewMode === 'live';
       context.category = tags.category;
       context.highlight = tags.highlight;
       const date = toIso(photo.created_time);
@@ -2754,6 +2863,10 @@ async function runDiscoveryBatch(env, state, { dryRun, source = 'backfill', mapp
       const locked = existing?.project_locked && existing.project_id ? await loadProject(env.DB, existing.project_id) : null;
       const project = locked ? { ...locked, reason: 'admin', action: 'reuse' } : await discoveryProject(env, photo, task, context, dryRun, mappings, targets);
       if (project.action === 'exclude') return { outcome: 'excluded', project };
+      if (project.action === 'hold') {
+        if (!dryRun && reviewMode === 'live') await holdForReview(env.DB, { ...photo, album: photo.album || task.album }, project, context);
+        return { outcome: 'held', project: previewProposal(project) };
+      }
       const best = pickLargestImage(photo.images);
       if (!best) throw new Error('Photo has no downloadable image');
       assertFacebookCdnUrl(best.source);

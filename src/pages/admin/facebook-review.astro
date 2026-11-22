@@ -93,6 +93,26 @@ if (!isAdmin) {
                             <span>This album holds several projects: import these photos into this gallery only, without linking the album</span>
                         </label>
                     </div>
+                    <details id="rv-newgal" class="rv-newgal">
+                        <summary>Create a new gallery</summary>
+                        <div class="rv-import-dest">
+                            <label><span>Gallery name</span><input id="rv-newgal-name" class="admin-input" type="text" maxlength="80" autocomplete="off" /></label>
+                            <label><span>Category</span>
+                                <select id="rv-newgal-category" class="admin-input">
+                                    <option value="projects">Projects</option>
+                                    <option value="new-construction">New Construction</option>
+                                    <option value="remodels">Remodels</option>
+                                    <option value="furniture">Furniture</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="rv-bulk">
+                            <button id="rv-newgal-check" type="button" class="btn-small">Check name</button>
+                            <button id="rv-newgal-create" type="button" class="btn-small btn-primary" hidden>Create gallery</button>
+                        </div>
+                        <p id="rv-newgal-status" class="hint" role="status" aria-live="polite"></p>
+                        <ul id="rv-newgal-matches" class="rv-import-report"></ul>
+                    </details>
                     <div class="rv-bulk">
                         <button id="rv-import-check" type="button" class="btn-small">Import Approved Photos</button>
                     </div>
@@ -198,6 +218,9 @@ if (!isAdmin) {
         #rv-root .rv-import-report { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .85rem; }
         #rv-root .rv-import-report li { margin: .15rem 0; overflow-wrap: anywhere; }
         #rv-root .rv-import-dialog { width: min(560px, 94vw); }
+        #rv-root .rv-newgal { margin: .5rem 0; padding: .5rem .75rem; border: 1px dashed #cbd5e1; border-radius: 8px; background: #fff; }
+        #rv-root .rv-newgal summary { cursor: pointer; font-weight: 600; }
+        #rv-root .rv-held-note { margin: .35rem 0 0; padding: .35rem .5rem; border-left: 3px solid #d97706; background: #fffbeb; font-size: .8rem; }
         #rv-root .rv-import-dialog .rv-import-report { max-height: 40vh; overflow: auto; }
         #rv-root .rv-column-title { margin: 1rem 0 .35rem; font-size: 1.05rem; }
         #rv-root .rv-legend { margin: 0 0 .75rem; }

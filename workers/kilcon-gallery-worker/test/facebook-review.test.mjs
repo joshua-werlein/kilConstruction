@@ -230,7 +230,7 @@ test("an edit of a post the site never imported is historical: excluded until ap
 });
 
 test("new posts (add) import automatically with no review; skip and later still block; replays never duplicate", async () => {
-  stubAlbum("700", "New Job", ["9301", "9302", "9303"], { created: OLD }); // dates are irrelevant now
+  stubAlbum("700", "Lund Barn", ["9301", "9302", "9303"], { created: OLD }); // dates are irrelevant now; a distinctive album name
   stubPost(`${PAGE_ID}_88`, ["9301", "9302", "9303"], OLD);
   await decide([{ photoId: "9302", decision: "skip" }, { photoId: "9303", decision: "later" }]);
   const add = { item: "status", verb: "add", post_id: `${PAGE_ID}_88`, published: 1, from: { id: PAGE_ID } };
@@ -294,6 +294,9 @@ test("a simultaneous history import and webhook replay import an approved photo 
   await decide([{ photoId: "9391", decision: "import" }, { photoId: "9392", decision: "import" }]);
   const edit = { item: "status", verb: "edited", post_id: `${PAGE_ID}_96`, published: 1, from: { id: PAGE_ID } };
   await Promise.all([historyRun().catch(() => null), webhook([edit]), webhook([{ ...edit, message: "x" }]), historyRun().catch(() => null)]);
+  // A history run that meets a photo mid-import refuses it and backs off (by
+  // design). Let that backoff elapse before the final reconciling run.
+  await baseEnv.DB.prepare("UPDATE facebook_discovery_jobs SET next_attempt_at = 0").run();
   await historyRun(makeEnv(), { restart: true });
   assert.deepEqual((await rows("SELECT fb_photo_id, status FROM facebook_photos ORDER BY fb_photo_id")).map((r) => [r.fb_photo_id, r.status]),
     [["9391", "imported"], ["9392", "imported"]]);
@@ -1053,12 +1056,14 @@ test("a category tag names the category of a NEW gallery only; existing gallerie
   assert.equal((await rows("SELECT COUNT(*) AS n FROM facebook_projects"))[0].n, 2, "no duplicate galleries");
 });
 
-test("a completed-build post without an album uses its category tag; untagged posts still go to Recent", async () => {
+test("a finished-job post without an album is held with a suggested name and its tag; untagged progress posts still go to Recent", async () => {
   taggedPost(`${PAGE_ID}_210`, ["9211", "9212", "9213"], "Finished the Ripley kitchen remodel! #remodels", undefined);
   for (const id of ["9211", "9212", "9213"]) delete graph.get(id).album;
   await addPost(`${PAGE_ID}_210`);
-  const [p] = await rows("SELECT category, kind FROM facebook_projects");
-  assert.deepEqual(p, { category: "remodels", kind: "project" });
+  assert.equal((await rows("SELECT * FROM facebook_projects")).length, 0, "no invented gallery");
+  const held = await rows("SELECT decision, note FROM facebook_photo_reviews ORDER BY fb_photo_id");
+  assert.equal(held.length, 3);
+  assert.ok(held.every((h) => h.decision === "later" && /needs a gallery name/.test(h.note) && /suggested name: Finished the Ripley kitchen remodel/.test(h.note) && /#remodels tag/.test(h.note)));
   taggedPost(`${PAGE_ID}_211`, ["9214"], "Progress today #furniture", undefined);
   delete graph.get("9214").album;
   await addPost(`${PAGE_ID}_211`);
@@ -1117,4 +1122,125 @@ test("the full historical scan ignores caption tags (they apply to live content 
   assert.equal(r.photos.find((p) => p.id === "9245").outcome, "imported");
   assert.equal((await rows("SELECT highlight FROM facebook_photos WHERE fb_photo_id = '9245'"))[0].highlight, 0, "no Highlights from a historical caption");
   assert.equal((await rows("SELECT category FROM facebook_projects WHERE name = 'Kelly Barn'"))[0].category, "projects", "no category from a historical caption");
+});
+
+// --- automatic galleries for new posts; ambiguous projects are held -----------
+
+const GCREATE = `${ADMIN}/gallery-create`;
+const createGallery = (body, opts = {}) => call(GCREATE, { method: "POST", body, ...opts });
+const reviewsOf = (ids) => rows(`SELECT fb_photo_id, album_id, decision, note FROM facebook_photo_reviews WHERE fb_photo_id IN (${ids.map(() => "?").join(",")}) ORDER BY fb_photo_id`, ...ids);
+
+test("new posts: a distinctive new album creates its gallery; an existing or linked album is reused", async () => {
+  taggedPost(`${PAGE_ID}_301`, ["9311", "9312"], "Pole barn going up", { id: "811", name: "Pongratz" });
+  await addPost(`${PAGE_ID}_301`);
+  assert.deepEqual(await rows("SELECT name, category, fb_album_id FROM facebook_projects"), [{ name: "Pongratz", category: "projects", fb_album_id: "811" }],
+    "a one-word surname album is a clear project name");
+  // A later post in the same album joins it.
+  taggedPost(`${PAGE_ID}_302`, ["9313"], "Siding done #remodels", { id: "811", name: "Pongratz" });
+  await addPost(`${PAGE_ID}_302`);
+  assert.equal((await rows("SELECT COUNT(*) AS n FROM facebook_projects"))[0].n, 1);
+  assert.equal((await rows("SELECT category FROM facebook_projects"))[0].category, "projects", "an existing gallery keeps its category");
+  // An album linked from the review page (album-link) also routes new posts.
+  const bisek = (await (await createGallery({ dryRun: false, name: "Bisek", category: "new-construction", confirm: "CREATE GALLERY" })).json()).project.id;
+  stubAlbum("812", "Bisek shed", ["9314"], { created: NEW });
+  assert.equal((await link({ albumId: "812", projectId: bisek })).status, 200);
+  taggedPost(`${PAGE_ID}_303`, ["9315"], "More progress", { id: "812", name: "Bisek shed" });
+  await addPost(`${PAGE_ID}_303`);
+  assert.equal((await rows("SELECT project_id FROM facebook_photos WHERE fb_photo_id = '9315'"))[0].project_id, bisek);
+  assert.equal((await rows("SELECT COUNT(*) AS n FROM facebook_projects"))[0].n, 2, "no gallery named after the album was created");
+});
+
+test("ambiguous new projects are held for review: similar album, generic album, caption naming several galleries", async () => {
+  await ganzSetup(); // Ganz Garage exists
+  await baseEnv.GALLERY_BUCKET.put("Projects/Kiley Lean-to/1.jpg", JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+  await baseEnv.GALLERY_BUCKET.put("Projects/Kiley Enclosed Porch/1.jpg", JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+  const before = await rows("SELECT COUNT(*) AS photos, (SELECT COUNT(*) FROM facebook_projects) AS projects FROM facebook_photos");
+
+  taggedPost(`${PAGE_ID}_311`, ["9321", "9322"], "Started a new one", { id: "821", name: "Ganz" });
+  taggedPost(`${PAGE_ID}_312`, ["9323"], "Today's work", { id: "822", name: "Home" });
+  taggedPost(`${PAGE_ID}_313`, ["9324"], "Back at Kiley Lean-to and Kiley Enclosed Porch this week", undefined);
+  delete graph.get("9324").album;
+  for (const p of ["311", "312", "313"]) await addPost(`${PAGE_ID}_${p}`);
+
+  assert.deepEqual(await rows("SELECT COUNT(*) AS photos, (SELECT COUNT(*) FROM facebook_projects) AS projects FROM facebook_photos"), before,
+    "nothing imported, no gallery created or named");
+  const held = await reviewsOf(["9321", "9322", "9323", "9324"]);
+  assert.deepEqual(held.map((h) => [h.fb_photo_id, h.album_id, h.decision]), [["9321", "821", "later"], ["9322", "821", "later"], ["9323", "822", "later"], ["9324", null, "later"]]);
+  assert.match(held[0].note, /^Held automatically \d{4}-\d{2}-\d{2}: the album name resembles an existing gallery; similar: Ganz Garage/);
+  assert.match(held[2].note, /doesn't identify a project/);
+  assert.match(held[3].note, /caption names several galleries; similar: Kiley/);
+  assert.ok((await rows("SELECT last_error FROM facebook_webhook_events")).some((e) => /held for review 2/.test(e.last_error)));
+});
+
+test("held posts: retries and edits never import or duplicate; the owner's decision always wins", async () => {
+  await ganzSetup();
+  taggedPost(`${PAGE_ID}_321`, ["9331", "9332"], "New job", { id: "831", name: "Ganz" });
+  await decide([{ photoId: "9332", albumId: "831", decision: "skip" }]); // the owner already decided this one
+  const add = { item: "status", verb: "add", post_id: `${PAGE_ID}_321`, published: 1, from: { id: PAGE_ID } };
+  await webhook([add]);
+  await webhook([add]); // duplicate delivery
+  await editPost(`${PAGE_ID}_321`);
+  await editPost(`${PAGE_ID}_321`);
+  const held = await reviewsOf(["9331", "9332"]);
+  assert.deepEqual(held.map((h) => [h.fb_photo_id, h.decision]), [["9331", "later"], ["9332", "skip"]], "one hold row; the owner's Skip untouched");
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE fb_photo_id IN ('9331','9332')")).length, 0);
+
+  // The owner approves it, creates a gallery and imports it from the review page.
+  await decide([{ photoId: "9331", albumId: "831", decision: "import" }]);
+  const g = (await (await createGallery({ dryRun: false, name: "Ganz Shop", category: "projects", allowSimilar: true, confirm: "CREATE GALLERY" })).json()).project.id;
+  const run = await (await runImport({ albumId: "831", photoIds: ["9331"], projectId: g, mixedAlbum: true, dryRun: false, expectedCount: 1, confirm: "IMPORT APPROVED" })).json();
+  assert.equal(run.imported, 1);
+  await webhook([add]);
+  await editPost(`${PAGE_ID}_321`);
+  assert.deepEqual(await rows("SELECT fb_photo_id, project_id FROM facebook_photos WHERE fb_photo_id IN ('9331','9332')"), [{ fb_photo_id: "9331", project_id: g }],
+    "replays after the import change nothing");
+});
+
+test("Create New Gallery checks existing galleries first and needs confirmation", async () => {
+  await ganzSetup();
+  await baseEnv.GALLERY_BUCKET.put("Furniture/Cutting Boards/1.jpg", JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+  const before = await snapshotAll();
+  const expect = async (body, status, opts) => { const r = await createGallery(body, opts); assert.equal(r.status, status, JSON.stringify(body)); return r.json(); };
+
+  let r = await expect({ dryRun: true, name: "  ganz   GARAGE ", category: "projects" }, 409);
+  assert.deepEqual(r.existing.map((g) => [g.name, g.id !== null]), [["Ganz Garage", true]], "case and spacing don't matter");
+  r = await expect({ dryRun: true, name: "cutting boards", category: "furniture" }, 409);
+  assert.deepEqual(r.existing.map((g) => [g.name, g.prefix]), [["Cutting Boards", "Furniture/Cutting Boards/"]], "website galleries count");
+  r = await expect({ dryRun: true, name: "Ganz Deck", category: "remodels" }, 409);
+  assert.deepEqual(r.similar.map((g) => g.name), ["Ganz Garage"], "a similar name needs a decision");
+  r = await expect({ dryRun: true, name: "Ganz Deck", category: "remodels", allowSimilar: true }, 200);
+  assert.deepEqual(r.wouldCreate, { name: "Ganz Deck", category: "remodels" });
+  await expect({ dryRun: false, name: "Ganz Deck", category: "remodels", allowSimilar: true }, 400); // no confirmation
+  for (const bad of [{ name: "x", category: "projects" }, { name: "12345", category: "projects" }, { name: "Barn", category: "apparel" }, { name: "a".repeat(81), category: "projects" }]) {
+    await expect({ dryRun: true, ...bad }, 400);
+  }
+  await expect({ dryRun: true, name: "Zingshiem", category: "projects" }, 401, { admin: false });
+  const form = await call(GCREATE, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, raw: "name=x&category=projects&dryRun=false" });
+  assert.equal(form.status, 415);
+  assert.deepEqual(await snapshotAll(), before, "checks and refusals write nothing");
+
+  r = await expect({ dryRun: false, name: "Zingshiem", category: "new-construction", confirm: "CREATE GALLERY" }, 200);
+  assert.deepEqual([r.project.name, r.project.category, r.project.nameLocked, r.project.publicPath], ["Zingshiem", "new-construction", true, null], "empty, so not public yet");
+  assert.equal((await call(`${SITE}/api/gallery-api?project=new-construction/zingshiem`, { admin: false })).status, 404);
+  const plan = await (await call(PLAN(GANZ), { env: reviewEnv() })).json();
+  assert.ok(plan.galleries.some((g) => g.id === r.project.id && g.category === "new-construction"), "offered as a destination at once");
+  await expect({ dryRun: false, name: "Zingshiem", category: "projects", confirm: "CREATE GALLERY" }, 409); // no duplicate
+});
+
+test("scheduled discovery holds ambiguous albums too; historical scans never write holds", async () => {
+  await ganzSetup();
+  stubPageAlbums([[GANZ, "Ganz Garage", 15], ["841", "Ganz", 1]]);
+  stubAlbum("841", "Ganz", ["9341"], { created: NEW });
+  const env = makeEnv({ FB_DISCOVERY_ENABLED: "true" });
+  for (let n = 0; n < 30; n++) {
+    const r = (await runFacebookDiscovery(env, { dryRun: false }, { mode: "reconcile", now: new Date("2026-11-01T00:00:00Z") })).body;
+    if (r.complete || r.errors?.length || r.busy) break;
+  }
+  assert.deepEqual((await reviewsOf(["9341"])).map((h) => [h.album_id, h.decision]), [["841", "later"]]);
+  assert.equal((await rows("SELECT * FROM facebook_photos WHERE fb_photo_id = '9341'")).length, 0);
+
+  // A historical edit of an unknown post with an ambiguous album: excluded, nothing written.
+  taggedPost(`${PAGE_ID}_331`, ["9342"], "Old one", { id: "842", name: "Home" }, OLD);
+  await editPost(`${PAGE_ID}_331`);
+  assert.deepEqual(await reviewsOf(["9342"]), []);
 });

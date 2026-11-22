@@ -91,17 +91,26 @@ The contractor never has to use hashtags, special captions or another app. Each 
 | # | Evidence | Result |
 |---|---|---|
 | 1 | The post was already grouped (a redelivery, an edit, or photos added later) | Same project |
-| 2 | Its photos are in one **named** Facebook album. Default albums such as Timeline Photos and Mobile Uploads don't count. | That album's project, created once |
-| 3 | The caption contains the full name of exactly **one** existing project. The name must have at least two words, at least one of them not generic (so "Deck" or "Kitchen Remodel" never match). Existing manual galleries count. | That project. Matching a manual gallery merges the photos into it. |
-| 4 | Completed-build evidence: **3 or more photos** and wording such as finished, completed, wrapped up or before & after | A new project named from the caption's first sentence |
+| 2a | Its photos are in one **named** Facebook album that already feeds a gallery (created from it, or linked with `album-link`). Default albums such as Timeline Photos and Mobile Uploads don't count. | That gallery |
+| 2b | A new named album whose name is **exactly** an existing gallery (Facebook or website, ignoring case and spacing; at least two words) | That gallery; a website gallery is linked, never duplicated |
+| 2c | A new named album that **resembles** existing galleries (shared or near-spelled distinctive word, for example "Ganz" vs "Ganz Garage"), or whose name has no distinctive word (for example "Home", "New Job") | **Held for review** |
+| 2d | A new named album with a distinctive name | A new gallery named after the album (a category tag sets its category) |
+| 3 | The caption contains the full name of exactly **one** existing project. The name must have at least two words, at least one of them not generic (so "Deck" or "Kitchen Remodel" never match). Existing manual galleries count. | That project. Matching a manual gallery merges the photos into it. Naming **several** galleries: **held for review**. |
+| 4 | Completed-build evidence: **3 or more photos** and wording such as finished, completed, wrapped up or before & after, but no album | **Held for review**, with the caption's first sentence as a suggested name. No name is invented. |
 | 5 | Anything else | **Recent Project Updates** |
+
+**Held for review** means nothing is imported or published:
+- Each photo gets a **Review later** decision whose note says why ("Held automatically: …") and lists any similar galleries or a suggested name. An existing owner decision is never overwritten.
+- The photos appear on `/admin/facebook-review`. There the owner can mark them Import, pick or **create** a gallery, and use **Import Approved Photos**.
+- Webhook retries and edits can't import a held photo: Review later blocks every import path.
+- The same rules apply to scheduled discovery once it's enabled. Historical imports never write holds.
 
 - **Progress posts:** typically land in Recent Project Updates (rule 5), or in the project's album (rule 2) if the contractor uses one.
 - **Fixing placement:** an admin can move photos later, and the moves stick.
 - **Slugs:** a new project never takes the slug of an existing manual gallery; it gets a numbered suffix such as `lake-house-2`.
 - **Where projects appear:** on `/projects` by default. An admin can change the category to new-construction, remodels or furniture.
 - **Optional caption tags.** They apply to new posts and to edits of posts already on the site; historical imports ignore them. Details are in docs/facebook-hashtags.md.
-  - **Category:** `#project`, `#newconstruction`, `#remodels` or `#furniture` sets the category of a gallery the post **creates** (rules 2 and 4).
+  - **Category:** `#project`, `#newconstruction`, `#remodels` or `#furniture` sets the category of a gallery the post **creates** (rule 2d). On a held post, the tag is noted for the owner.
     - It never changes an existing gallery.
     - It never forces a gallery: rule 5 still applies.
     - Two different category tags are ignored.

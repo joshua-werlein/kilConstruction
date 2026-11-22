@@ -423,3 +423,36 @@ After a Worker rollback, the previous behaviour returns:
 - About 800 Worker requests.
 
 All of this is within the Free plan.
+
+### Create New Gallery and automatic holds (local, branch `task/facebook-integration-final`, not deployed)
+
+**Create New Gallery** sits inside the *Import approved photos* panel. Enter a name, choose
+Projects, New Construction, Remodels or Furniture, then click **Check name**.
+
+`POST /facebook/admin/gallery-create` (admin, JSON body only) checks every Facebook and website
+gallery first:
+- **An exact name match** (ignoring case and spacing) is refused (409), and the page selects that
+  gallery instead.
+- **A similar name** is refused unless `allowSimilar: true`. The page offers "Create anyway".
+- **A real create** needs a browser confirmation and `confirm: "CREATE GALLERY"`.
+- **The new gallery** is empty, so it stays off the website until photos are imported. It becomes
+  a destination at once.
+
+**Automatic holds.** New posts whose project is ambiguous are held: see docs/facebook-webhook.md
+§3. A held photo gets a **Review later** decision with a "Held automatically: …" note, and that
+note is shown on its card. The panel prefills a suggested name when one was noted. A held photo
+is never imported until the owner marks it Import. An existing owner decision is never
+overwritten.
+
+**Tests** (Worker, real local D1/R2):
+- **new posts and albums:** distinctive, exact-name, linked and existing albums;
+- **holds:** a similar album, a generic album, a caption naming several galleries, and a
+  finished-job post with no album;
+- **retries and edits:** duplicate deliveries and edits never import or duplicate, and the
+  owner's decision wins;
+- **importing held photos:** a held photo is approved, then imported through a new gallery;
+- **Create New Gallery:** exact, website-gallery and similar matches, validation, auth, form
+  posts, confirmation and no duplicate;
+- **discovery and history:** scheduled discovery holds too, and historical scans write nothing.
+
+The site tests cover the form's wiring.

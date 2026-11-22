@@ -20,8 +20,14 @@ a post goes. You can put it anywhere in the caption, in capitals or lower case.
 | `#highlight` | The photos also appear in the **homepage Highlights**, as well as in their gallery. |
 
 **Good to know**
-- **What starts a new gallery:** posting photos into a new named Facebook album, or a finished-job
-  post with 3 or more photos (for example "finished", "completed", "before & after").
+- **What starts a new gallery:** posting photos into a **new Facebook album named after the job**,
+  for example "Bisek Pole Barn". That's the reliable way.
+  - If the album name looks like an existing gallery (for example "Ganz" when "Ganz Garage"
+    exists), the photos wait for the website owner to choose the gallery.
+  - A vague name such as "Home" or "New Job" also waits.
+  - An album named exactly like an existing gallery adds the photos to it.
+- **A finished-job post without an album** waits for the website owner to name the gallery. Its
+  first sentence is offered as a suggestion, and its category tag is remembered.
 - **Everyday progress posts** still go to *Recent Project Updates*; a tag doesn't change that.
 - **Existing galleries:** a tag never moves or renames one, and never changes its category.
 - **Combining tags:** use only one of the four category tags per post. With two, for example
@@ -66,8 +72,9 @@ Example: `Finished the Bisek pole barn! #newconstruction #highlight`
 
 **Live paths only.** `liveTags(message, reviewMode)` returns no tags unless
 `reviewMode === "live"`.
-- `ingestPost`, then `assignProject`, passes the category to `createProject` for album rule 2
-  and completed-build rule 4.
+- `ingestPost`, then `assignProject`, passes the category to `createProject` when a new
+  album creates a gallery (rule 2d). A finished-job post with no album (rule 4) is held for
+  review, and its tag is noted on the held photos.
 - Discovery's album-create branch does the same.
 - `importPhoto` sets `highlight = 1` after the commit when the live context has `#highlight`.
 
@@ -100,8 +107,8 @@ gated `/Facebook/w/480/` thumbnails, newest first, at most 60. They are appended
 - **Behaviour:** 5 tests in `test/facebook-review.test.mjs`, which runs with migration 018:
   - **new galleries:** a new gallery gets the tagged category; existing galleries are unchanged;
     conflicting tags are ignored; no duplicate galleries;
-  - **completed builds:** a completed-build post uses its tag, while an untagged progress post
-    still goes to Recent;
+  - **completed builds:** a finished-job post without an album is held, with a suggested name and
+    its tag noted, while an untagged progress post still goes to Recent;
   - **Highlights:**
     - on and off through caption edits;
     - the admin lock in both directions;

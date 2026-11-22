@@ -50,6 +50,25 @@ export function destinationBody(gallery) {
   return {};
 }
 
+export const GALLERY_CONFIRMATION = "CREATE GALLERY"; // Worker GALLERY_CONFIRMATION
+
+/** The first "suggested name" recorded on automatically held photos, if any. */
+export function suggestedGalleryName(photos) {
+  for (const p of Array.isArray(photos) ? photos : []) {
+    const m = /suggested name: ([^;]{2,80})/.exec(typeof p?.note === "string" ? p.note : "");
+    if (m) return m[1].trim();
+  }
+  return "";
+}
+
+/** Human summary of a gallery-create check. */
+export function galleryCheckText(result, name, categoryLabel) {
+  if (result?.existing?.length) return `A gallery named "${result.existing[0].name}" already exists. Choose it as the destination instead.`;
+  if (result?.similar?.length) return `Similar galleries exist: ${result.similar.map((g) => g.name).join(", ")}. Create "${name}" only if it is a different project.`;
+  if (result?.ok) return `"${name}" doesn't exist yet. Create it under ${categoryLabel}?`;
+  return result?.error ? String(result.error) : "Could not check that name.";
+}
+
 /** Request flags for a destination: dry runs on an unlinked album always use mixed mode. */
 export function runFlags(dest, { mixed, dryRun }) {
   if (dest.mode === "linked") return { mixedAlbum: false, linkFirst: false };
