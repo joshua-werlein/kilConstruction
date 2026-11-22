@@ -61,9 +61,17 @@ The gallery Worker validates signed admin sessions for privileged operations. Pr
 
 Production receives signature-verified Meta Page webhooks and deduplicates eligible new-post imports. Photos are stored in R2; D1 stores Facebook project records, album mappings, per-photo review decisions, captions, import state, and visibility. The **Manage Images** page lists both manual R2 folders and Facebook-managed D1 projects. Facebook projects remain independently manageable through **Facebook Gallery Sync**.
 
-The admin **Facebook Photo Review** page compares Facebook photos against existing website galleries (including visual duplicate hints) and saves **Import**, **Duplicate / Skip**, or **Review later** decisions. Saving **Import** is an approval, not an upload. Historical imports require a separately authorized, bounded operation; unrestricted historical import and automatic album discovery remain disabled in the documented production configuration. Existing signed webhook imports of new Page posts continue automatically.
+The admin **Facebook Photo Review** page compares Facebook photos against existing website galleries (including visual duplicate hints) and saves **Import**, **Duplicate / Skip**, or **Review later** decisions. Saving **Import** is an approval, not an upload. **Import Approved Photos** then imports an album's approved photos into the chosen gallery:
+- a dry-run check, a confirmation dialog, and confirmed batches of at most 10 photos, with progress and a summary;
+- albums that hold several projects can send each batch to a different gallery.
 
-**In progress, not yet deployed:** self-service **Import Approved Photos** within the review page and optional caption-hashtag categorization. These must not be described as live until their separate rollout is verified.
+It is a scoped, authenticated operation (`FB_REVIEWED_IMPORT_ENABLED`) that takes explicit approved photo IDs only and can't start a historical scan. Unrestricted historical import and automatic album discovery remain disabled. Signed webhook imports of new Page posts continue automatically.
+
+**Optional caption hashtags** on new Facebook posts:
+- `#project`, `#newconstruction`, `#remodels` and `#furniture` choose the category of a gallery the post creates.
+- `#highlight` adds the post's photos to the homepage Highlights.
+
+The tags are hidden on the website, never change existing galleries, and are ignored by historical imports. See the [hashtag guide](docs/facebook-hashtags.md).
 
 <details>
 <summary><strong>Implementation and rollout details</strong></summary>
@@ -72,6 +80,7 @@ The admin **Facebook Photo Review** page compares Facebook photos against existi
 - [Webhook verification and imports](docs/facebook-webhook.md)
 - [Album discovery, preview, and release gates](docs/facebook-album-implementation.md)
 - [Historical photo review and duplicate decisions](docs/facebook-photo-review.md)
+- [Caption hashtags (contractor guide)](docs/facebook-hashtags.md)
 - [Current handoff and feature flags](docs/RESUME.md)
 - [Verified production flags](docs/security-release-2026-11-19.md)
 
