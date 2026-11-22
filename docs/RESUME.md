@@ -7,7 +7,7 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 | Component | Live | Rollback target |
 |---|---|---|
-| Pages (`kilconstruction`) | `388e94dd` from `main` `b419e7c` (the final Facebook integration `fee8d00` + README PR #2) | `e828a3b5` (`2d8f323`), then `584403a7` |
+| Pages (`kilconstruction`) | `449b7a41` from `main` `9ac0524` (review-page filters on top of `b419e7c`) | `388e94dd` (`b419e7c`), then `e828a3b5` |
 | Gallery Worker (`kilcon-gallery-worker`) | `a97a5c14-1f3d-40ca-ae73-773a33a4db93`, tag `fee8d00` (destinations, hashtags, Create New Gallery, holds; scoped import **on**) | `npx wrangler versions deploy fc198011-3d43-4be5-af96-dcf691da44fc@100%`, then `33c469b5` (switch off) |
 | D1 `kilcon-db` | Migrations through **018** (Highlights columns, applied 2026-11-22 at 21:03 UTC); none pending | Bookmark before 018: `00000701-00000000-0000512b-5f6fb82a7244937f8c056e501f191ff1`. Leave 018 in place on rollback; older code ignores it. |
 | Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |
@@ -100,8 +100,11 @@ docs/facebook-final-deployment.md:
 posts. No new Facebook post has arrived since the deploy. All three are covered by tests; check
 them on the contractor's next posts.
 
-**Next:** the owner resumes Import Approved Photos. Then comes Phase D, automatic discovery,
-with approval.
+**Review filters deployed** (`9ac0524`, Pages `449b7a41`): photos marked Duplicate / Skip and already-imported photos are hidden by default. Display only. 146/146 production checks.
+
+The owner has finished the historical imports: 115 photos across 20 galleries. Mobile uploads stays held.
+
+**Next: Phase D, automatic discovery.** It's approved, but paused at the preflight: the signed-in health check (token, `feed` subscription, album and photo access) couldn't run because the admin session had expired. The procedure and rollback are in docs/facebook-final-deployment.md, *Phase D*.
 
 ## Remaining steps, in order (each needs the owner's approval)
 
