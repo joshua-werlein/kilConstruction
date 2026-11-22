@@ -67,20 +67,25 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 ## Next actionable step
 
-The owner opens `/admin/facebook-review`, picks album **Ripley**, compares the 2 photos and marks
-**Import**:
-- `122203565936318503`
-- `122203565978318503`
+**The owner reviews the new *Import Approved Photos* workflow and approves deploying it.**
+It lives on local branch `task/review-import-workflow`, uncommitted, and includes the mixed-album
+change. See docs/facebook-photo-review.md on that branch.
 
-Both are new: the nearest website image is at distance 20.
+The button replaces manual batches:
+- a check (dry run);
+- a confirmation dialog;
+- bounded batches of 10;
+- a progress display and summary;
+- refreshing the album afterwards.
 
-Then:
-1. a targeted dry run into project 5 (expect 2 new, 0 refused);
-2. the owner approves;
-3. a `--var` flag-on version;
-4. the run with `expectedCount: 2`;
-5. flag off;
-6. verify.
+It uses a scoped switch, `FB_REVIEWED_IMPORT_ENABLED`, which ships `"false"`.
+`FB_HISTORICAL_IMPORT_ENABLED` stays `"false"` permanently.
+
+The owner has marked Import on both Ripley photos (gallery 5, linked). The Ripley dry run hasn't
+run yet, because the admin session had expired. It runs from the button once the workflow is
+deployed, or by hand after the owner signs in.
+
+Backup of the mixed-album change on its own: `C:\Users\Jwerl\dev\.archives\kil-construction\mixed-album-import-2026-11-22.patch`.
 
 ## Remaining steps, in order (each needs the owner's approval)
 
@@ -139,7 +144,8 @@ Then:
 | Item | State |
 |---|---|
 | `main` | `= origin/main` at `bd707ef` |
-| `task/mixed-album-import` | Local and uncommitted (mixed-album import); **keep** |
+| `task/review-import-workflow` | Local and uncommitted: Import Approved Photos + mixed-album import; **keep** |
+| `task/mixed-album-import` | Points at `main`; its change is carried by `task/review-import-workflow` and backed up as a patch in `.archives/kil-construction/` |
 | `task/facebook-integration-completion` | Merged (`bd707ef`) and deleted |
 | `task/review-comparison-ui` | Merged; delete |
 | `backup-pre-revert` | Unmerged; the owner's backup; keep |
