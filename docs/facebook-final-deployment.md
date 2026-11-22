@@ -1,7 +1,7 @@
 # Facebook integration: final deployment plan
 
-Status: **ready for approval; not deployed.** Branch `task/facebook-integration-final`, local and
-not pushed. Deploy only when the owner confirms no historical import is running.
+Status: **deployed 2026-11-22** (Worker `a97a5c14`, Pages `c3148851`, then `388e94dd` with the README). Branch `task/facebook-integration-final`, merged and
+deleted. It was deployed while the owner had paused historical imports. See docs/RESUME.md for the verification results.
 
 ## What ships together
 

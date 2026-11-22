@@ -7,9 +7,9 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 | Component | Live | Rollback target |
 |---|---|---|
-| Pages (`kilconstruction`) | `e828a3b5` from `main` `2d8f323` (Import Approved Photos) | `584403a7` (`bd707ef`), then `02aaaf2a` |
-| Gallery Worker (`kilcon-gallery-worker`) | `fc198011-3d43-4be5-af96-dcf691da44fc`, tag `e4369de` (scoped reviewed import **on**) | `npx wrangler versions deploy 33c469b5-1c20-449f-bb7c-859358f93693@100%` (switch off), then `93b9f92b` |
-| D1 `kilcon-db` | Migrations through **017**. 018 (Highlights) is written on branch `task/facebook-hashtags` and not applied | Bookmark before `2d8f323`: `000006f3-00000000-0000512b-7d027c724b7152aa3ec2ef66f0d1f5cc`. Before the Ganz import: `000006d6-00000000-0000512b-2269b9f882efa19e8fc0885a612689b6` |
+| Pages (`kilconstruction`) | `388e94dd` from `main` `b419e7c` (the final Facebook integration `fee8d00` + README PR #2) | `e828a3b5` (`2d8f323`), then `584403a7` |
+| Gallery Worker (`kilcon-gallery-worker`) | `a97a5c14-1f3d-40ca-ae73-773a33a4db93`, tag `fee8d00` (destinations, hashtags, Create New Gallery, holds; scoped import **on**) | `npx wrangler versions deploy fc198011-3d43-4be5-af96-dcf691da44fc@100%`, then `33c469b5` (switch off) |
+| D1 `kilcon-db` | Migrations through **018** (Highlights columns, applied 2026-11-22 at 21:03 UTC); none pending | Bookmark before 018: `00000701-00000000-0000512b-5f6fb82a7244937f8c056e501f191ff1`. Leave 018 in place on rollback; older code ignores it. |
 | Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |
 
 - **Worker flags:**
@@ -76,22 +76,32 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 ## Next actionable step
 
-**The final Facebook deployment is ready for approval.** Deploy it only when the owner isn't
-importing.
+**The final Facebook deployment is done** (2026-11-22, 21:02–21:30 UTC). It followed
+docs/facebook-final-deployment.md:
+- the D1 bookmark, then 018;
+- the Worker: its bindings diff showed only the tag changed, then deploy;
+- Pages, then validation, then README PR #2 merged (`b419e7c`).
 
-- **Code:** branch `task/facebook-integration-final`, local and not pushed. It combines:
-  - the website-gallery destinations fix;
-  - caption hashtags with migration 018;
-  - Create New Gallery;
-  - holding ambiguous new projects for review.
-- **Tests:** site 90/90, Worker 201/201.
-- **Plan:** docs/facebook-final-deployment.md on that branch (order, validation, rollback).
-- **README:** PR #2 has 2 local reconcile commits on top of the owner's, `f8e2b46` and
-  `2e80705`. Push them (no force) and merge after the deploy is verified.
-- **After that:** automatic discovery (Phase D), with approval.
+**Verified:**
+- **Production checks:** 122/122 after every step.
+- **Signed out:** every new endpoint returns 401 `no-store`.
+- **Highlights:** still the 14 manual images; no Facebook ones yet.
+- **D1:** unchanged apart from the two 018 columns (all 0). The original photo columns are
+  byte-identical to before (`1f4ecf4f68db`).
+- **Owner's data:** 22 photos, 237 decisions, 3 galleries and 2 album links, all untouched.
+- **Signed-in, read-only:**
+  - the dropdown lists 31 galleries by category, including the website galleries Cabinets,
+    Cutting Boards and Epoxy;
+  - Create New Gallery's check refuses "Ganz Garage" (409, existing) and accepts an unused name
+    as a dry run, with nothing created;
+  - Manage Images shows the Highlights buttons (not clicked).
 
-The owner is reviewing and importing historical photos with Import Approved Photos. Ripley is
-done (2 photos, verified).
+**Not yet seen in production:** hashtag categorization, `#highlight`, and holds on real new
+posts. No new Facebook post has arrived since the deploy. All three are covered by tests; check
+them on the contractor's next posts.
+
+**Next:** the owner resumes Import Approved Photos. Then comes Phase D, automatic discovery,
+with approval.
 
 ## Remaining steps, in order (each needs the owner's approval)
 
@@ -99,8 +109,8 @@ done (2 photos, verified).
 2. **Phase C, done by the owner from the review page** once the scoped switch is on.
    - **Order:** Ripley, Zingshiem, Rieck Deck, Pongratz, Bisek, then the Group A albums. See the
      batch plan in reconciliation §10.
-   - **Galleries:** a new gallery is created on `/admin/facebook`. The page links the album on
-     confirmation.
+   - **Galleries:** choose any existing Facebook or website gallery, or use **Create New
+     Gallery** in the panel. The page creates or reuses the link on confirmation.
    - **After each batch:** I verify on request (gallery count, images, D1 diff, production
      checks).
 3. ~~Deploy mixed-album import~~: done (`2d8f323`). Mixed albums (Ganz, Mobile uploads) are
@@ -110,13 +120,23 @@ done (2 photos, verified).
    - E. Fankhauser and Fankhauser (display names; separate galleries);
    - Ganz `…480` (distance 6) and `…648`;
    - Mobile uploads' 33 unique photos.
-5. **Phase D, after the archive is reconciled.** Enable `FB_DISCOVERY_ENABLED`.
-   - Webhooks stay the primary trigger: with discovery on, events go through the discovery
-     engine.
-   - The hourly cron adds a bounded reconcile scan. Its cutoff is set at the first run and
-     never widens, so it is future-only.
-   - Tests cover the cutoff and branding exclusion.
-   - Before enabling: verify the subscription, retries, album-only additions and removals.
+5. **Phase D, after the archive is reconciled.** Enable `FB_DISCOVERY_ENABLED`, with approval:
+   a `--var` version first, then a `wrangler.toml` commit.
+   - **Triggers:** webhooks stay the primary trigger; with discovery on, events go through the
+     discovery engine.
+   - **Fallback scan:** the hourly cron adds a bounded reconcile scan. Its cutoff is set at the
+     first run and never widens, so it is future-only. The same album rules and holds apply, and
+     branding is excluded. Tests cover all of this.
+   - **Before enabling:**
+     - live webhook health (token, `feed` subscription, an empty queue);
+     - a real end-to-end new post (none since 2026-11-15) to confirm automatic import, and a
+       held-post check;
+     - confirm Graph album and photo read access with the health check in discovery mode;
+     - a D1 bookmark.
+   - **After enabling:**
+     - watch the first scheduled reconcile run (its cutoff is recorded, and no historical photo
+       is imported);
+     - check retries, album-only additions, removals, and that no gallery is duplicated.
 6. **Cleanup and the remaining deferred items:**
    - delete `task/review-comparison-ui` (merged), once the owner authorizes it;
    - private-only storage;
@@ -146,11 +166,9 @@ done (2 photos, verified).
 
 | Item | State |
 |---|---|
-| `main` | `= origin/main` (`2d8f323` plus docs) |
-| `task/facebook-integration-final` | Local, committed, not pushed: destinations fix + hashtags + Create New Gallery + holds; **keep** (supersedes `task/import-manual-galleries` and `task/facebook-hashtags`, both merged into it) |
-| `docs/kil-readme-align-20261122` (local) | The owner's PR #2 + 2 local commits (`f8e2b46`, `2e80705`); push after the final deploy |
-| `task/review-import-workflow`, `task/mixed-album-import` | Merged into `2d8f323` and deleted |
-| `docs/kil-readme-align-20261122` (draft PR #2) | The owner's README branch; **don't overwrite**; merge last |
+| `main` | `= origin/main` at `b419e7c` |
+| `task/facebook-integration-final`, `task/import-manual-galleries`, `task/facebook-hashtags`, `task/review-import-workflow`, `task/mixed-album-import` | Merged and deleted locally |
+| `docs/kil-readme-align-20261122` | PR #2 merged (`b419e7c`). Local copy deleted; the **remote branch is kept**, since deleting it needs the owner's approval |
 | `task/facebook-integration-completion` | Merged (`bd707ef`) and deleted |
 | `task/review-comparison-ui` | Merged; delete |
 | `backup-pre-revert` | Unmerged; the owner's backup; keep |
