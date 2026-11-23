@@ -8,14 +8,14 @@ Production is stable and verified. Start here; the linked docs hold the details.
 | Component | Live | Rollback target |
 |---|---|---|
 | Pages (`kilconstruction`) | `449b7a41` from `main` `9ac0524` (review-page filters on top of `b419e7c`) | `388e94dd` (`b419e7c`), then `e828a3b5` |
-| Gallery Worker (`kilcon-gallery-worker`) | `a97a5c14-1f3d-40ca-ae73-773a33a4db93`, tag `fee8d00` (destinations, hashtags, Create New Gallery, holds; scoped import **on**) | `npx wrangler versions deploy fc198011-3d43-4be5-af96-dcf691da44fc@100%`, then `33c469b5` (switch off) |
+| Gallery Worker (`kilcon-gallery-worker`) | `0c251687-4c6e-40e5-984e-035f884e14b9`, tag `5b0da7f`. **Automatic discovery on** (twice daily), webhooks on, reviewed import on, historical import off | `--config workers/kilcon-gallery-worker/wrangler.toml versions deploy 5d25e58b-e0f1-4708-85b5-a9adb8472f6e@100%` (discovery off), then `a97a5c14` |
 | D1 `kilcon-db` | Migrations through **018** (Highlights columns, applied 2026-11-22 at 21:03 UTC); none pending | Bookmark before 018: `00000701-00000000-0000512b-5f6fb82a7244937f8c056e501f191ff1`. Leave 018 in place on rollback; older code ignores it. |
 | Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |
 
 - **Worker flags:**
   - `FB_INTEGRATION_ENABLED=true`
   - `FB_AUTO_IMPORT=true`
-  - `FB_DISCOVERY_ENABLED=false`
+  - `FB_DISCOVERY_ENABLED=true`: reconciliation runs at 12:00 and 18:00 America/Chicago (runs start at :17). The future-only cutoff is `2026-11-22T22:53:16.402Z`.
   - `FB_HISTORICAL_IMPORT_ENABLED=false` (stays off permanently)
   - `FB_REVIEWED_IMPORT_ENABLED=true`: the scoped switch for Import Approved Photos. The owner
     approved turning it on, and it went on 2026-11-22 at 19:52 UTC. After that, 122/122
@@ -104,7 +104,9 @@ them on the contractor's next posts.
 
 The owner has finished the historical imports: 115 photos across 20 galleries. Mobile uploads stays held.
 
-**Next: Phase D, automatic discovery.** It's approved, but paused at the preflight: the signed-in health check (token, `feed` subscription, album and photo access) couldn't run because the admin session had expired. The procedure and rollback are in docs/facebook-final-deployment.md, *Phase D*.
+**Phase D done (2026-11-22/23):** automatic discovery is permanently enabled. See docs/facebook-final-deployment.md, *Phase D result*.
+
+**Next:** the Astro 7 migration, on local worktree `.worktrees/kil-construction/astro7-migration` (branch `task/astro7-migration`), not deployed.
 
 ## Remaining steps, in order (each needs the owner's approval)
 
@@ -153,6 +155,7 @@ The owner has finished the historical imports: 115 photos across 20 galleries. M
 
 - **Historical import needs an explicit per-photo Import decision.** Skip and Review later never
   import. Branding albums never import. New webhook posts import automatically.
+- **Always pass `--config workers/<worker>/wrangler.toml`** to Wrangler for the Gallery and Contact Workers. After an Astro 7 build, `.wrangler/deploy/config.json` at the repo root redirects config-less Wrangler commands to the *site* Worker.
 - **Never run `wrangler deploy` or `wrangler triggers deploy` for the gallery Worker.** Use
   `versions upload`, diff the bindings, then `versions deploy`. Turn historical import on only
   through a `--var` version, and back off right after the run.

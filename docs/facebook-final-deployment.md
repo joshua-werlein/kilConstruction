@@ -162,3 +162,34 @@ Enable `FB_DISCOVERY_ENABLED`:
 - **Worker:** `wrangler versions deploy a97a5c14-1f3d-40ca-ae73-773a33a4db93@100%` (discovery off).
 - **The reconcile job row** can stay; it's ignored while discovery is off.
 - **D1 bookmark:** a last resort only.
+
+### Phase D result: automatic discovery ENABLED (2026-11-22/23)
+
+**Schedule (owner request):** reconciliation runs twice daily, at **12:00 and 18:00 America/Chicago**,
+and daylight saving time is handled through `Intl`.
+- **When it actually runs:** the existing hourly cron (`17 * * * *`) fires inside each slot hour,
+  so runs start at 12:17 and 18:17 local time, at most once per slot (`discovery_last_slot`).
+  Cron triggers were **not** changed, so there was no `triggers deploy` and no route risk. A
+  minute-0 trigger can be added in the dashboard later without a code change.
+- **Webhooks stay immediate.** Retention, retries and stale-import recovery still run every hour.
+
+**Cutoff:** recorded at activation through `POST /facebook/admin/discovery-start`:
+**`2026-11-22T22:53:16.402Z`**, 3 s after the switch went on. It never moves.
+
+| Step | Result |
+|---|---|
+| Signed-in health (before) | token ok, `feed` subscribed, secrets present, albums (31) and album photos listed |
+| D1 bookmark | `00000709-00000000-0000512b-2528ca732fdd6680e6e0a5031f3b6e65` (22:51 UTC) |
+| Schedule code, discovery off | Worker `5d25e58b` (`e8c3cdd`); the diff showed only the tag changed; 146/146 checks |
+| Staged on | Worker `c0c60d43` (`--var FB_DISCOVERY_ENABLED:true`, only that variable changed) at 22:53:13; cutoff recorded; health `albumAccess` / `albumPhotoAccess` ok |
+| 23:17 UTC (17:17 CST) tick | no scan (no slot, no albums read); job untouched |
+| 00:17 UTC (18:17 CST) slot | scanned; slot `2026-11-22 18:00 America/Chicago`; 10 albums read; status pending, no error. Photos (115), decisions (339), galleries (19) and mappings (20) unchanged: nothing historical imported or held |
+| Permanent | `wrangler.toml` `FB_DISCOVERY_ENABLED = "true"` (`5b0da7f`); Worker `0c251687`, only the tag differed from `c0c60d43`; deployed 00:33:58 UTC; 146/146 checks; D1 unchanged; health ok |
+
+**Rollback:** `wrangler versions deploy 5d25e58b-e0f1-4708-85b5-a9adb8472f6e@100% --config workers/kilcon-gallery-worker/wrangler.toml` (same code, discovery off).
+
+**Still to see in real use:**
+- the first full pass completing over several slots (20 Graph calls per run);
+- a missed or album-only photo being found;
+- the contractor's next posts: new gallery, category tag, `#highlight`, an ambiguous hold;
+- a retry after a Graph error.
