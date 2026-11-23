@@ -1,4 +1,5 @@
 import type { APIRoute } from "astro";
+import { runtimeEnv } from "../../../utils/runtimeEnv";
 
 function text(body: string, status = 200) {
     return new Response(body, {
@@ -100,7 +101,7 @@ async function getVariantSnapshotByPriceId(db: any, priceId: string) {
 }
 
 export const POST: APIRoute = async ({ request, locals }): Promise<Response> => {
-    const env = (locals as any).runtime?.env ?? {};
+    const env = runtimeEnv;
     const db = env.DB;
 
     const STRIPE_SECRET_KEY: string | undefined = env.STRIPE_SECRET_KEY;

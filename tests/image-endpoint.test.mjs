@@ -59,18 +59,21 @@ test("no page uses astro:assets, so nothing depends on Astro image transforms", 
 });
 
 test("the built /_image module (if a build exists) contains no proxy code", async (t) => {
-  const built = "dist/_worker.js/pages/_image.astro.mjs";
+  // Astro 7 + adapter 14 (Workers): dist/server/chunks/image-endpoint-disabled_<hash>.mjs.
+  let chunks;
   try {
-    await access(new URL(built, root));
+    chunks = await readdir(new URL("dist/server/chunks/", root));
   } catch {
     t.skip("no build output; run npm run build first");
     return;
   }
-  const src = await read(built);
-  assert.ok(src.includes('new Response("Not found", { status: 404'), "disabled endpoint is bundled");
+  const disabled = chunks.find((c) => /^image-endpoint-disabled_[\w-]+\.mjs$/.test(c));
+  assert.ok(disabled, "the disabled /_image endpoint is bundled");
+  const src = await read(`dist/server/chunks/${disabled}`);
+  assert.match(src, /new Response\("Not found",\s*\{\s*status:\s*404/, "it answers 404"); // Vite 8 splits it across lines
+  assert.match(src, /"Cache-Control":\s*"no-store"/, "never cached");
   assert.ok(!/\bfetch\(/.test(src), "no fetch");
   assert.ok(!/searchParams\.get\(["']href/.test(src), "never reads href");
-  const chunks = await readdir(new URL("dist/_worker.js/chunks/", root));
   assert.ok(!chunks.some((c) => /^(image-endpoint|sharp)_/.test(c)), "stock image endpoint / sharp not bundled");
 });
 

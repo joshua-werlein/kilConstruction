@@ -12,11 +12,5 @@ interface ImportMetaEnv {
     readonly PUBLIC_GALLERY_API: string;
 }
 
-type Env = {
-    GALLERY_WORKER: Fetcher;
-};
-type Runtime = import("@astrojs/cloudflare").Runtime<Env>;
-
-declare namespace App {
-    interface Locals extends Runtime {}
-}
+// Bindings are read through src/utils/runtimeEnv.ts (cloudflare:workers);
+// Astro.locals.runtime no longer exists in @astrojs/cloudflare 13+.

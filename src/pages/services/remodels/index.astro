@@ -1,4 +1,5 @@
 ---
+import { runtimeEnv } from "../../../utils/runtimeEnv";
 import MainLayout from "../../../layout/MainLayout.astro";
 import ProjectCard from "../../../components/ProjectCard.astro";
 import "../../../styles/global.css";
@@ -14,7 +15,7 @@ const service =
         description: "",
     };
 
-const { env } = Astro.locals.runtime;
+const env = runtimeEnv;
 const GALLERY_WORKER = env?.GALLERY_WORKER as Fetcher | undefined;
 if (!GALLERY_WORKER) throw new Error("Missing service binding: GALLERY_WORKER");
 
@@ -60,7 +61,6 @@ async function workerFetchJsonWithRetry(binding: any, url: string, tries = 2): P
                     "Cache-Control": "no-store",
                     Pragma: "no-cache",
                 },
-                // @ts-expect-error: Cloudflare supports this in Workers
                 cf: { cacheTtl: 0, cacheEverything: false },
             });
             const res = await binding.fetch(req);

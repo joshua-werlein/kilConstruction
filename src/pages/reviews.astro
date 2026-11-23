@@ -1,4 +1,5 @@
 ---
+import { runtimeEnv } from "../utils/runtimeEnv";
 import MainLayout from "../layout/MainLayout.astro";
 import "../styles/global.css";
 import "../styles/reviews.css";
@@ -23,7 +24,7 @@ type Review = {
     featured?: boolean;
 };
 
-const { env } = Astro.locals.runtime;
+const env = runtimeEnv;
 const GALLERY_WORKER = env?.GALLERY_WORKER as Fetcher | undefined;
 if (!GALLERY_WORKER) throw new Error("Missing GALLERY_WORKER binding");
 const SITEKEY = import.meta.env.PUBLIC_TURNSTILE_SITE_KEY;
@@ -72,7 +73,6 @@ async function workerFetchJsonWithRetry(binding: any, url: string, tries = 2): P
           "Cache-Control": "no-store",
           Pragma: "no-cache",
         },
-        // @ts-expect-error: Cloudflare supports this in Workers
         cf: { cacheTtl: 0, cacheEverything: false },
       });
       const res = await binding.fetch(req);
@@ -100,7 +100,7 @@ try {
     if (summaryRes && summaryRes.ok) summary = await summaryRes.json();
 
     if (listRes && listRes.ok) {
-        const data = await listRes.json();
+        const data = (await listRes.json()) as { total?: number; reviews?: unknown[] };
         total = Number(data.total || 0);
         reviews = (Array.isArray(data.reviews) ? data.reviews : []) as Review[];
     }
@@ -216,7 +216,7 @@ const hasReviews = !!summary && summary.totalReviews > 0;
                     <nav class="reviews-pagination" aria-label="Reviews pages">
                         {Array.from({ length: totalPages }).map((_, idx) => {
                             const pageNum = idx + 1;
-                            const url = new URL("/reviews", PROD_ORIGIN);
+                            const url = new URL("/reviews", Astro.site ?? "https://kilcon.work");
                             url.searchParams.set("page", String(pageNum));
                             if (filterType !== "all") url.searchParams.set("type", filterType);
 

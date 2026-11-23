@@ -1,4 +1,5 @@
 import type { APIRoute } from "astro";
+import { runtimeEnv } from "../../../utils/runtimeEnv";
 
 function json(data: unknown, status = 200) {
     return new Response(JSON.stringify(data), {
@@ -50,7 +51,7 @@ async function stripePostForm(url: string, secretKey: string, params: URLSearchP
 }
 
 export const POST: APIRoute = async ({ request, locals }) => {
-    const env = (locals as any).runtime?.env ?? {};
+    const env = runtimeEnv;
     const db = env.DB;
     const STRIPE_SECRET_KEY: string | undefined = env.STRIPE_SECRET_KEY;
 
