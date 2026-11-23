@@ -43,6 +43,8 @@ function makeEnv(overrides = {}) {
     FB_GRAPH_VERSION: "v26.0",
     FB_AUTO_IMPORT: "false",
     FB_HISTORICAL_IMPORT_ENABLED: "true",
+    // wrangler.toml now ships discovery on; tests opt in explicitly.
+    FB_DISCOVERY_ENABLED: "false",
     FB_INTEGRATION_ENABLED: "true",
     // Real limiters (3 writes/min) would throttle the suite; limits aren't under test.
     READ_LIMITER: { limit: async () => ({ success: true }) },

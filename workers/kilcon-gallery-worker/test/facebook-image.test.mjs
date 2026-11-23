@@ -74,7 +74,7 @@ function fakeCache() {
 }
 
 function makeEnv(overrides = {}) {
-  return { ...baseEnv, FB_INTEGRATION_ENABLED: "true", IMAGES: images, ...overrides };
+  return { ...baseEnv, FB_INTEGRATION_ENABLED: "true", FB_DISCOVERY_ENABLED: "false", IMAGES: images, ...overrides }; // toml ships discovery on
 }
 const ctx = () => {
   const pending = [];

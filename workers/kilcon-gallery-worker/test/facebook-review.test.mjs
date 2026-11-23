@@ -35,6 +35,8 @@ const makeEnv = (o = {}) => ({
   FB_APP_SECRET: APP_SECRET, FB_VERIFY_TOKEN: "vt", FB_PAGE_ACCESS_TOKEN: PAGE_TOKEN, FB_PAGE_ID: PAGE_ID,
   FB_GRAPH_VERSION: "v26.0", FB_INTEGRATION_ENABLED: "true", FB_AUTO_IMPORT: "true",
   FB_HISTORICAL_IMPORT_ENABLED: "true",
+  // wrangler.toml now ships discovery on; tests opt in explicitly.
+  FB_DISCOVERY_ENABLED: "false",
   READ_LIMITER: { limit: async () => ({ success: true }) }, WRITE_LIMITER: { limit: async () => ({ success: true }) },
   REVIEW_LIMITER: { limit: async () => ({ success: true }) },
   ADMIN_SECRET, SESSION_VERSION: "3", ...o,
