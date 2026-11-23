@@ -13,6 +13,8 @@ import {
   CSP_ENFORCE,
   TURNSTILE_ORIGIN,
   IMAGES_ORIGIN,
+  CF_INSIGHTS_SCRIPT_ORIGIN,
+  CF_INSIGHTS_REPORT_ORIGIN,
   applySecurityHeaders,
 } from "../src/utils/securityHeaders.ts";
 
@@ -151,7 +153,9 @@ test("middleware applies the headers to every on-demand response", async () => {
 test("every absolute origin in src/ is covered by the enforced CSP or is navigation-only", async () => {
   const files = await sourceFiles(new URL("../src", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
   const NAVIGATION_ONLY = new Set(["https://www.facebook.com", "https://schema.org", "http://www.w3.org", "http://www.sitemaps.org"]);
-  const fetchable = new Set([SITE_ORIGIN, IMAGES_ORIGIN, TURNSTILE_ORIGIN]);
+  const fetchable = new Set([SITE_ORIGIN, IMAGES_ORIGIN, TURNSTILE_ORIGIN, CF_INSIGHTS_SCRIPT_ORIGIN, CF_INSIGHTS_REPORT_ORIGIN]);
+  assert.ok(directive("script-src").includes(CF_INSIGHTS_SCRIPT_ORIGIN), "Cloudflare Web Analytics beacon (edge-injected)");
+  assert.ok(directive("connect-src").includes(CF_INSIGHTS_REPORT_ORIGIN), "Web Analytics reports");
   for (const f of files) {
     for (const m of (await readFile(f, "utf8")).matchAll(/https?:\/\/[A-Za-z0-9.-]+/g)) {
       assert.ok(fetchable.has(m[0]) || NAVIGATION_ONLY.has(m[0]), `${f}: ${m[0]} is not allowed by the CSP`);

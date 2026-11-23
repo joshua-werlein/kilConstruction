@@ -16,18 +16,23 @@
 /** Third-party origins the browser legitimately loads from. */
 export const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
 export const IMAGES_ORIGIN = "https://images.kilcon.work";
+// Cloudflare Web Analytics: injected at the edge (not in the HTML source). The
+// beacon script loads from static.cloudflareinsights.com and reports to
+// cloudflareinsights.com. Found in the 2026-11-23 production report-only check.
+export const CF_INSIGHTS_SCRIPT_ORIGIN = "https://static.cloudflareinsights.com";
+export const CF_INSIGHTS_REPORT_ORIGIN = "https://cloudflareinsights.com";
 
 export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
   ["default-src", "'self'"],
   // 'unsafe-inline': the is:inline status scripts (contact, reviews), small
   // hoisted scripts Astro may inline, and Cloudflare's injected challenge-platform
   // bootstrap. Replacing it with hashes or nonces is a separate follow-up.
-  ["script-src", `'self' 'unsafe-inline' ${TURNSTILE_ORIGIN}`],
+  ["script-src", `'self' 'unsafe-inline' ${TURNSTILE_ORIGIN} ${CF_INSIGHTS_SCRIPT_ORIGIN}`],
   ["style-src", "'self' 'unsafe-inline'"],
   // data:/blob: cover inline SVG and admin upload previews.
   ["img-src", `'self' data: blob: ${IMAGES_ORIGIN}`],
   ["font-src", "'self'"],
-  ["connect-src", `'self' ${TURNSTILE_ORIGIN}`],
+  ["connect-src", `'self' ${TURNSTILE_ORIGIN} ${CF_INSIGHTS_REPORT_ORIGIN}`],
   ["frame-src", TURNSTILE_ORIGIN],
   ["manifest-src", "'self'"],
   ["object-src", "'none'"],
@@ -41,7 +46,7 @@ export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
 export const CSP = CSP_DIRECTIVES.map(([k, v]) => `${k} ${v}`).join("; ");
 
 /** true: Content-Security-Policy (blocks). false: Content-Security-Policy-Report-Only. */
-export const CSP_ENFORCE = false;
+export const CSP_ENFORCE = true;
 export const CSP_HEADER = CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only";
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
