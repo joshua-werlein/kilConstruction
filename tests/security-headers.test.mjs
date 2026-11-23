@@ -9,7 +9,8 @@ import { join } from "node:path";
 import {
   SECURITY_HEADERS,
   CSP_DIRECTIVES,
-  CSP_REPORT_ONLY,
+  CSP,
+  CSP_ENFORCE,
   TURNSTILE_ORIGIN,
   IMAGES_ORIGIN,
   applySecurityHeaders,
@@ -24,17 +25,19 @@ test("adds every security header with its exact value", () => {
   assert.equal(res.headers.get("Referrer-Policy"), "strict-origin-when-cross-origin");
   assert.equal(res.headers.get("Permissions-Policy"), "camera=(), microphone=(), geolocation=(), usb=()");
   assert.equal(res.headers.get("Cross-Origin-Opener-Policy"), "same-origin-allow-popups");
-  assert.equal(res.headers.get("Content-Security-Policy-Report-Only"), CSP_REPORT_ONLY);
+  assert.equal(res.headers.get("Content-Security-Policy"), CSP);
   assert.equal(res.headers.get("Content-Type"), "text/html");
 });
 
-test("CSP is report-only; HSTS and nosniff are left to the Cloudflare zone", () => {
+test("CSP is enforced (one header, no report-only copy); HSTS and nosniff are left to the Cloudflare zone", () => {
   const res = applySecurityHeaders(new Response("x"));
-  assert.equal(res.headers.get("Content-Security-Policy"), null, "no enforcing CSP yet");
+  assert.equal(CSP_ENFORCE, true);
+  assert.equal(res.headers.get("Content-Security-Policy"), CSP);
+  assert.equal(res.headers.get("Content-Security-Policy-Report-Only"), null, "no duplicate report-only policy");
   assert.equal(res.headers.get("Strict-Transport-Security"), null, "zone already sends HSTS");
   assert.equal(res.headers.get("X-Content-Type-Options"), null, "zone already sends nosniff");
   for (const name of Object.keys(SECURITY_HEADERS)) {
-    assert.doesNotMatch(name,/^(content-security-policy|strict-transport-security|x-content-type-options)$/i);
+    assert.doesNotMatch(name,/^(strict-transport-security|x-content-type-options)$/i);
   }
 });
 
@@ -92,7 +95,7 @@ test("CSP allows exactly what the site loads: Turnstile, gallery images, same-or
   assert.deepEqual(directive("frame-ancestors"), ["'none'"]);
   assert.deepEqual(directive("object-src"), ["'none'"]);
   assert.deepEqual(directive("base-uri"), ["'self'"]);
-  assert.ok(!CSP_REPORT_ONLY.includes("unsafe-eval"), "no eval needed");
+  assert.ok(!CSP.includes("unsafe-eval"), "no eval needed");
 });
 
 // Guards drift: a new third-party <script src>, <iframe src>, or absolute
@@ -139,4 +142,19 @@ test("middleware applies the headers to every on-demand response", async () => {
   assert.match(mw, /return applySecurityHeaders\(await next\(\)\);/);
   const cfg = await readFile(new URL("../astro.config.mjs", import.meta.url), "utf8");
   assert.match(cfg, /output:\s*'server'/, "server output is why middleware (not _headers) is used");
+});
+
+// The CSP is enforced, so every absolute URL in src/ must be either allowed by a
+// fetch directive or navigation/metadata only (links and XML/JSON-LD namespaces).
+test("every absolute origin in src/ is covered by the enforced CSP or is navigation-only", async () => {
+  const files = await sourceFiles(new URL("../src", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  const NAVIGATION_ONLY = new Set(["https://www.facebook.com", "https://schema.org", "http://www.w3.org", "http://www.sitemaps.org"]);
+  const fetchable = new Set([SITE_ORIGIN, IMAGES_ORIGIN, TURNSTILE_ORIGIN]);
+  for (const f of files) {
+    for (const m of (await readFile(f, "utf8")).matchAll(/https?:\/\/[A-Za-z0-9.-]+/g)) {
+      assert.ok(fetchable.has(m[0]) || NAVIGATION_ONLY.has(m[0]), `${f}: ${m[0]} is not allowed by the CSP`);
+    }
+  }
+  assert.ok(directive("img-src").includes(IMAGES_ORIGIN));
+  assert.ok(directive("connect-src").includes(TURNSTILE_ORIGIN));
 });

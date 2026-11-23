@@ -28,6 +28,8 @@ test("bindings and variables mirror the Pages production project", async () => {
   assert.equal(cfg.vars.SESSION_VERSION, "3", "same session version as Pages and the Gallery Worker");
   assert.equal(cfg.kv_namespaces, undefined, "no SESSION KV");
   assert.equal(cfg.triggers, undefined, "no cron on the site Worker");
+  assert.deepEqual(cfg.ratelimits, [{ name: "LOGIN_LIMITER", namespace_id: "1004", simple: { limit: 5, period: 60 } }],
+    "admin login limiter; its own namespace (1001-1003 are the Gallery and Contact Workers')");
   const raw = await read("wrangler.jsonc");
   assert.doesNotMatch(raw, /sk_live_|sk_test_|whsec_|ADMIN_PASS\s*[:=]\s*"/, "no secret values in config");
   assert.doesNotMatch(stripComments(raw), /STRIPE|PAYMENTS_ENABLED/, "no Stripe configuration: online payments are retired");
@@ -102,4 +104,13 @@ test("the deploy script refuses builds that carry a local .env", async () => {
   for (const s of ["site:deploy", "site:dry-run"]) {
     assert.match(pkg.scripts[s], /^astro build && node scripts\/check-site-build\.mjs && wrangler deploy/, s);
   }
+});
+
+test("admin login: durable rate limit before credentials are read; no text echoed from the URL", async () => {
+  const page = await read("src/pages/admin.astro");
+  const limitAt = page.indexOf("limiter.limit({ key: `admin-login:${ip}` })");
+  assert.ok(limitAt > 0, "uses the LOGIN_LIMITER binding");
+  assert.ok(limitAt < page.indexOf("Astro.request.formData()"), "limits before reading credentials");
+  assert.match(page, /status: 429/);
+  assert.doesNotMatch(page, /searchParams\.get\("error"\)/, "login errors are fixed messages only");
 });

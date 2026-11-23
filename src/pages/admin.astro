@@ -9,7 +9,8 @@ import {
 import { createAdminToken } from "../utils/adminToken";
 
 const cookies = Astro.cookies;
-let error = Astro.url.searchParams.get("error") ?? "";
+// Only fixed messages are shown: the login page never echoes text from the URL.
+let error = "";
 
 // Cloudflare runtime env
 const env = runtimeEnv;
@@ -37,6 +38,22 @@ if (tooManyLoginAttempts(ip)) {
 }
 
 if (Astro.request.method === "POST") {
+    // Durable per-IP limit across isolates (Workers rate-limit binding, namespace 1004:
+    // 5 login POSTs per 60 s). The in-memory counter above only covers one isolate.
+    // Fails open if the binding is missing or errors, like the other Workers.
+    const limiter = env.LOGIN_LIMITER as { limit(o: { key: string }): Promise<{ success: boolean }> } | undefined;
+    if (limiter) {
+        let allowed = true;
+        try { allowed = (await limiter.limit({ key: `admin-login:${ip}` })).success; }
+        catch (e) { console.error("[login] rate limit binding error", e); }
+        if (!allowed) {
+            console.warn("[login] rate limited", ip);
+            return new Response("Too many attempts, try again later", {
+                status: 429,
+                headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "retry-after": "60" },
+            });
+        }
+    }
     const formData = await Astro.request.formData();
     const username = formData.get("username");
     const password = formData.get("password");

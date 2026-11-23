@@ -1,4 +1,4 @@
-# Security headers (report-only CSP)
+# Security headers (CSP)
 
 Status: **deployed 2026-11-21.** Pages deployment `ea36b012-fd57-4c84-b3aa-8bddacc299a8` from
 `main` `f33023e`. The CSP is report-only; enforcement is not enabled.
@@ -6,7 +6,38 @@ Status: **deployed 2026-11-21.** Pages deployment `ea36b012-fd57-4c84-b3aa-8bdda
 Rollback point: Pages `1cd87df8-3b6e-4530-99a4-5980f8f86d03` (`ff36da0`, a README-only change).
 It carries the same site code as `1030adad` (`b915243`), which remains available as a fallback.
 
-### Deployment record (2026-11-21)
+### Deployme## Enforcement (branch `task/apparel-security-readme`, 2026-11-23, not yet deployed)
+
+The same policy is now sent as **`Content-Security-Policy`**, which enforces it. No report-only
+copy is sent. To fall back to report-only, set `CSP_ENFORCE = false` in
+`src/utils/securityHeaders.ts`.
+
+### Why it's safe to enforce
+
+- **Live pages (read-only):** `/`, `/contact`, `/reviews`, `/apparel`, `/apparel/t-shirts`,
+  `/projects`, `/admin` and `/privacy` were fetched on 2026-11-23. Every external `src`,
+  `srcset` and `action` is `kilcon.work`, `images.kilcon.work` or `challenges.cloudflare.com`.
+  `www.facebook.com` appears only in links, which are navigation and not governed by CSP.
+- **Inline scripts:** the only inline scripts are the `is:inline` status scripts and Cloudflare's
+  challenge-platform bootstrap. That bootstrap loads `/cdn-cgi/challenge-platform/…`, which is
+  same-origin. `'unsafe-inline'` stays, and no `define:vars` remain.
+- **Admin pages:** every image, preview and `fetch` is same-origin
+  (`/api/gallery-api/facebook/admin/photo-file`, `review-site-image` and the other
+  `/api/gallery-api/*` and `/api/reviews/*` paths), or `blob:` for upload previews. Images come
+  from `images.kilcon.work`.
+- **Forms:** forms post to `/admin`, `/api/contact` and `/api/reviews/submit` (all same-origin)
+  and redirect back to `kilcon.work`. The apparel form is a same-origin GET.
+- **Drift guard:** `tests/security-headers.test.mjs` fails if `src/` gains an absolute origin
+  that the policy doesn't allow.
+
+### After deploy
+
+In a browser, check the console on `/contact` and `/reviews` (Turnstile), `/apparel/<item>`, and
+the admin pages: login, upload, manage, Facebook review and reviews. Look for `Refused to …`
+errors. **Rollback:** roll back to the previous `kilcon-site` version, or set
+`CSP_ENFORCE = false` and push.
+
+nt record (2026-11-21)
 
 - **Merge:** the branch was rebased onto `ff36da0` (a README edit pushed to `main` at 10:03, which
   had deployed as `1cd87df8`). Tests were rerun after the rebase: site 37/37, Worker 125/125, build OK.

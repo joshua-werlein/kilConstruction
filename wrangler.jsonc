@@ -31,7 +31,11 @@
     { "binding": "DB", "database_name": "kilcon-db", "database_id": "095cfe7f-d0af-49e8-b92a-942fa093bfe6" }
   ],
   "r2_buckets": [{ "binding": "GALLERY_BUCKET", "bucket_name": "kilcon-gallery" }],
-  "services": [{ "binding": "GALLERY_WORKER", "service": "kilcon-gallery-worker" }]
+  "services": [{ "binding": "GALLERY_WORKER", "service": "kilcon-gallery-worker" }],
+  // Admin login throttle (src/pages/admin.astro): 5 POSTs per IP per 60 s, shared
+  // across isolates. Namespace 1004 is new; 1001-1003 belong to the Gallery and
+  // Contact Workers. Available on the Workers Free plan.
+  "ratelimits": [{ "name": "LOGIN_LIMITER", "namespace_id": "1004", "simple": { "limit": 5, "period": 60 } }]
   // Secrets (values supplied by the owner at cutover):
   //   ADMIN_USER, ADMIN_PASS, ADMIN_SECRET
   // No Stripe secrets: online payments were retired 2026-11-22 (/api/stripe/* answer 410).

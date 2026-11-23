@@ -9,9 +9,9 @@
 // them would duplicate the header):
 //   Strict-Transport-Security, X-Content-Type-Options
 //
-// The CSP is REPORT-ONLY. It never blocks anything; browsers only log
-// violations to the console. Enforce it only after the pages have been
-// checked for violations (see docs/security-headers.md).
+// The CSP is ENFORCED since the 2026-11-23 audit (docs/security-headers.md):
+// every page's scripts, frames, images, fetches and form targets were checked
+// against it. To fall back to report-only, set CSP_ENFORCE to false.
 
 /** Third-party origins the browser legitimately loads from. */
 export const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
@@ -19,9 +19,9 @@ export const IMAGES_ORIGIN = "https://images.kilcon.work";
 
 export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
   ["default-src", "'self'"],
-  // 'unsafe-inline': Astro emits define:vars scripts (contact, reviews,
-  // apparel) and Cloudflare injects inline bootstrap scripts. Moving to hashes
-  // or nonces is the step before enforcing.
+  // 'unsafe-inline': the is:inline status scripts (contact, reviews), small
+  // hoisted scripts Astro may inline, and Cloudflare's injected challenge-platform
+  // bootstrap. Replacing it with hashes or nonces is a separate follow-up.
   ["script-src", `'self' 'unsafe-inline' ${TURNSTILE_ORIGIN}`],
   ["style-src", "'self' 'unsafe-inline'"],
   // data:/blob: cover inline SVG and admin upload previews.
@@ -38,7 +38,11 @@ export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
   ["frame-ancestors", "'none'"],
 ];
 
-export const CSP_REPORT_ONLY = CSP_DIRECTIVES.map(([k, v]) => `${k} ${v}`).join("; ");
+export const CSP = CSP_DIRECTIVES.map(([k, v]) => `${k} ${v}`).join("; ");
+
+/** true: Content-Security-Policy (blocks). false: Content-Security-Policy-Report-Only. */
+export const CSP_ENFORCE = true;
+export const CSP_HEADER = CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only";
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   "X-Frame-Options": "DENY",
@@ -46,7 +50,7 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze(
   "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=()",
   // allow-popups keeps window.open/target=_blank flows (Facebook links) working.
   "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
-  "Content-Security-Policy-Report-Only": CSP_REPORT_ONLY,
+  [CSP_HEADER]: CSP,
 });
 
 /**
