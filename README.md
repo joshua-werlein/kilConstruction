@@ -5,7 +5,7 @@
 ### Serverless construction website · Galleries · Reviews · Custom administration
 
 [![Live Website](https://img.shields.io/badge/Live_Site-kilcon.work-111827?style=for-the-badge)](https://kilcon.work)
-[![Astro](https://img.shields.io/badge/Astro-5-BC52EE?style=flat-square&logo=astro&logoColor=white)](https://astro.build/)
+[![Astro](https://img.shields.io/badge/Astro-7-BC52EE?style=flat-square&logo=astro&logoColor=white)](https://astro.build/)
 [![Cloudflare](https://img.shields.io/badge/Cloudflare-Workers_%C2%B7_D1_%C2%B7_R2-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://www.cloudflare.com/)
 ![Status](https://img.shields.io/badge/Status-Production-2EA44F?style=flat-square)
 [![License](https://img.shields.io/badge/License-Proprietary-5B5B5B?style=flat-square)](LICENSE)
@@ -20,7 +20,7 @@
 
 A production website and custom content platform built for a construction business. Its owner can organize project imagery, manage customer reviews, and maintain public content without editing code or relying on a third-party CMS.
 
-The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site`, see [wrangler.jsonc](wrangler.jsonc) and [docs/production-deploy.md](docs/production-deploy.md)), with two separately deployed Workers in this repository. The gallery Worker handles media, reviews, Facebook webhooks, and import controls; the contact Worker verifies Turnstile challenges and delivers messages through Resend. D1 holds project/photo metadata while R2 holds image files.
+The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site`, see [wrangler.jsonc](wrangler.jsonc)). Pages and API routes are server-rendered by the Worker; built files in `dist/` are served as static assets. Two more Workers are deployed separately from this repository. The gallery Worker handles media, reviews, Facebook webhooks, and import controls; the contact Worker verifies Turnstile challenges and delivers messages through Resend. D1 holds project/photo metadata while R2 holds image files.
 
 ## 🚀 Features
 
@@ -31,9 +31,9 @@ The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site
 | ⭐ **Customer reviews** | Review submission, moderation, featured reviews, and private review-photo storage |
 | ☁️ **Cloud media** | R2 image files, private Facebook masters, protected review attachments, and visibility-gated image delivery |
 | 📩 **Contact workflow** | Cloudflare Turnstile checks and Resend delivery through a separate Worker |
-| 🧢 **Apparel requests** | Item pages with sizes managed in admin; **Request This Item** prefills the contact form (no online payment; see [docs/apparel-requests.md](docs/apparel-requests.md)) |
+| 🧢 **Apparel requests** | Item pages with sizes managed in admin; **Request This Item** collects name, email, size (or another size), quantity and notes, then prefills the contact form. No online payment ([workflow](docs/apparel-requests.md)) |
 | 📘 **Facebook integration** | Signed Meta Page webhooks, automatic new-post imports, per-photo duplicate comparison and review, and guarded historical imports |
-| 🛡️ **Security controls** | Input checks, scoped media access, rate limits, and regression tests for path/URL variations |
+| 🛡️ **Security controls** | Enforced Content Security Policy, signed admin sessions, rate limits, input and upload validation, scoped media access, and regression tests |
 
 ## 🧩 Architecture
 
@@ -46,6 +46,7 @@ flowchart TB
     B --> F[(R2 private reviews + Facebook masters)]
     C --> G[Turnstile + Resend]
     H[Meta Page webhook] --> B
+    I[Hourly cron: discovery at 12:00 and 18:00 Chicago] --> B
 ```
 
 | Source | Responsibility |
@@ -54,7 +55,16 @@ flowchart TB
 | [Gallery and reviews Worker](workers/kilcon-gallery-worker/) | D1 records, R2 media, moderation, and Facebook imports |
 | [Contact Worker](workers/kilcon-contact/) | Turnstile verification and Resend delivery |
 
-> **Deployment boundary:** The Astro site and two Workers deploy separately. A site push does not automatically redeploy the backend Workers.
+> **Deployment boundary:** Workers Builds deploys `kilcon-site` on every push to `main`. The Gallery and Contact Workers are deployed by hand with an explicit `--config`; a site push never redeploys them.
+
+## 🧢 Apparel requests
+
+Online payment is retired; the Stripe endpoints answer `410 Gone`.
+1. On `/apparel/<item>`, the customer enters **Full Name**, **Email Address**, **size** (or *Other size*), **quantity** and optional **notes**. Each field is validated, and errors are announced and focus the first invalid field.
+2. The browser opens `/contact` with only the item, size and quantity in the URL. Name, email and notes travel in this tab's `sessionStorage`, so they stay out of URLs, logs and Referer headers. They're read once, only for the same item, and expire after 30 minutes.
+3. The contact form arrives prefilled, so nothing is typed twice. The customer completes Turnstile and presses **Send**, and the unchanged Contact Worker applies its honeypot and rate limit, then delivers through Resend.
+
+Nothing is stored in a database. See [docs/apparel-requests.md](docs/apparel-requests.md).
 
 ## 🔎 Media and Facebook integration
 
@@ -68,7 +78,9 @@ The admin **Facebook Photo Review** page compares Facebook photos against existi
 - the destination can be any existing gallery, including the manual website galleries, which are linked automatically and never duplicated;
 - a new gallery can be created on the spot, after a check for an existing match and a confirmation.
 
-It is a scoped, authenticated operation (`FB_REVIEWED_IMPORT_ENABLED`) that takes explicit approved photo IDs only and can't start a historical scan. Unrestricted historical import and automatic album discovery remain disabled.
+It is a scoped, authenticated operation (`FB_REVIEWED_IMPORT_ENABLED`) that takes explicit approved photo IDs only and can't start a historical scan. Unrestricted historical import stays disabled (`FB_HISTORICAL_IMPORT_ENABLED`).
+
+**Album discovery** (`FB_DISCOVERY_ENABLED`) reconciles the Page's albums twice daily, at 12:00 and 18:00 America/Chicago. An hourly cron runs, and the Worker acts only in those two slots. It considers only content newer than its cutoff (2026-11-22), so it picks up new photos added to existing albums without re-importing history.
 
 Signed webhook imports of new Page posts continue automatically:
 - a new Facebook album with a distinctive name becomes its own gallery;
@@ -90,7 +102,7 @@ The tags are hidden on the website, never change existing galleries, and are ign
 - [Historical photo review and duplicate decisions](docs/facebook-photo-review.md)
 - [Caption hashtags (contractor guide)](docs/facebook-hashtags.md)
 - [Current handoff and feature flags](docs/RESUME.md)
-- [Verified production flags](docs/security-release-2026-11-19.md)
+- [Security headers and CSP](docs/security-headers.md)
 
 </details>
 
@@ -135,8 +147,6 @@ npm run contact-worker:dry-run
 **Always pass `--config workers/<worker>/wrangler.toml` to Wrangler for the Gallery and Contact Workers.** After `astro build`, `.wrangler/deploy/config.json` redirects config-less Wrangler commands to the site Worker.
 
 Cloudflare account access, Worker bindings, D1 migrations, R2 buckets, and secrets are required for a fully functional deployment. **Never run production migrations or historical imports as part of README maintenance.**
-
-**Deployment:** Astro 7 on Cloudflare Workers, automatically deployed from main.
 
 ## 📜 License and authorship
 
