@@ -6,7 +6,10 @@ import { readFile } from "node:fs/promises";
 import {
   sizeOptions, validateInquiry, inquiryQuery, parseInquiry, formatInquiryMessage, cleanNotes,
   OTHER_SIZE, STANDARD_SIZES, MAX_NOTES_LENGTH, NOTES_STORAGE_KEY,
+  validateName, validateEmail, validateRequestForm, encodeHandoff, decodeHandoff,
+  HANDOFF_STORAGE_KEY, HANDOFF_MAX_AGE_MS,
 } from "../src/lib/apparel-inquiry.js";
+import { encodeDraft, decodeDraft, DRAFT_MAX_AGE_MS } from "../src/lib/contact-draft.js";
 
 const root = new URL("../", import.meta.url);
 const read = (p) => readFile(new URL(p, root), "utf8");
@@ -77,15 +80,19 @@ test("item page: Request This Item replaces checkout, no Stripe, no inline data"
   assert.match(page, /id="notesInput"[^>]*maxlength=\{MAX_NOTES_LENGTH\}/);
   assert.match(page, /sizeOptions\(variantRows\)/);
   assert.match(page, /ORDER BY CASE size WHEN 'S' THEN 1 WHEN 'M' THEN 2/, "size values are quoted SQL literals");
-  assert.match(page, /sessionStorage\.setItem\(NOTES_STORAGE_KEY/);
+  assert.match(page, /sessionStorage\.setItem\(HANDOFF_STORAGE_KEY, encodeHandoff\(/);
+  assert.match(page, /validateRequestForm\(/);
   assert.doesNotMatch(page, /stripe|checkout|Checkout|define:vars/i);
 });
 
 test("contact page: prefill only, same form, endpoint and Turnstile", async () => {
   const page = await read("src/pages/contact.astro");
-  assert.match(page, /parseInquiry\(params, notes\)/);
-  assert.match(page, /if \(message && !message\.value\.trim\(\)\) message\.value = formatInquiryMessage/, "never overwrites typed text");
-  assert.match(page, /sessionStorage\.removeItem\(NOTES_STORAGE_KEY\)/);
+  assert.match(page, /decodeHandoff\(raw, params\.get\("item"\)/, "handoff only for the item in the URL");
+  assert.match(page, /parseInquiry\(params, handoff\?\.notes/);
+  assert.match(page, /if \(field && value && !field\.value\.trim\(\)\) field\.value = value;/, "never overwrites typed text");
+  for (const id of ["name", "email", "message"]) assert.ok(page.includes(`fill("${id}"`), id);
+  assert.match(page, /sessionStorage\.removeItem\(HANDOFF_STORAGE_KEY\)/, "read once");
+  assert.match(page, /sessionStorage\.removeItem\(NOTES_STORAGE_KEY\)/, "legacy key cleared");
   assert.match(page, /note\.textContent = /, "text, never HTML");
   assert.doesNotMatch(page, /innerHTML/);
   assert.match(page, /action=\{ENDPOINT\}/);
@@ -144,4 +151,100 @@ test("retiring payments adds no migration: order tables and records stay as they
   const LAST_APPLIED = "018_facebook_highlights.sql";
   const files = (await readdir(new URL("migrations/", root))).sort();
   assert.equal(files.at(-1), LAST_APPLIED, "a new migration needs its own review; this change must not add one");
+});
+
+test("names: letters in any script with spaces, hyphens, apostrophes and periods; 2-100 characters", () => {
+  for (const n of ["Li", "Ana María O’Neil", "José-Luis Pérez", "Mary-Kate O'Brien Jr.", "  Sam   Lee  ", "Nguyễn Văn An", "Zoë"]) {
+    assert.equal(validateName(n).ok, true, n);
+  }
+  assert.equal(validateName("  Sam   Lee  ").value, "Sam Lee");
+  assert.equal(validateName("Bob\u0000").value, "Bob", "control characters are stripped, not kept");
+  for (const n of ["", " ", "A", "R2D2", "<script>", "a@b.com", "-Bob", "'Bob", "x".repeat(101)]) {
+    assert.equal(validateName(n).ok, false, JSON.stringify(n));
+  }
+});
+
+test("emails: practical format, length-capped, stricter than the Contact Worker", () => {
+  const workerAccepts = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); // workers/kilcon-contact/src/index.js
+  for (const e of ["a@b.co", "first.last+tag@sub.example.org", "o'neil@example.ie", "x_y@mail-host.com"]) {
+    assert.equal(validateEmail(e).ok, true, e);
+    assert.equal(workerAccepts(validateEmail(e).value), true, `worker accepts ${e}`);
+  }
+  for (const e of ["", "a@b", "a b@c.com", "a@-b.com", "a@b-.com", "a..b@c.com", ".a@c.com", "a.@c.com", "\"x\"@y.com",
+    "a@b.c", "a@b.c1", "a@@b.com", "<a@b.com>", `${"a".repeat(65)}@b.com`, `a@${"b".repeat(250)}.com`]) {
+    assert.equal(validateEmail(e).ok, false, JSON.stringify(e));
+  }
+  assert.equal(validateEmail("  a@b.co ").value, "a@b.co");
+});
+
+test("request form: name and email required, every error reported in form order", () => {
+  const base = { name: "Pat Doe", email: "pat@example.com", slug: "coats", title: "Coats", size: "M", quantity: "1", notes: "Navy" };
+  const ok = validateRequestForm(base);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.contact, { name: "Pat Doe", email: "pat@example.com" });
+  assert.equal(ok.request.notes, "Navy");
+  assert.deepEqual(validateRequestForm({ ...base, name: "", email: "bad" }).errors, ["name", "email"]);
+  assert.deepEqual(validateRequestForm({ ...base, email: "", size: "" }).errors, ["email", "size"]);
+  assert.equal(validateRequestForm({ ...base, name: " " }).error, "name");
+  // Other size and quantity rules still apply.
+  assert.deepEqual(validateRequestForm({ ...base, size: OTHER_SIZE, customSize: "" }).errors, ["custom_size"]);
+  assert.equal(validateRequestForm({ ...base, size: OTHER_SIZE, customSize: "Youth M" }).request.size, "Youth M");
+  assert.deepEqual(validateRequestForm({ ...base, quantity: "0" }).errors, ["quantity"]);
+});
+
+test("handoff: name, email and notes reach /contact only via sessionStorage, for the same item, once and fresh", () => {
+  const now = 1_800_000_000_000;
+  const { request, contact } = validateRequestForm({ name: "Pat Doe", email: "pat@example.com", slug: "coats", title: "Coats", size: "L", quantity: "2", notes: "Call 555-0100" });
+  const raw = encodeHandoff({ slug: request.slug, ...contact, notes: request.notes }, now);
+  const qs = inquiryQuery(request);
+  for (const secret of ["Pat", "pat", "%40", "555"]) assert.ok(!qs.includes(secret), `URL has no ${secret}`);
+  assert.deepEqual(decodeHandoff(raw, "coats", now + 1000), { name: "Pat Doe", email: "pat@example.com", notes: "Call 555-0100" });
+  assert.equal(decodeHandoff(raw, "t-shirts", now), null, "another item's details are not used");
+  assert.equal(decodeHandoff(raw, "coats", now + HANDOFF_MAX_AGE_MS + 1), null, "expired");
+  assert.equal(decodeHandoff(raw, "coats", now - 120_000), null, "from the future");
+  assert.equal(decodeHandoff(null, "coats", now), null);
+  assert.equal(decodeHandoff("{not json", "coats", now), null);
+  assert.equal(decodeHandoff("x".repeat(5000), "coats", now), null);
+  const tampered = JSON.stringify({ ...JSON.parse(raw), email: "<img src=x onerror=alert(1)>" });
+  assert.equal(decodeHandoff(tampered, "coats", now), null, "tampered fields are rejected, not rendered");
+  assert.equal(HANDOFF_STORAGE_KEY, "kil-apparel-inquiry");
+  assert.notEqual(HANDOFF_STORAGE_KEY, NOTES_STORAGE_KEY);
+});
+
+test("item page: Full Name and Email Address are required, accessible, and never sent in the no-JS GET", async () => {
+  const page = await read("src/pages/apparel/[slug].astro");
+  assert.match(page, /<label for="nameInput">Full Name<\/label>/);
+  assert.match(page, /<label for="emailInput">Email Address<\/label>/);
+  const tag = (id) => page.match(new RegExp(`<(?:input|textarea)[^>]*id="${id}"[^>]*>`))?.[0] ?? "";
+  for (const id of ["nameInput", "emailInput", "notesInput"]) {
+    assert.ok(tag(id), id);
+    assert.doesNotMatch(tag(id), /\sname=/, `${id} has no name attribute, so the GET fallback can't put it in the URL`);
+  }
+  assert.match(tag("nameInput"), /autocomplete="name"/);
+  assert.match(tag("emailInput"), /type="email"[^>]*autocomplete="email"/);
+  for (const id of ["nameInput", "emailInput"]) assert.match(tag(id), /required aria-required="true" aria-describedby="\w+Error"/, id);
+  for (const id of ["nameError", "emailError", "sizeError", "customSizeError", "qtyError"]) assert.ok(page.includes(`id="${id}"`), id);
+  assert.match(page, /setAttribute\("aria-invalid", "true"\)/);
+  assert.match(page, /first\?\.focus\(\)/, "focus moves to the first invalid field");
+  assert.match(page, /id="requestError"[^>]*role="alert"/);
+  assert.match(page, /value=\{o\.value\}/, "size options kept");
+  assert.match(page, /id="customSize"/, "Other size kept");
+  assert.doesNotMatch(page, /innerHTML/);
+});
+
+test("contact draft: kept in sessionStorage only to survive an error redirect, capped and expiring", async () => {
+  const now = 1_800_000_000_000;
+  const raw = encodeDraft({ name: "Pat", email: "pat@example.com", phone: "715", address: "1 Main", message: "m".repeat(9000), company: "spam" }, now);
+  const back = decodeDraft(raw, now + 1);
+  assert.equal(back.name, "Pat");
+  assert.equal(back.message.length, 5000);
+  assert.equal("company" in back, false, "honeypot is never saved");
+  assert.equal(decodeDraft(raw, now + DRAFT_MAX_AGE_MS + 1), null);
+  assert.equal(decodeDraft("{", now), null);
+  assert.equal(decodeDraft(JSON.stringify({ v: 1, t: now, name: { x: 1 } }), now).name, "");
+  const page = await read("src/pages/contact.astro");
+  assert.match(page, /returnedWithError \? decodeDraft\(/, "restored only after an error");
+  assert.match(page, /sessionStorage\.removeItem\(DRAFT_STORAGE_KEY\)/, "discarded otherwise, and after reading");
+  assert.match(page, /autocomplete="name"/);
+  assert.match(page, /autocomplete="email"/);
 });

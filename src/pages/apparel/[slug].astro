@@ -4,7 +4,7 @@ import MainLayout from "../../layout/MainLayout.astro";
 import "../../styles/global.css";
 import "../../styles/projects.css";
 import { normalizeApparelSlug } from "../../utils/apparelSlug";
-import { sizeOptions, MAX_QTY, MAX_NOTES_LENGTH, MAX_SIZE_LENGTH } from "../../lib/apparel-inquiry.js";
+import { sizeOptions, MAX_QTY, MAX_NOTES_LENGTH, MAX_SIZE_LENGTH, MAX_NAME_LENGTH, MAX_EMAIL_LENGTH } from "../../lib/apparel-inquiry.js";
 
 export const prerender = false;
 
@@ -226,29 +226,48 @@ const metaDescription =
             We don't take payment online. Send a request and we'll confirm price, availability, and pickup or delivery with you.
         </p>
 
+        {/* Personal fields (name, email, notes) deliberately have no `name` attribute:
+            without JavaScript this GET form only sends item, size and quantity, so
+            personal details can never end up in a URL. With JavaScript they are
+            handed to /contact through sessionStorage. */}
         <form id="requestForm" class="apparel-form" method="get" action="/contact" data-slug={slug} data-title={albumName} novalidate>
             <input type="hidden" name="inquiry" value="apparel" />
             <input type="hidden" name="item" value={slug} />
             <input type="hidden" name="title" value={albumName} />
 
+            <p class="muted apparel-required-note">All fields are required unless marked optional.</p>
+
+            <label for="nameInput">Full Name</label>
+            <input id="nameInput" type="text" autocomplete="name" maxlength={MAX_NAME_LENGTH} required aria-required="true" aria-describedby="nameError" />
+            <p id="nameError" class="field-error" hidden></p>
+
+            <label for="emailInput">Email Address</label>
+            <input id="emailInput" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" maxlength={MAX_EMAIL_LENGTH} required aria-required="true" aria-describedby="emailError" />
+            <p id="emailError" class="field-error" hidden></p>
+
             <label for="sizeSelect">Size</label>
-            <select id="sizeSelect" name="size" required>
+            <select id="sizeSelect" name="size" required aria-required="true" aria-describedby="sizeError">
                 <option value="">Select size…</option>
                 {sizes.map((o) => <option value={o.value}>{o.label}</option>)}
             </select>
+            <p id="sizeError" class="field-error" hidden></p>
 
             <div id="customSizeRow" hidden>
                 <label for="customSize">Requested size</label>
-                <input id="customSize" name="customSize" type="text" maxlength={MAX_SIZE_LENGTH} placeholder="e.g. 5XL, Tall L, Youth M" autocomplete="off" />
+                <input id="customSize" name="customSize" type="text" maxlength={MAX_SIZE_LENGTH} placeholder="e.g. 5XL, Tall L, Youth M" autocomplete="off" aria-describedby="customSizeError" />
+                <p id="customSizeError" class="field-error" hidden></p>
             </div>
 
             <label for="qtyInput">Quantity</label>
-            <input id="qtyInput" name="qty" type="number" min="1" max={MAX_QTY} step="1" value="1" required />
+            <input id="qtyInput" name="qty" type="number" inputmode="numeric" min="1" max={MAX_QTY} step="1" value="1" required aria-required="true" aria-describedby="qtyError" />
+            <p id="qtyError" class="field-error" hidden></p>
 
             <label for="notesInput">Notes (optional)</label>
-            <textarea id="notesInput" name="notes" rows="3" maxlength={MAX_NOTES_LENGTH} placeholder="Colors, names or logos, when you need it…"></textarea>
+            <textarea id="notesInput" rows="3" maxlength={MAX_NOTES_LENGTH} placeholder="Colors, names or logos, when you need it…"></textarea>
 
-            <p id="requestError" class="status" style="text-align: center;" aria-live="polite"></p>
+            <p class="muted apparel-privacy-note">Next, you'll review your request on our contact form and press Send. Your details aren't saved on this site.</p>
+
+            <p id="requestError" class="status" style="text-align: center;" role="alert"></p>
 
             <div class="apparel-buttons">
                 <button id="requestBtn" type="submit" class="btn cta">Request This Item</button>
@@ -257,9 +276,14 @@ const metaDescription =
         </form>
     </section>
     <script>
-        import { OTHER_SIZE, NOTES_STORAGE_KEY, validateInquiry, inquiryQuery } from "../../lib/apparel-inquiry.js";
+        import {
+            OTHER_SIZE, NOTES_STORAGE_KEY, HANDOFF_STORAGE_KEY,
+            validateRequestForm, inquiryQuery, encodeHandoff,
+        } from "../../lib/apparel-inquiry.js";
 
         const form = document.getElementById("requestForm") as HTMLFormElement | null;
+        const nameInput = document.getElementById("nameInput") as HTMLInputElement | null;
+        const emailInput = document.getElementById("emailInput") as HTMLInputElement | null;
         const sizeSelect = document.getElementById("sizeSelect") as HTMLSelectElement | null;
         const customRow = document.getElementById("customSizeRow");
         const customInput = document.getElementById("customSize") as HTMLInputElement | null;
@@ -267,12 +291,42 @@ const metaDescription =
         const notesInput = document.getElementById("notesInput") as HTMLTextAreaElement | null;
         const errorEl = document.getElementById("requestError");
 
-        const MESSAGES: Record<string, string> = {
-            size: "Please select a size.",
-            custom_size: "Please enter the size you need.",
-            quantity: "Quantity must be a whole number from 1 to 99.",
-            item: "This item can't be requested right now. Please use the contact form.",
+        // error code -> [field id, its error element id, message]
+        const FIELDS: Record<string, [string, string, string]> = {
+            name: ["nameInput", "nameError", "Please enter your full name (letters, spaces, hyphens or apostrophes)."],
+            email: ["emailInput", "emailError", "Please enter a valid email address, like name@example.com."],
+            size: ["sizeSelect", "sizeError", "Please select a size."],
+            custom_size: ["customSize", "customSizeError", "Please enter the size you need."],
+            quantity: ["qtyInput", "qtyError", "Quantity must be a whole number from 1 to 99."],
         };
+        const ITEM_ERROR = "This item can't be requested right now. Please use the contact form.";
+
+        function clearErrors() {
+            if (errorEl) errorEl.textContent = "";
+            for (const [fieldId, id] of Object.values(FIELDS)) {
+                document.getElementById(fieldId)?.removeAttribute("aria-invalid");
+                const msg = document.getElementById(id);
+                if (msg) { msg.textContent = ""; msg.hidden = true; }
+            }
+        }
+
+        function showErrors(codes: ReadonlyArray<string | undefined>) {
+            let first: HTMLElement | null = null;
+            for (const code of codes) {
+                const entry = code ? FIELDS[code] : undefined;
+                if (!entry) { if (errorEl) errorEl.textContent = ITEM_ERROR; continue; }
+                const [fieldId, id, text] = entry;
+                const field = document.getElementById(fieldId);
+                field?.setAttribute("aria-invalid", "true");
+                const msg = document.getElementById(id);
+                if (msg) { msg.textContent = text; msg.hidden = false; }
+                first ??= field;
+            }
+            if (errorEl && first) {
+                errorEl.textContent = codes.length > 1 ? `Please fix the ${codes.length} highlighted fields.` : "Please fix the highlighted field.";
+            }
+            first?.focus();
+        }
 
         function syncCustom() {
             const other = sizeSelect?.value === OTHER_SIZE;
@@ -281,12 +335,15 @@ const metaDescription =
         }
 
         if (form && sizeSelect) {
-            sizeSelect.addEventListener("change", () => { if (errorEl) errorEl.textContent = ""; syncCustom(); });
+            sizeSelect.addEventListener("change", syncCustom);
             syncCustom();
 
             form.addEventListener("submit", (e) => {
                 e.preventDefault();
-                const result = validateInquiry({
+                clearErrors();
+                const result = validateRequestForm({
+                    name: nameInput?.value ?? "",
+                    email: emailInput?.value ?? "",
                     slug: form.dataset.slug ?? "",
                     title: form.dataset.title ?? "",
                     size: sizeSelect.value,
@@ -294,16 +351,17 @@ const metaDescription =
                     quantity: qtyInput?.value ?? "",
                     notes: notesInput?.value ?? "",
                 });
-                const request = result.ok ? result.request : undefined;
-                if (!request) {
-                    if (errorEl) errorEl.textContent = MESSAGES[result.error ?? "item"] ?? MESSAGES.item;
+                if (!result.ok || !result.request || !result.contact) {
+                    showErrors(result.errors ?? ["item"]);
                     return;
                 }
-                // Notes can be personal: hand them over in this tab's sessionStorage, never in the URL.
+                const { request, contact } = result;
+                // Name, email and notes are personal: hand them over in this tab's
+                // sessionStorage (same origin, read once, expires), never in the URL.
                 try {
-                    if (request.notes) sessionStorage.setItem(NOTES_STORAGE_KEY, request.notes);
-                    else sessionStorage.removeItem(NOTES_STORAGE_KEY);
-                } catch { /* storage blocked: the customer can retype notes on the contact form */ }
+                    sessionStorage.removeItem(NOTES_STORAGE_KEY);
+                    sessionStorage.setItem(HANDOFF_STORAGE_KEY, encodeHandoff({ slug: request.slug, ...contact, notes: request.notes }));
+                } catch { /* storage blocked: the contact form still opens; the customer types their details there */ }
                 window.location.assign(`/contact?${inquiryQuery(request)}`);
             });
         }
@@ -319,8 +377,28 @@ const metaDescription =
             font-size: 1rem;
         }
 
+        .apparel-form .field-error {
+            color: #c0392b;
+            font-size: 0.95rem;
+            margin: -6px 0 0;
+        }
+
+        .apparel-form [aria-invalid="true"] {
+            border-color: #c0392b;
+            outline: 2px solid #c0392b;
+            outline-offset: 1px;
+        }
+
+        .apparel-required-note,
+        .apparel-privacy-note {
+            text-align: center;
+        }
+
         .apparel-form select,
-        .apparel-form input[type="number"] {
+        .apparel-form input[type="text"],
+        .apparel-form input[type="email"],
+        .apparel-form input[type="number"],
+        .apparel-form textarea {
             width: 100%;
             max-width: 420px;
             font-size: 16px;

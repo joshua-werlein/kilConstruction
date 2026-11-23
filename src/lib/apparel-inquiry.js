@@ -6,8 +6,10 @@
 // unchanged: nothing here sends anything.
 //
 // Item, size and quantity travel in the /contact query string (not personal data).
-// Notes may contain personal details, so they travel in sessionStorage instead and
-// never appear in a URL, server log or Referer.
+// The customer's name, email and notes are personal, so they travel in this tab's
+// sessionStorage (same origin, cleared when read, expires after 30 minutes) and
+// never appear in a URL, server log or Referer. The contact form is prefilled
+// with them so the customer doesn't type their name and email twice.
 
 export const INQUIRY_PARAM = "inquiry";
 export const INQUIRY_VALUE = "apparel";
@@ -17,9 +19,22 @@ export const MAX_QTY = 99;
 export const MAX_SIZE_LENGTH = 30;
 export const MAX_TITLE_LENGTH = 80;
 export const MAX_NOTES_LENGTH = 500;
+export const MAX_NAME_LENGTH = 100;
+export const MAX_EMAIL_LENGTH = 254;
+/** Before 2026-11-23 only notes were handed over, under this key. Still cleared on read. */
 export const NOTES_STORAGE_KEY = "kil-apparel-inquiry-notes";
+/** Name, email and notes for /contact (sessionStorage, JSON). */
+export const HANDOFF_STORAGE_KEY = "kil-apparel-inquiry";
+export const HANDOFF_MAX_AGE_MS = 30 * 60 * 1000;
 
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// Letters (any script), combining marks, spaces, apostrophes, periods, commas and
+// hyphens; must start with a letter. At least 2 characters (the Contact Worker's minimum).
+const NAME_RE = /^[\p{L}\p{M}][\p{L}\p{M}'’ .,-]*$/u;
+// A practical address check, stricter than the Contact Worker's, so anything that
+// passes here is accepted there: no spaces, quotes or brackets; a dotted domain of
+// letters, digits and inner hyphens; a top-level domain of 2+ letters.
+const EMAIL_RE = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 
 /** Collapse whitespace and drop control characters; cap the length. */
 export function cleanText(value, max) {
@@ -97,7 +112,59 @@ export function validateInquiry(input) {
   return { ok: true, request: { slug, title, size, customSize, quantity, notes: cleanNotes(input?.notes) } };
 }
 
-/** Query string for /contact (no notes). */
+/** Validate a full name. Returns {ok:true, value} or {ok:false}. */
+export function validateName(raw) {
+  const value = cleanText(raw, MAX_NAME_LENGTH + 1);
+  if (value.length < 2 || value.length > MAX_NAME_LENGTH || !NAME_RE.test(value)) return { ok: false };
+  return { ok: true, value };
+}
+
+/** Validate an email address. Returns {ok:true, value} or {ok:false}. */
+export function validateEmail(raw) {
+  const value = String(raw ?? "").trim();
+  if (value.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(value) || value.includes("..") ||
+      value.startsWith(".") || value.includes(".@")) return { ok: false };
+  return { ok: true, value };
+}
+
+/**
+ * Validate the whole Request This Item form (contact details first, in form order).
+ * Returns {ok:true, request, contact:{name,email}} or {ok:false, error, errors}.
+ */
+export function validateRequestForm(input) {
+  const errors = [];
+  const name = validateName(input?.name);
+  if (!name.ok) errors.push("name");
+  const email = validateEmail(input?.email);
+  if (!email.ok) errors.push("email");
+  const inquiry = validateInquiry(input);
+  if (!inquiry.ok) errors.push(inquiry.error);
+  if (errors.length) return { ok: false, error: errors[0], errors };
+  return { ok: true, request: inquiry.request, contact: { name: name.value, email: email.value } };
+}
+
+/** sessionStorage value carrying name, email and notes to /contact for this item only. */
+export function encodeHandoff({ slug, name, email, notes }, now = Date.now()) {
+  return JSON.stringify({ v: 1, slug, name, email, notes: notes || "", t: now });
+}
+
+/**
+ * Read the handoff back on /contact. Returns {name, email, notes} only when it is
+ * for this item, fresh, and every field still validates; otherwise null.
+ */
+export function decodeHandoff(raw, slug, now = Date.now()) {
+  if (typeof raw !== "string" || !raw || raw.length > 4000) return null;
+  let data;
+  try { data = JSON.parse(raw); } catch { return null; }
+  if (!data || data.v !== 1 || data.slug !== slug || typeof data.t !== "number") return null;
+  if (now - data.t > HANDOFF_MAX_AGE_MS || data.t - now > 60 * 1000) return null;
+  const name = validateName(data.name);
+  const email = validateEmail(data.email);
+  if (!name.ok || !email.ok) return null;
+  return { name: name.value, email: email.value, notes: cleanNotes(data.notes) };
+}
+
+/** Query string for /contact (no name, email or notes). */
 export function inquiryQuery(request) {
   const qs = new URLSearchParams();
   qs.set(INQUIRY_PARAM, INQUIRY_VALUE);

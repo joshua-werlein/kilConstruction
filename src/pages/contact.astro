@@ -40,10 +40,10 @@ const ENDPOINT = CONTACT_ENDPOINT;
             <form class="contact-form" method="POST" action={ENDPOINT}>
 
                 <label for="name">Name</label>
-                <input id="name" name="name" required placeholder="John Doe" />
+                <input id="name" name="name" required autocomplete="name" placeholder="John Doe" />
 
                 <label for="email">Email</label>
-                <input id="email" name="email" type="email" required placeholder="example@gmail.com"/>
+                <input id="email" name="email" type="email" required autocomplete="email" placeholder="example@gmail.com"/>
 
                 <label for="phone">Phone (optional)</label>
                 <input id="phone" name="phone" type="tel" inputmode="tel" pattern="[0-9()+\-\s]{7,20}" autocomplete="tel" placeholder="(715) 867-5309"/>
@@ -80,24 +80,67 @@ const ENDPOINT = CONTACT_ENDPOINT;
     <script>
         // Apparel "Request This Item" prefill (src/lib/apparel-inquiry.js). The form,
         // Turnstile and the Contact Worker are unchanged; the customer reviews and sends.
-        import { parseInquiry, formatInquiryMessage, NOTES_STORAGE_KEY } from "../lib/apparel-inquiry.js";
+        // Name, email and notes arrive in sessionStorage (never the URL), are used once
+        // and only for the item named in the URL, then removed.
+        import {
+            parseInquiry, formatInquiryMessage, decodeHandoff,
+            NOTES_STORAGE_KEY, HANDOFF_STORAGE_KEY, INQUIRY_PARAM, INQUIRY_VALUE,
+        } from "../lib/apparel-inquiry.js";
+        import { encodeDraft, decodeDraft, DRAFT_STORAGE_KEY, DRAFT_FIELDS } from "../lib/contact-draft.js";
 
         const params = new URLSearchParams(window.location.search);
-        let notes = "";
-        try { notes = sessionStorage.getItem(NOTES_STORAGE_KEY) ?? ""; } catch { /* storage blocked */ }
-        const request = parseInquiry(params, notes);
-        if (request) {
-            const message = document.getElementById("message") as HTMLTextAreaElement | null;
-            if (message && !message.value.trim()) message.value = formatInquiryMessage(request);
-            const label = document.getElementById("messageLabel");
-            if (label) label.textContent = "Request Details";
-            const note = document.getElementById("inquiryNote");
-            if (note) {
-                note.textContent = `Apparel request: ${request.title}. Add your name and email, check the details, then press Send.`;
-                note.hidden = false;
+        if (params.get(INQUIRY_PARAM) === INQUIRY_VALUE) {
+            let raw: string | null = null;
+            try { raw = sessionStorage.getItem(HANDOFF_STORAGE_KEY); } catch { /* storage blocked */ }
+            const handoff = decodeHandoff(raw, params.get("item") ?? "");
+            const request = parseInquiry(params, handoff?.notes ?? "");
+            if (request) {
+                const fill = (id: string, value: string) => {
+                    const field = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+                    if (field && value && !field.value.trim()) field.value = value; // never overwrite typed text
+                };
+                fill("name", handoff?.name ?? "");
+                fill("email", handoff?.email ?? "");
+                fill("message", formatInquiryMessage(request));
+                const label = document.getElementById("messageLabel");
+                if (label) label.textContent = "Request Details";
+                const note = document.getElementById("inquiryNote");
+                if (note) {
+                    note.textContent = handoff
+                        ? `Apparel request: ${request.title}. We've filled in your name, email and request. Check the details, complete the verification, then press Send.`
+                        : `Apparel request: ${request.title}. Add your name and email, check the details, then press Send.`;
+                    note.hidden = false;
+                }
             }
-            try { sessionStorage.removeItem(NOTES_STORAGE_KEY); } catch { /* ignore */ }
+            try {
+                sessionStorage.removeItem(HANDOFF_STORAGE_KEY);
+                sessionStorage.removeItem(NOTES_STORAGE_KEY);
+            } catch { /* ignore */ }
         }
+
+        // Draft restore (src/lib/contact-draft.js). The inline script below has
+        // already shown ?sent / ?err and removed them from the URL, so read the
+        // status it set: restore only after an error, otherwise discard.
+        const contactForm = document.querySelector("form.contact-form") as HTMLFormElement | null;
+        const returnedWithError = document.getElementById("result")?.classList.contains("status--error");
+        try {
+            const draft = returnedWithError ? decodeDraft(sessionStorage.getItem(DRAFT_STORAGE_KEY)) : null;
+            sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+            if (draft && contactForm) {
+                for (const [k, v] of Object.entries(draft)) {
+                    const field = contactForm.elements.namedItem(k) as HTMLInputElement | HTMLTextAreaElement | null;
+                    if (field && v && !field.value.trim()) field.value = v;
+                }
+            }
+        } catch { /* storage blocked */ }
+        contactForm?.addEventListener("submit", () => {
+            const values: Record<string, string> = {};
+            for (const k of Object.keys(DRAFT_FIELDS)) {
+                const field = contactForm.elements.namedItem(k) as HTMLInputElement | HTMLTextAreaElement | null;
+                values[k] = field?.value ?? "";
+            }
+            try { sessionStorage.setItem(DRAFT_STORAGE_KEY, encodeDraft(values)); } catch { /* storage blocked */ }
+        });
     </script>
     <script is:inline>
         (function () {
