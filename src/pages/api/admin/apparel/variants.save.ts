@@ -1,4 +1,5 @@
 import type { APIRoute } from "astro";
+import { verifyAdminToken } from "../../../../utils/adminToken";
 
 function json(data: unknown, status = 200) {
     return new Response(JSON.stringify(data), {
@@ -12,8 +13,19 @@ function json(data: unknown, status = 200) {
 
 const ALLOWED_SIZES = new Set(["S","M","L","XL","XXL","XXXL","XXXXL"]);
 
-export const POST: APIRoute = async ({ request, locals }) => {
-    const db = (locals as any).runtime?.env?.DB;
+export const POST: APIRoute = async ({ request, locals, cookies }) => {
+    // SECURITY HOTFIX 2026-11-23: admin only. This endpoint had no check of its
+    // own; it now requires the same signed admin_auth session as the admin pages.
+    const env = (locals as any).runtime?.env ?? {};
+    const ADMIN_SECRET = env.ADMIN_SECRET;
+    const SESSION_VERSION = env.SESSION_VERSION ?? "1";
+    if (!ADMIN_SECRET) return json({ error: "server_misconfigured" }, 500);
+    const auth = cookies.get("admin_auth")?.value || "";
+    if (!auth || !(await verifyAdminToken(auth, ADMIN_SECRET, SESSION_VERSION))) {
+        return json({ error: "unauthorized" }, 401);
+    }
+
+    const db = env.DB;
     if (!db) return json({ error: "missing_db_binding" }, 500);
 
     let body: any;
