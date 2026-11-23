@@ -1,4 +1,5 @@
 ---
+import { runtimeEnv } from "../../../utils/runtimeEnv";
 import AdminLayout from "../../../layout/AdminLayout.astro";
 import "../../../styles/global.css";
 import "../../../styles/admin.css";
@@ -8,7 +9,7 @@ const cookies = Astro.cookies;
 const auth = cookies.get("admin_auth")?.value || "";
 
 // Cloudflare runtime env
-const env = (Astro.locals as any).runtime?.env ?? {};
+const env = runtimeEnv;
 const ADMIN_SECRET = env.ADMIN_SECRET;
 const SESSION_VERSION = env.SESSION_VERSION ?? "1";
 
@@ -26,7 +27,7 @@ if (!isAdmin) {
     return new Response(null, { status: 302, headers: { Location: "/admin" } });
 }
 
-const db = (Astro.locals as any).runtime?.env?.DB;
+const db = runtimeEnv.DB;
 if (!db) return new Response("Missing DB binding", { status: 500 });
 
 const slug = String(Astro.params.slug || "").trim();

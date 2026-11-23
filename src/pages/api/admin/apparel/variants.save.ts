@@ -1,4 +1,5 @@
 import type { APIRoute } from "astro";
+import { runtimeEnv } from "../../../../utils/runtimeEnv";
 
 function json(data: unknown, status = 200) {
     return new Response(JSON.stringify(data), {
@@ -13,7 +14,7 @@ function json(data: unknown, status = 200) {
 const ALLOWED_SIZES = new Set(["S","M","L","XL","XXL","XXXL","XXXXL"]);
 
 export const POST: APIRoute = async ({ request, locals }) => {
-    const db = (locals as any).runtime?.env?.DB;
+    const db = runtimeEnv.DB;
     if (!db) return json({ error: "missing_db_binding" }, 500);
 
     let body: any;

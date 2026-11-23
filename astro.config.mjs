@@ -10,6 +10,12 @@ export default defineConfig({
     site: 'https://kilcon.work',
     base,
     output: 'server',
+    // Astro 7 defaults compressHTML to 'jsx', which can drop spaces between
+    // inline elements; keep the Astro 5 output.
+    compressHTML: true,
+    // The site uses its own signed admin cookie, not Astro sessions: don't
+    // provision a SESSION KV namespace.
+    session: false,
     // "custom": the adapter keeps the image config below instead of installing
     // its own /_image proxy. Images are optimized by Cloudflare Image
     // Transformations (/cdn-cgi/image/…), not Astro; see the endpoint file.

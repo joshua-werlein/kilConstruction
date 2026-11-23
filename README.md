@@ -20,7 +20,7 @@
 
 A production website and custom content platform built for a construction business. Its owner can organize project imagery, manage customer reviews, and maintain public content without editing code or relying on a third-party CMS.
 
-The Astro 5 website runs on Cloudflare Pages, with two separately deployed Workers in this repository. The gallery Worker handles media, reviews, Facebook webhooks, and import controls; the contact Worker verifies Turnstile challenges and delivers messages through Resend. D1 holds project/photo metadata while R2 holds image files.
+The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site`, see [wrangler.jsonc](wrangler.jsonc)), with two separately deployed Workers in this repository. The gallery Worker handles media, reviews, Facebook webhooks, and import controls; the contact Worker verifies Turnstile challenges and delivers messages through Resend. D1 holds project/photo metadata while R2 holds image files.
 
 ## 🚀 Features
 
@@ -38,7 +38,7 @@ The Astro 5 website runs on Cloudflare Pages, with two separately deployed Worke
 
 ```mermaid
 flowchart TB
-    A[Astro 5 on Cloudflare Pages] --> B[Gallery + Reviews Worker]
+    A[Astro 7 Worker with Static Assets] --> B[Gallery + Reviews Worker]
     A --> C[Contact Worker]
     B --> D[(D1 project + review metadata)]
     B --> E[(R2 public gallery assets)]
@@ -114,7 +114,7 @@ The tags are hidden on the website, never change existing galleries, and are ign
 
 ## 💻 Development
 
-The Pages-hosted site currently uses **Astro 5**, with separate Workers for the gallery/reviews and contact APIs. See [package.json](package.json) for dependencies and commands. An Astro 7 migration has not been deployed.
+The site uses **Astro 7** with `@astrojs/cloudflare` 14 and runs on Workers with Static Assets (Node 22.23.4 or newer). Bindings come from `src/utils/runtimeEnv.ts` (`cloudflare:workers`). Separate Workers serve the gallery/reviews and contact APIs. The production cutover from Cloudflare Pages (Astro 5) and its rollback are in [docs/astro7-migration.md](docs/astro7-migration.md).
 
 ```bash
 npm ci
@@ -122,7 +122,13 @@ npm run dev
 npm run build
 npm run test:site
 npm run test:gallery-worker
+npm run check                    # astro check
+npm run site:dry-run             # build + package the site Worker, no upload
+npm run gallery-worker:dry-run   # always explicit --config
+npm run contact-worker:dry-run
 ```
+
+**Always pass `--config workers/<worker>/wrangler.toml` to Wrangler for the Gallery and Contact Workers.** After `astro build`, `.wrangler/deploy/config.json` redirects config-less Wrangler commands to the site Worker.
 
 Cloudflare account access, Worker bindings, D1 migrations, R2 buckets, and secrets are required for a fully functional deployment. **Never run production migrations or historical imports as part of README maintenance.**
 

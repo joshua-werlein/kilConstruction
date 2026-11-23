@@ -1,4 +1,5 @@
 ---
+import { runtimeEnv } from "../utils/runtimeEnv";
 import AdminLayout from "../layout/AdminLayout.astro";
 import {
     safeEquals,
@@ -11,7 +12,7 @@ const cookies = Astro.cookies;
 let error = Astro.url.searchParams.get("error") ?? "";
 
 // Cloudflare runtime env
-const env = (Astro.locals as any).runtime?.env ?? {};
+const env = runtimeEnv;
 
 const ADMIN_USER   = env.ADMIN_USER;
 const ADMIN_PASS   = env.ADMIN_PASS;

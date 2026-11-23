@@ -1,4 +1,5 @@
 ---
+import { runtimeEnv } from "../../utils/runtimeEnv";
 import MainLayout from "../../layout/MainLayout.astro";
 import "../../styles/global.css";
 import "../../styles/projects.css";
@@ -32,7 +33,7 @@ if (slug !== rawSlug) {
     });
 }
 
-const { env } = Astro.locals.runtime;
+const env = runtimeEnv;
 const GALLERY_WORKER = env?.GALLERY_WORKER as Fetcher | undefined;
 if (!GALLERY_WORKER) throw new Error("Missing service binding: GALLERY_WORKER");
 
@@ -52,7 +53,6 @@ async function workerFetchJsonWithRetry(binding: any, url: string, tries = 2): P
                     "Cache-Control": "no-store",
                     Pragma: "no-cache",
                 },
-                // @ts-expect-error: Cloudflare supports this in Workers
                 cf: { cacheTtl: 0, cacheEverything: false },
             });
             const res = await binding.fetch(req);
@@ -74,9 +74,9 @@ try {
     apiItems.searchParams.set("project", `apparel/${slug}`);
     const r1 = await workerFetchJsonWithRetry(GALLERY_WORKER, apiItems.toString());
 
-    if (!r1.ok || !r1.ok) {
-        if (r1.status !== 404) {
-            loadError = `HTTP ${r1.status}`;
+    if (!r1 || !r1.ok) {
+        if (!r1 || r1.status !== 404) {
+            loadError = r1 ? `HTTP ${r1.status}` : "Gallery unavailable";
         }
     } else if (!r1.headers.get("content-type")?.includes("application/json")) {
         loadError = "Bad response (not JSON)";

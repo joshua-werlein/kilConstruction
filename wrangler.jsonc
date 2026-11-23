@@ -1,0 +1,36 @@
+// KIL Construction site Worker (Astro 7 + @astrojs/cloudflare 14, Workers Static Assets).
+// Replaces the Cloudflare Pages project "kilconstruction" at cutover (docs/astro7-migration.md).
+//
+// Mirrors the Pages production bindings and variables exactly (read with
+// `wrangler pages download config kilconstruction`, 2026-11-22). Secrets are set
+// with `wrangler secret put` at cutover; never in this file.
+//
+// Routing is dashboard-managed at cutover: never add `routes`, `route` or custom
+// domains here, and keep workers.dev / preview URLs off, so an upload can't put
+// this Worker in front of production by accident.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kilcon-site",
+  "main": "@astrojs/cloudflare/entrypoints/server",
+  "compatibility_date": "2025-11-13",
+  "assets": { "directory": "./dist", "binding": "ASSETS" },
+  "workers_dev": false,
+  "preview_urls": false,
+  "upload_source_maps": false,
+  "observability": { "enabled": true },
+  "vars": {
+    "PAYMENTS_ENABLED": "false",
+    "PUBLIC_CONTACT_ENDPOINT": "https://kilcon.work/api/contact",
+    "PUBLIC_GALLERY_API": "https://kilcon.work/api/gallery-api",
+    "PUBLIC_TURNSTILE_SITE_KEY": "0x4AAAAAAB_kYYCq8dRwlAsE",
+    "SESSION_VERSION": "3"
+  },
+  // Same resources as Pages production (and the Gallery Worker's D1/R2).
+  "d1_databases": [
+    { "binding": "DB", "database_name": "kilcon-db", "database_id": "095cfe7f-d0af-49e8-b92a-942fa093bfe6" }
+  ],
+  "r2_buckets": [{ "binding": "GALLERY_BUCKET", "bucket_name": "kilcon-gallery" }],
+  "services": [{ "binding": "GALLERY_WORKER", "service": "kilcon-gallery-worker" }]
+  // Secrets (values supplied by the owner at cutover):
+  //   ADMIN_USER, ADMIN_PASS, ADMIN_SECRET, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+}
