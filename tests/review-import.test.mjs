@@ -86,10 +86,10 @@ test("the page has the import panel and a confirmation dialog", () => {
   assert.match(page, />Import Approved Photos</);
 });
 
-test("the scoped switch is on; the global historical import and discovery stay off", () => {
+test("the scoped switch and twice-daily discovery are on; the global historical import stays off", () => {
   assert.match(toml, /^FB_REVIEWED_IMPORT_ENABLED = "true"/m); // enabled 2026-11-22 with owner approval
   assert.match(toml, /^FB_HISTORICAL_IMPORT_ENABLED = "false"/m);
-  assert.match(toml, /^FB_DISCOVERY_ENABLED = "false"/m);
+  assert.match(toml, /^FB_DISCOVERY_ENABLED = "true"/m); // enabled 2026-11-22 with owner approval
   assert.match(worker, /export const IMPORT_CONFIRMATION = "IMPORT APPROVED";/);
   assert.match(worker, /if \(env\.FB_REVIEWED_IMPORT_ENABLED !== "true"\) return jsonResult\(\{ error: "Reviewed importing is switched off" \}, 403\);/);
 });
