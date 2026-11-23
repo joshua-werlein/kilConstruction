@@ -25,15 +25,17 @@ test("adds every security header with its exact value", () => {
   assert.equal(res.headers.get("Referrer-Policy"), "strict-origin-when-cross-origin");
   assert.equal(res.headers.get("Permissions-Policy"), "camera=(), microphone=(), geolocation=(), usb=()");
   assert.equal(res.headers.get("Cross-Origin-Opener-Policy"), "same-origin-allow-popups");
-  assert.equal(res.headers.get("Content-Security-Policy"), CSP);
+  assert.equal(res.headers.get(CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only"), CSP);
   assert.equal(res.headers.get("Content-Type"), "text/html");
 });
 
-test("CSP is enforced (one header, no report-only copy); HSTS and nosniff are left to the Cloudflare zone", () => {
+test("exactly one CSP header (enforced or report-only per CSP_ENFORCE); HSTS and nosniff are left to the Cloudflare zone", () => {
   const res = applySecurityHeaders(new Response("x"));
-  assert.equal(CSP_ENFORCE, true);
-  assert.equal(res.headers.get("Content-Security-Policy"), CSP);
-  assert.equal(res.headers.get("Content-Security-Policy-Report-Only"), null, "no duplicate report-only policy");
+  const [on, off] = CSP_ENFORCE
+    ? ["Content-Security-Policy", "Content-Security-Policy-Report-Only"]
+    : ["Content-Security-Policy-Report-Only", "Content-Security-Policy"];
+  assert.equal(res.headers.get(on), CSP);
+  assert.equal(res.headers.get(off), null, "never both");
   assert.equal(res.headers.get("Strict-Transport-Security"), null, "zone already sends HSTS");
   assert.equal(res.headers.get("X-Content-Type-Options"), null, "zone already sends nosniff");
   for (const name of Object.keys(SECURITY_HEADERS)) {

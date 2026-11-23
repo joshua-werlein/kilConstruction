@@ -6,11 +6,12 @@ Status: **deployed 2026-11-21.** Pages deployment `ea36b012-fd57-4c84-b3aa-8bdda
 Rollback point: Pages `1cd87df8-3b6e-4530-99a4-5980f8f86d03` (`ff36da0`, a README-only change).
 It carries the same site code as `1030adad` (`b915243`), which remains available as a fallback.
 
-### Deployme## Enforcement (branch `task/apparel-security-readme`, 2026-11-23, not yet deployed)
+### Deployme## Enforcement (audited 2026-11-23)
 
-The same policy is now sent as **`Content-Security-Policy`**, which enforces it. No report-only
-copy is sent. To fall back to report-only, set `CSP_ENFORCE = false` in
-`src/utils/securityHeaders.ts`.
+The policy is enforced by setting **`CSP_ENFORCE = true`** in `src/utils/securityHeaders.ts`.
+The header then becomes **`Content-Security-Policy`**, and no report-only copy is sent. The
+first deployment ships it report-only. Enforcement follows once browser tests on production
+show no violations.
 
 ### Why it's safe to enforce
 
