@@ -2,7 +2,8 @@
 Sets ADMIN_USER, ADMIN_PASS and ADMIN_SECRET on the kilcon-site Worker ONLY,
 from hidden prompts. The owner runs this in their own PowerShell window.
 
-  .\scripts\set-site-secrets.ps1
+  .\scripts\set-site-secrets.ps1                    # all three
+  .\scripts\set-site-secrets.ps1 -Only ADMIN_SECRET  # just one
 
 - Values are the EXISTING production values (unchanged on Pages and the Gallery
   Worker; ADMIN_SECRET must match both, and SESSION_VERSION stays "3").
@@ -11,6 +12,9 @@ from hidden prompts. The owner runs this in their own PowerShell window.
 - It targets `--name kilcon-site` only. It never touches Pages, the Gallery
   Worker or the Contact Worker.
 #>
+param(
+  [ValidateSet("ADMIN_USER", "ADMIN_PASS", "ADMIN_SECRET")][string]$Only
+)
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 $env:CLOUDFLARE_ACCOUNT_ID = "8481dbc471ac3a4aa14cc26ea366f956"
@@ -33,7 +37,8 @@ function Read-Twice([string]$name) {
   }
 }
 
-foreach ($name in "ADMIN_USER", "ADMIN_PASS", "ADMIN_SECRET") {
+$names = if ($Only) { @($Only) } else { @("ADMIN_USER", "ADMIN_PASS", "ADMIN_SECRET") }
+foreach ($name in $names) {
   $value = Read-Twice $name
   try {
     $value | & $npx wrangler secret put $name --name kilcon-site
