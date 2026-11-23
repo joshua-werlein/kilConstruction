@@ -7,7 +7,7 @@ Production is stable and verified. Start here; the linked docs hold the details.
 
 | Component | Live | Rollback target |
 |---|---|---|
-| Pages (`kilconstruction`) | `449b7a41` from `main` `9ac0524` (review-page filters on top of `b419e7c`) | `388e94dd` (`b419e7c`), then `e828a3b5` |
+| Pages (`kilconstruction`) | `fa396306` from branch `hotfix/astro5-apparel-auth` `556c10e` (= `9ac0524` + apparel save auth). **Automatic production builds OFF**; `main` is Astro 7 | `449b7a41` (`9ac0524`, without the hotfix: do not use), `388e94dd` |
 | Gallery Worker (`kilcon-gallery-worker`) | `0c251687-4c6e-40e5-984e-035f884e14b9`, tag `5b0da7f`. **Automatic discovery on** (twice daily), webhooks on, reviewed import on, historical import off | `--config workers/kilcon-gallery-worker/wrangler.toml versions deploy 5d25e58b-e0f1-4708-85b5-a9adb8472f6e@100%` (discovery off), then `a97a5c14` |
 | D1 `kilcon-db` | Migrations through **018** (Highlights columns, applied 2026-11-22 at 21:03 UTC); none pending | Bookmark before 018: `00000701-00000000-0000512b-5f6fb82a7244937f8c056e501f191ff1`. Leave 018 in place on rollback; older code ignores it. |
 | Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |

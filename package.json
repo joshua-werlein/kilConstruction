@@ -10,10 +10,12 @@
     "check": "astro check",
     "test:gallery-worker": "node --test workers/kilcon-gallery-worker/test/*.test.mjs",
     "test:site": "node --test tests/*.test.mjs",
-    "site:dry-run": "astro build && wrangler deploy --dry-run --config dist/server/wrangler.json",
+    "site:dry-run": "astro build && node scripts/check-site-build.mjs && wrangler deploy --dry-run --config dist/server/wrangler.json",
     "gallery-worker:dry-run": "wrangler deploy --dry-run --config workers/kilcon-gallery-worker/wrangler.toml",
     "gallery-worker:upload": "wrangler versions upload --config workers/kilcon-gallery-worker/wrangler.toml",
-    "contact-worker:dry-run": "wrangler deploy --dry-run --config workers/kilcon-contact/wrangler.toml"
+    "contact-worker:dry-run": "wrangler deploy --dry-run --config workers/kilcon-contact/wrangler.toml",
+    "site:check-build": "node scripts/check-site-build.mjs",
+    "site:deploy": "astro build && node scripts/check-site-build.mjs && wrangler deploy --config dist/server/wrangler.json"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.4.9",

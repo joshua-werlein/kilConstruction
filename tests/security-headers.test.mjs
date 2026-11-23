@@ -127,7 +127,8 @@ test("every external script, iframe, and form target in src/ is covered by the C
 
 test("contact form posts to the same origin in production", async () => {
   const page = await readFile(new URL("../src/pages/contact.astro", import.meta.url), "utf8");
-  assert.match(page, /action=\{import\.meta\.env\.PUBLIC_CONTACT_ENDPOINT\}/);
+  assert.match(page, /action=\{ENDPOINT\}/);
+  assert.match(page, /const ENDPOINT = CONTACT_ENDPOINT;/);
   // Production build value, observed live on 2026-11-21.
   assert.ok(allowedBy("form-action", originOf("https://kilcon.work/api/contact")));
 });

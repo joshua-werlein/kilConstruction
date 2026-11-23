@@ -28,7 +28,7 @@ test("the apparel page validates the slug before anything uses it", async () => 
   const page = await readFile(new URL("../src/pages/apparel/[slug].astro", import.meta.url), "utf8");
   const validate = page.indexOf("normalizeApparelSlug(rawSlug)");
   assert.ok(validate > 0, "page calls normalizeApparelSlug");
-  for (const use of ["const env = runtimeEnv;", "searchParams.set(\"project\"", "<script is:inline define:vars"]) {
+  for (const use of ["const env = runtimeEnv;", "searchParams.set(\"project\"", ".bind(slug)", "data-slug={slug}"]) {
     assert.ok(page.indexOf(use) > validate, `${use} comes after validation`);
   }
 });

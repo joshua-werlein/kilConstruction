@@ -1,5 +1,6 @@
 ---
 import { runtimeEnv } from "../utils/runtimeEnv";
+import { TURNSTILE_SITE_KEY } from "../config/publicConfig";
 import MainLayout from "../layout/MainLayout.astro";
 import "../styles/global.css";
 import "../styles/reviews.css";
@@ -27,7 +28,7 @@ type Review = {
 const env = runtimeEnv;
 const GALLERY_WORKER = env?.GALLERY_WORKER as Fetcher | undefined;
 if (!GALLERY_WORKER) throw new Error("Missing GALLERY_WORKER binding");
-const SITEKEY = import.meta.env.PUBLIC_TURNSTILE_SITE_KEY;
+const SITEKEY = TURNSTILE_SITE_KEY; // production key in production builds (src/config/publicConfig.ts)
 
 // simple query params for filters/paging
 const currentUrl = new URL(Astro.request.url);
