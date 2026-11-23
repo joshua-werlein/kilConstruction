@@ -20,7 +20,7 @@
 
 A production website and custom content platform built for a construction business. Its owner can organize project imagery, manage customer reviews, and maintain public content without editing code or relying on a third-party CMS.
 
-The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site`, see [wrangler.jsonc](wrangler.jsonc)), with two separately deployed Workers in this repository. The gallery Worker handles media, reviews, Facebook webhooks, and import controls; the contact Worker verifies Turnstile challenges and delivers messages through Resend. D1 holds project/photo metadata while R2 holds image files.
+The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site`, see [wrangler.jsonc](wrangler.jsonc) and [docs/production-deploy.md](docs/production-deploy.md)), with two separately deployed Workers in this repository. The gallery Worker handles media, reviews, Facebook webhooks, and import controls; the contact Worker verifies Turnstile challenges and delivers messages through Resend. D1 holds project/photo metadata while R2 holds image files.
 
 ## 🚀 Features
 
@@ -115,7 +115,7 @@ The tags are hidden on the website, never change existing galleries, and are ign
 
 ## 💻 Development
 
-The site uses **Astro 7** with `@astrojs/cloudflare` 14 and runs on Workers with Static Assets (Node 22.23.4 or newer). Bindings come from `src/utils/runtimeEnv.ts` (`cloudflare:workers`). Separate Workers serve the gallery/reviews and contact APIs. The production cutover from Cloudflare Pages (Astro 5) and its rollback are in [docs/astro7-migration.md](docs/astro7-migration.md).
+The site uses **Astro 7** with `@astrojs/cloudflare` 14 and runs on Workers with Static Assets (Node 22.23.4 or newer). Bindings come from `src/utils/runtimeEnv.ts` (`cloudflare:workers`). Separate Workers serve the gallery/reviews and contact APIs. It replaced Cloudflare Pages (Astro 5) on 2026-11-23. Deploys, rollback and Pages retirement are in [docs/production-deploy.md](docs/production-deploy.md); the migration history is in [docs/astro7-migration.md](docs/astro7-migration.md).
 
 ```bash
 npm ci
@@ -125,7 +125,7 @@ npm run test:site
 npm run test:gallery-worker
 npm run check                    # astro check
 npm run site:dry-run             # build + build check + package the site Worker, no upload
-npm run site:deploy              # same, then upload (clean checkout only)
+npm run site:deploy              # same, then upload (clean checkout only; normally Workers Builds deploys main)
 npm run gallery-worker:dry-run   # always explicit --config
 npm run contact-worker:dry-run
 ```

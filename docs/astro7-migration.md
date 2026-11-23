@@ -1,18 +1,26 @@
 # Astro 5 → Astro 7 migration: Cloudflare Pages → Workers Static Assets
 
-Status: **staging in progress (2026-11-23).**
-- `main` `6d07093` has the merge, and Pages automatic production builds are **paused**.
-- `kilcon-site` is uploaded without a route (`6a92d90d`). **That version is stale: it was built in a
-  checkout with a local `.env`** (see *Build only from a clean checkout*), and it will be replaced.
-- **Live security hotfix (2026-11-23):** the Astro 5 site's `/api/admin/apparel/variants.save` now
-  requires the admin session. It went out as Pages production deployment **`fa396306`** (commit
-  `556c10e`, branch `hotfix/astro5-apparel-auth` on top of `9ac0524`).
-  - **How it was deployed:** the production branch was pointed at the hotfix branch for exactly one
-    build, then restored to `main` with automatic production builds off.
-  - **`fa396306` is the Astro 5 rollback target.**
-- The apparel **Request This Item** change (Stripe retired) is merged before staging tests.
-- **No secret rotation:** `ADMIN_SECRET` and `SESSION_VERSION` (`3`) stay unchanged on Pages and the
-  Gallery Worker. The owner enters the same values into `kilcon-site`.
+Status: **DONE: Astro 7 is production (cutover 2026-11-23 03:21:43 UTC).** Current operations,
+deploys, rollback and Pages retirement are in **docs/production-deploy.md**.
+
+- **First attempt, rolled back:** 03:01–03:04 UTC. `kilcon-site` had an `ADMIN_SECRET` copied from
+  the local `.env`, so Astro 7 admin pages rejected sessions that the Gallery Worker accepted.
+- **Fix:** `ADMIN_SECRET` was rotated on all three services
+  (`scripts/rotate-admin-secret.ps1`, owner-run, value never displayed). The steps:
+  1. `kilcon-site` → `55065535`;
+  2. Pages was rebuilt from the identical Astro 5 hotfix code → `08d48cf3`;
+  3. Gallery Worker → `79598ad1`, the same code as `0c251687`.
+- **Narrow test:** a temporary route for `/admin/apparel/flannels` showed Astro 7 accepting
+  Astro 5-issued sessions. Then came the full cutover.
+- **Verified live:**
+  - 146/146 production checks;
+  - 169/171 parity against the Astro 5 origin (`robots.txt` and entity escaping, both explained);
+  - all admin pages, Manage Images (35 folders), Upload, Facebook review (31 albums; the 6
+    approved-not-imported decisions preserved), the Gallery admin API and the reviews admin;
+  - Facebook health ok, and route precedence intact;
+  - CPU: median 4 ms, no CPU-limit errors.
+
+History of the staging work follows.
 
 Original status: implemented and tested locally.
 - **Branch:** `task/astro7-migration`, in worktree `C:\Users\Jwerl\dev\.worktrees\kil-construction\astro7-migration`.

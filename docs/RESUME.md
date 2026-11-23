@@ -1,14 +1,16 @@
-# KIL Construction — resume / handoff (updated 2026-11-22)
+# KIL Construction — resume / handoff (updated 2026-11-23)
 
-Work is in progress on completing the Facebook gallery integration, before the Astro 7 migration.
-Production is stable and verified. Start here; the linked docs hold the details.
+**Production is Astro 7 on Cloudflare Workers** (`kilcon-site`), live since 2026-11-23 03:21 UTC.
+Deploys, rollback and Pages retirement are in **docs/production-deploy.md**. Astro 5 / Pages is
+emergency rollback only and is not developed further. Start here; the linked docs hold the details.
 
 ## Production now
 
 | Component | Live | Rollback target |
 |---|---|---|
-| Pages (`kilconstruction`) | `fa396306` from branch `hotfix/astro5-apparel-auth` `556c10e` (= `9ac0524` + apparel save auth). **Automatic production builds OFF**; `main` is Astro 7 | `449b7a41` (`9ac0524`, without the hotfix: do not use), `388e94dd` |
-| Gallery Worker (`kilcon-gallery-worker`) | `0c251687-4c6e-40e5-984e-035f884e14b9`, tag `5b0da7f`. **Automatic discovery on** (twice daily), webhooks on, reviewed import on, historical import off | `--config workers/kilcon-gallery-worker/wrangler.toml versions deploy 5d25e58b-e0f1-4708-85b5-a9adb8472f6e@100%` (discovery off), then `a97a5c14` |
+| **Site Worker (`kilcon-site`, Astro 7)** | `55065535-d758-420e-bb94-c03fae1578d0`: code from clean build `8e06ad23` (`main` `822e11c`) plus secrets. Serves zone route `kilcon.work/*` (API-managed, not in config); `workers.dev` off | Code: `wrangler versions deploy <prev>@100% --name kilcon-site`. **Emergency:** delete route `kilcon.work/*` → Pages takes over |
+| Pages (`kilconstruction`, Astro 5, rollback only) | `08d48cf3` (commit `8403269`, the same code as `556c10e`: `9ac0524` + apparel save auth). **Automatic production builds OFF**; production branch `main` | Serves `kilcon.work` only if the route above is deleted |
+| Gallery Worker (`kilcon-gallery-worker`) | `79598ad1-623b-4bbc-bdb7-851ca5b15aa8` (the same code as `0c251687`, tag `5b0da7f`; only `ADMIN_SECRET` was rotated on 2026-11-23). **Automatic discovery on** (twice daily), webhooks on, reviewed import on, historical import off | `--config workers/kilcon-gallery-worker/wrangler.toml versions deploy 5d25e58b-e0f1-4708-85b5-a9adb8472f6e@100%` (discovery off), then `a97a5c14` |
 | D1 `kilcon-db` | Migrations through **018** (Highlights columns, applied 2026-11-22 at 21:03 UTC); none pending | Bookmark before 018: `00000701-00000000-0000512b-5f6fb82a7244937f8c056e501f191ff1`. Leave 018 in place on rollback; older code ignores it. |
 | Cloudflare | WAF rule *Block Facebook image bypass (cdn-cgi, encoded paths)*; route `images.kilcon.work/Facebook/*` **Fail closed**; hourly cron `17 * * * *` | Image-gate rollback order: docs/facebook-image-cache.md §8 |
 
@@ -106,7 +108,9 @@ The owner has finished the historical imports: 115 photos across 20 galleries. M
 
 **Phase D done (2026-11-22/23):** automatic discovery is permanently enabled. See docs/facebook-final-deployment.md, *Phase D result*.
 
-**Next:** the Astro 7 migration, on local worktree `.worktrees/kil-construction/astro7-migration` (branch `task/astro7-migration`), not deployed.
+**Astro 7 migration done (2026-11-23):** cutover verified (docs/astro7-migration.md). Apparel uses **Request This Item**, and Stripe is retired (docs/apparel-requests.md). `ADMIN_SECRET` was rotated on all three services.
+
+**Next:** connect Workers Builds (docs/production-deploy.md), watch for several days, then retire Pages (separate approval).
 
 ## Remaining steps, in order (each needs the owner's approval)
 

@@ -15,7 +15,8 @@
     "gallery-worker:upload": "wrangler versions upload --config workers/kilcon-gallery-worker/wrangler.toml",
     "contact-worker:dry-run": "wrangler deploy --dry-run --config workers/kilcon-contact/wrangler.toml",
     "site:check-build": "node scripts/check-site-build.mjs",
-    "site:deploy": "astro build && node scripts/check-site-build.mjs && wrangler deploy --config dist/server/wrangler.json"
+    "site:deploy": "astro build && node scripts/check-site-build.mjs && wrangler deploy --config dist/server/wrangler.json",
+    "site:ci-build": "astro build && node scripts/check-site-build.mjs"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.4.9",

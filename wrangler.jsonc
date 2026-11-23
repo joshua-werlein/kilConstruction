@@ -1,13 +1,15 @@
 // KIL Construction site Worker (Astro 7 + @astrojs/cloudflare 14, Workers Static Assets).
-// Replaces the Cloudflare Pages project "kilconstruction" at cutover (docs/astro7-migration.md).
+// Replaced the Cloudflare Pages project "kilconstruction" on 2026-11-23 (docs/production-deploy.md).
 //
 // Mirrors the Pages production bindings and variables exactly (read with
 // `wrangler pages download config kilconstruction`, 2026-11-22). Secrets are set
 // with `wrangler secret put` at cutover; never in this file.
 //
-// Routing is dashboard-managed at cutover: never add `routes`, `route` or custom
-// domains here, and keep workers.dev / preview URLs off, so an upload can't put
-// this Worker in front of production by accident.
+// PRODUCTION since 2026-11-23: the zone route kilcon.work/* -> kilcon-site is managed
+// outside this file (docs/production-deploy.md). Never add `routes`, `route` or custom
+// domains here: Wrangler rewrites a Worker's routes only when its config lists them, so
+// keeping none means deploys never touch the production route. Keep workers.dev and
+// preview URLs off.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "kilcon-site",
