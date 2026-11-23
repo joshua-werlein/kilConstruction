@@ -136,6 +136,8 @@ npm run contact-worker:dry-run
 
 Cloudflare account access, Worker bindings, D1 migrations, R2 buckets, and secrets are required for a fully functional deployment. **Never run production migrations or historical imports as part of README maintenance.**
 
+**Deployment:** Astro 7 on Cloudflare Workers, automatically deployed from main.
+
 ## 📜 License and authorship
 
 The code and client materials are **proprietary**. The repository is available for technical review, not as a grant of permission to copy or reuse it. See [LICENSE](LICENSE).
