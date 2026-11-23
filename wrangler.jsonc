@@ -19,7 +19,6 @@
   "upload_source_maps": false,
   "observability": { "enabled": true },
   "vars": {
-    "PAYMENTS_ENABLED": "false",
     "PUBLIC_CONTACT_ENDPOINT": "https://kilcon.work/api/contact",
     "PUBLIC_GALLERY_API": "https://kilcon.work/api/gallery-api",
     "PUBLIC_TURNSTILE_SITE_KEY": "0x4AAAAAAB_kYYCq8dRwlAsE",
@@ -32,5 +31,6 @@
   "r2_buckets": [{ "binding": "GALLERY_BUCKET", "bucket_name": "kilcon-gallery" }],
   "services": [{ "binding": "GALLERY_WORKER", "service": "kilcon-gallery-worker" }]
   // Secrets (values supplied by the owner at cutover):
-  //   ADMIN_USER, ADMIN_PASS, ADMIN_SECRET, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+  //   ADMIN_USER, ADMIN_PASS, ADMIN_SECRET
+  // No Stripe secrets: online payments were retired 2026-11-22 (/api/stripe/* answer 410).
 }

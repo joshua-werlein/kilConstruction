@@ -4,6 +4,7 @@ import MainLayout from "../../layout/MainLayout.astro";
 import "../../styles/global.css";
 import "../../styles/projects.css";
 import { normalizeApparelSlug } from "../../utils/apparelSlug";
+import { sizeOptions, MAX_QTY, MAX_NOTES_LENGTH, MAX_SIZE_LENGTH } from "../../lib/apparel-inquiry.js";
 
 export const prerender = false;
 
@@ -21,8 +22,8 @@ type ProjectMeta = {
 
 const { slug: rawSlug } = Astro.params as { slug?: string };
 
-// The slug is passed to the inline script via define:vars, whose escaping is
-// incomplete in Astro 5, so only valid slugs may reach the page.
+// Only valid slugs may reach the page (they are written into data attributes
+// and the /contact link the request form builds).
 const slug = normalizeApparelSlug(rawSlug);
 if (!slug) return new Response(null, { status: 404 });
 if (slug !== rawSlug) {
@@ -128,10 +129,33 @@ function slugToTitle(s: string): string {
         .map((part) => part[0]?.toUpperCase() + part.slice(1))
         .join(" ");
 }
+// Sizes for the request form (rendered on the server). Admin-enabled sizes are
+// listed; stock and price never block a request. If the database is unavailable,
+// the standard sizes are offered so the customer can still ask.
+type VariantRow = { size: string; active: number; stock: number };
+let variantRows: VariantRow[] = [];
+try {
+    const db = env?.DB;
+    if (db) {
+        const row = await db.prepare("SELECT id FROM apparel_items WHERE slug = ? AND active = 1").bind(slug).first();
+        if (row) {
+            const res = await db.prepare(
+                `SELECT size, active, stock FROM apparel_variants WHERE item_id = ?
+                 ORDER BY CASE size WHEN 'S' THEN 1 WHEN 'M' THEN 2 WHEN 'L' THEN 3 WHEN 'XL' THEN 4
+                 WHEN 'XXL' THEN 5 WHEN 'XXXL' THEN 6 WHEN 'XXXXL' THEN 7 ELSE 99 END`
+            ).bind(row.id).all();
+            variantRows = (res.results ?? []) as VariantRow[];
+        }
+    }
+} catch (e) {
+    console.error("[apparel] size lookup failed", e);
+}
+const sizes = sizeOptions(variantRows);
+
 const metaDescription =
     albumDesc
         ? `${albumName} – ${albumDesc}`
-        : `${albumName} from KIL Construction – view styles and request an order.`;
+        : `${albumName} from KIL Construction – view styles and request this item.`;
 ---
 
 <MainLayout title={albumName} description={metaDescription} noSticky>
@@ -194,279 +218,95 @@ const metaDescription =
         {loadError && <p class="error">Failed to load: {loadError}</p>}
     </section>
 
-    {/* Apparel order form */}
+    {/* Apparel request form: no online payment. Sends the customer to /contact with the request prefilled. */}
     <section class="container page-section">
-        <h2 style="text-align: center;">Order {albumName}</h2>
+        <h2 style="text-align: center;">Request {albumName}</h2>
 
-        <p id="form-status" class="status" style="text-align: center;" aria-live="polite"></p>
+        <p class="muted" style="text-align: center;">
+            We don't take payment online. Send a request and we'll confirm price, availability, and pickup or delivery with you.
+        </p>
 
-        <form id="checkoutForm" class="apparel-form">
+        <form id="requestForm" class="apparel-form" method="get" action="/contact" data-slug={slug} data-title={albumName} novalidate>
+            <input type="hidden" name="inquiry" value="apparel" />
+            <input type="hidden" name="item" value={slug} />
+            <input type="hidden" name="title" value={albumName} />
+
             <label for="sizeSelect">Size</label>
-
-            <select id="sizeSelect" name="size" required disabled>
-                <option value="">Loading sizes…</option>
+            <select id="sizeSelect" name="size" required>
+                <option value="">Select size…</option>
+                {sizes.map((o) => <option value={o.value}>{o.label}</option>)}
             </select>
 
-            <p id="stockLine" class="muted" style="text-align: center;" aria-live="polite"></p>
+            <div id="customSizeRow" hidden>
+                <label for="customSize">Requested size</label>
+                <input id="customSize" name="customSize" type="text" maxlength={MAX_SIZE_LENGTH} placeholder="e.g. 5XL, Tall L, Youth M" autocomplete="off" />
+            </div>
 
             <label for="qtyInput">Quantity</label>
-            <input id="qtyInput" name="quantity" type="number" min="1" value="1" />
+            <input id="qtyInput" name="qty" type="number" min="1" max={MAX_QTY} step="1" value="1" required />
 
-            <p id="checkoutError" class="status" style="text-align: center;" aria-live="polite"></p>
+            <label for="notesInput">Notes (optional)</label>
+            <textarea id="notesInput" name="notes" rows="3" maxlength={MAX_NOTES_LENGTH} placeholder="Colors, names or logos, when you need it…"></textarea>
 
-            <p class="muted" style="margin-top:-6px; text-align: center; ">
-                Need a different size? <a id="requestSizeLink" style="font-weight: 700;" href="/contact">Contact us</a>.
-            </p>
+            <p id="requestError" class="status" style="text-align: center;" aria-live="polite"></p>
 
             <div class="apparel-buttons">
-                <button id="checkoutBtn" type="submit" class="btn cta">Checkout</button>
-
+                <button id="requestBtn" type="submit" class="btn cta">Request This Item</button>
                 <a class="btn cta btn-secondary" href="/apparel">Back to apparel</a>
             </div>
         </form>
     </section>
-    <script is:inline define:vars={{ slug }}>
+    <script>
+        import { OTHER_SIZE, NOTES_STORAGE_KEY, validateInquiry, inquiryQuery } from "../../lib/apparel-inquiry.js";
 
-        const form = document.getElementById("checkoutForm");
-        const sizeSelect = document.getElementById("sizeSelect");
-        const qtyInput = document.getElementById("qtyInput");
-        const stockLine = document.getElementById("stockLine");
-        const checkoutBtn = document.getElementById("checkoutBtn");
-        const checkoutError = document.getElementById("checkoutError");
-        const requestSizeLink = document.getElementById("requestSizeLink");
-        const statusEl = document.getElementById("form-status");
+        const form = document.getElementById("requestForm") as HTMLFormElement | null;
+        const sizeSelect = document.getElementById("sizeSelect") as HTMLSelectElement | null;
+        const customRow = document.getElementById("customSizeRow");
+        const customInput = document.getElementById("customSize") as HTMLInputElement | null;
+        const qtyInput = document.getElementById("qtyInput") as HTMLInputElement | null;
+        const notesInput = document.getElementById("notesInput") as HTMLTextAreaElement | null;
+        const errorEl = document.getElementById("requestError");
 
-        function setStatus(msg) {
-            if (!statusEl) return;
-            statusEl.textContent = msg || "";
+        const MESSAGES: Record<string, string> = {
+            size: "Please select a size.",
+            custom_size: "Please enter the size you need.",
+            quantity: "Quantity must be a whole number from 1 to 99.",
+            item: "This item can't be requested right now. Please use the contact form.",
+        };
+
+        function syncCustom() {
+            const other = sizeSelect?.value === OTHER_SIZE;
+            if (customRow) customRow.hidden = !other;
+            if (customInput) customInput.required = other;
         }
 
-        let variants = []; // [{size, priceCents, stock, active}]
+        if (form && sizeSelect) {
+            sizeSelect.addEventListener("change", () => { if (errorEl) errorEl.textContent = ""; syncCustom(); });
+            syncCustom();
 
-        function sameVariants(a, b) {
-            if (!Array.isArray(a) || !Array.isArray(b)) return false;
-            if (a.length !== b.length) return false;
-            for (let i = 0; i < a.length; i++) {
-                if (a[i].size !== b[i].size) return false;
-                if (Number(a[i].stock) !== Number(b[i].stock)) return false;
-                if (Number(a[i].active) !== Number(b[i].active)) return false;
-            }
-            return true;
-        }
-
-        // Show success if redirected back from Stripe
-        (function handleReturnFromStripe() {
-            const url = new URL(window.location.href);
-            const paid = url.searchParams.get("paid");
-            const sessionId = url.searchParams.get("session_id");
-
-            if (paid === "1") {
-                setStatus("Payment received. Updating inventory…");
-
-                url.searchParams.delete("paid");
-                url.searchParams.delete("session_id");
-                window.history.replaceState({}, "", url.pathname + url.search);
-
-                pollForStockUpdate(10, 800).catch(() => {
-                    setStatus("Payment received. Inventory may take a moment to update. Refresh shortly.");
+            form.addEventListener("submit", (e) => {
+                e.preventDefault();
+                const result = validateInquiry({
+                    slug: form.dataset.slug ?? "",
+                    title: form.dataset.title ?? "",
+                    size: sizeSelect.value,
+                    customSize: customInput?.value ?? "",
+                    quantity: qtyInput?.value ?? "",
+                    notes: notesInput?.value ?? "",
                 });
-            }
-        })();
-
-        async function pollForStockUpdate(tries = 10, delayMs = 800) {
-            const before = variants.slice();
-            for (let i = 0; i < tries; i++) {
-                await loadVariants();
-                if (!sameVariants(before, variants)) {
-                    setStatus("Payment received. Inventory updated.");
+                const request = result.ok ? result.request : undefined;
+                if (!request) {
+                    if (errorEl) errorEl.textContent = MESSAGES[result.error ?? "item"] ?? MESSAGES.item;
                     return;
                 }
-                await new Promise(r => setTimeout(r, delayMs));
-            }
-            throw new Error("timeout");
+                // Notes can be personal: hand them over in this tab's sessionStorage, never in the URL.
+                try {
+                    if (request.notes) sessionStorage.setItem(NOTES_STORAGE_KEY, request.notes);
+                    else sessionStorage.removeItem(NOTES_STORAGE_KEY);
+                } catch { /* storage blocked: the customer can retype notes on the contact form */ }
+                window.location.assign(`/contact?${inquiryQuery(request)}`);
+            });
         }
-
-        function centsToDollars(cents) {
-            return (Number(cents || 0) / 100).toFixed(2);
-        }
-
-        function setError(msg) {
-            checkoutError.textContent = msg || "";
-        }
-
-        function selectedVariant() {
-            return variants.find(v => v.size === sizeSelect.value) || null;
-        }
-
-        function optionLabel(v) {
-            const stock = Number(v.stock || 0);
-            const active = Number(v.active || 0);
-            if (active !== 1) return `${v.size} (unavailable)`;
-            if (stock <= 0) return `${v.size} (out of stock)`;
-            return `${v.size} (in stock: ${stock})`;
-        }
-
-        function updateRequestLink() {
-            const v = selectedVariant();
-            const size = v?.size || "";
-            const qs = new URLSearchParams();
-            qs.set("reason", "apparel-size-request");
-            qs.set("slug", slug);
-            if (size) qs.set("size", size);
-            requestSizeLink.href = `/contact?${qs.toString()}`;
-        }
-
-        function renderStock() {
-            const v = selectedVariant();
-            if (!v) {
-                stockLine.textContent = "";
-                qtyInput.max = "";
-                updateRequestLink();
-                return;
-            }
-
-            const stock = Number(v.stock || 0);
-            const active = Number(v.active || 0);
-
-            if (active !== 1) {
-                stockLine.textContent = "This size is currently unavailable.";
-                qtyInput.max = "";
-            } else if (stock <= 0) {
-                stockLine.textContent = "Out of stock.";
-                qtyInput.max = "";
-            } else {
-                stockLine.textContent = `In stock: ${stock} • $${centsToDollars(v.priceCents)}`;
-                const q = Number(qtyInput.value || 1);
-                if (q > stock) qtyInput.value = String(stock);
-                qtyInput.max = String(stock);
-            }
-
-            updateRequestLink();
-        }
-
-        async function loadVariants() {
-            setError("");
-            sizeSelect.disabled = true;
-            checkoutBtn.disabled = true;
-            sizeSelect.innerHTML = `<option value="">Loading sizes…</option>`;
-            stockLine.textContent = "";
-
-            const r = await fetch(`/api/item?slug=${encodeURIComponent(slug)}`, { cache: "no-store" });
-            const data = await r.json().catch(() => ({}));
-
-            if (!r.ok) {
-                sizeSelect.innerHTML = `<option value="">Unavailable</option>`;
-                return;
-            }
-
-            variants = Array.isArray(data.variants) ? data.variants : [];
-
-            if (variants.length === 0) {
-                sizeSelect.innerHTML = `<option value="">Unavailable</option>`;
-                return;
-            }
-
-            sizeSelect.innerHTML =
-                `<option value="">Select size…</option>` +
-                variants.map(v => {
-                    const stock = Number(v.stock || 0);
-                    const active = Number(v.active || 0);
-                    const disabled = (active !== 1 || stock <= 0) ? "disabled" : "";
-                    return `<option value="${v.size}" ${disabled}>${optionLabel(v)}</option>`;
-                }).join("");
-
-            sizeSelect.disabled = false;
-            updateRequestLink();
-        }
-
-        sizeSelect.addEventListener("change", () => {
-            setError("");
-            checkoutBtn.disabled = !sizeSelect.value;
-            renderStock();
-        });
-
-        qtyInput.addEventListener("input", () => {
-            setError("");
-            renderStock();
-        });
-
-        form.addEventListener("submit", async (e) => {
-            e.preventDefault();
-            setError("");
-
-            const v = selectedVariant();
-            if (!v) {
-                setError("Please select a size.");
-                return;
-            }
-
-            const stock = Number(v.stock || 0);
-            const active = Number(v.active || 0);
-            if (active !== 1) {
-                setError("This size is not available.");
-                return;
-            }
-            if (stock <= 0) {
-                setError("Out of stock.");
-                return;
-            }
-
-            const quantity = Number(qtyInput.value || 1);
-            if (!Number.isInteger(quantity) || quantity < 1) {
-                setError("Quantity must be at least 1.");
-                return;
-            }
-            if (quantity > stock) {
-                setError("Out of stock.");
-                qtyInput.value = String(stock);
-                return;
-            }
-
-            checkoutBtn.disabled = true;
-
-            try {
-                const resp = await fetch(`/api/stripe/checkout`, {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ slug, size: v.size, quantity }),
-                });
-
-                const body = await resp.json().catch(() => ({}));
-
-                if (!resp.ok) {
-                    const code = body?.error || "unknown";
-                    if (code === "out_of_stock") {
-                        setError("Out of stock.");
-                        await loadVariants();
-                        return;
-                    }
-                    if (code === "variant_inactive" || code === "missing_stripe_price_id") {
-                        setError("This size is not available.");
-                        await loadVariants();
-                        return;
-                    }
-                    setError("Checkout failed. Please try again.");
-                    return;
-                }
-
-                if (!body?.url) {
-                    setError("Checkout failed. Please try again.");
-                    return;
-                }
-
-                window.location.href = body.url;
-            } catch {
-                setError("Checkout failed (network). Please try again.");
-            } finally {
-                checkoutBtn.disabled = !sizeSelect.value;
-            }
-        });
-
-        loadVariants().catch(() => {
-            sizeSelect.innerHTML = `<option value="">Error loading sizes</option>`;
-            sizeSelect.disabled = true;
-            checkoutBtn.disabled = true;
-        });
     </script>
     <style>
 

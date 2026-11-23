@@ -20,7 +20,8 @@ test("privacy policy covers Facebook content, reviews, orders, and every service
     "Photos we upload to the website ourselves are not affected", "without the 30-day recovery period",
     "until they are no longer needed or you ask us to delete them", "fulfillment, accounting, and applicable legal obligations",
     "does not offer Facebook Login", "Cloudflare", "Resend", "Stripe", "Meta (Facebook)", "Turnstile",
-    "Review records and photos are kept in private storage", "do not receive or store your card details",
+    "Review records and photos are kept in private storage", "never received or stored card details",
+    "We do not take payment on this website", "Request This Item", "past online apparel orders",
     "not saved in the website's own database", "first name and last initial",
     'href="/data-deletion"', "kil.con.contact@gmail.com", "We do not sell personal information",
   ]) {
@@ -59,7 +60,8 @@ test("data deletion page gives instructions, covers stored data, and never claim
 
 test("terms of use link to the privacy policy and data deletion page", async () => {
   const page = visible(await read("src/pages/terms.astro"));
-  for (const phrase of ['href="/privacy"', 'href="/data-deletion"', "Reviews and Photos You Submit", "Wisconsin"]) {
+  for (const phrase of ['href="/privacy"', 'href="/data-deletion"', "Reviews and Photos You Submit", "Wisconsin",
+    "Apparel Requests", "is an inquiry, not an order", "We do not sell or take payment on this website"]) {
     assert.ok(page.includes(phrase), `terms mention: ${phrase}`);
   }
 });

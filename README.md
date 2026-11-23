@@ -31,6 +31,7 @@ The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site
 | ⭐ **Customer reviews** | Review submission, moderation, featured reviews, and private review-photo storage |
 | ☁️ **Cloud media** | R2 image files, private Facebook masters, protected review attachments, and visibility-gated image delivery |
 | 📩 **Contact workflow** | Cloudflare Turnstile checks and Resend delivery through a separate Worker |
+| 🧢 **Apparel requests** | Item pages with sizes managed in admin; **Request This Item** prefills the contact form (no online payment; see [docs/apparel-requests.md](docs/apparel-requests.md)) |
 | 📘 **Facebook integration** | Signed Meta Page webhooks, automatic new-post imports, per-photo duplicate comparison and review, and guarded historical imports |
 | 🛡️ **Security controls** | Input checks, scoped media access, rate limits, and regression tests for path/URL variations |
 
@@ -123,10 +124,13 @@ npm run build
 npm run test:site
 npm run test:gallery-worker
 npm run check                    # astro check
-npm run site:dry-run             # build + package the site Worker, no upload
+npm run site:dry-run             # build + build check + package the site Worker, no upload
+npm run site:deploy              # same, then upload (clean checkout only)
 npm run gallery-worker:dry-run   # always explicit --config
 npm run contact-worker:dry-run
 ```
+
+**Build production only from a clean checkout** (CI or a fresh `git worktree`). A local `.env` is baked into the build, and `site:deploy` refuses such builds (`scripts/check-site-build.mjs`).
 
 **Always pass `--config workers/<worker>/wrangler.toml` to Wrangler for the Gallery and Contact Workers.** After `astro build`, `.wrangler/deploy/config.json` redirects config-less Wrangler commands to the site Worker.
 

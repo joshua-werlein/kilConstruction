@@ -41,7 +41,7 @@ if (!item) return new Response("Not found", { status: 404 });
 
 const { results: variants } = await db
     .prepare(
-        `SELECT size, active, price_cents as priceCents, stock, stripe_price_id as stripePriceId
+        `SELECT size, active, price_cents as priceCents, stock
      FROM apparel_variants
      WHERE item_id = ?
      ORDER BY CASE size
@@ -57,7 +57,7 @@ const centsToDollars = (c: number) => (Number(c || 0) / 100).toFixed(2);
 
 <AdminLayout
         title={`Edit Apparel — ${item.title}`}
-        description={`Admin editor for apparel sizes, pricing, stock, and Stripe Price IDs for ${item.title}.`}
+        description={`Admin editor for apparel sizes, pricing, and stock for ${item.title}.`}
 >
     <div class="admin-title-row">
         <h1 class="admin-title">{item.title}</h1>
@@ -66,7 +66,8 @@ const centsToDollars = (c: number) => (Number(c || 0) / 100).toFixed(2);
 
     <section class="panel">
         <p class="hint" style="margin-top:0;">
-            Rule: If a size is enabled, it must have Price &gt; $0 and a Stripe Price ID or Save will fail.
+            Enabled sizes are listed on the item's Request This Item form (customers can always ask for a size that isn't listed).
+            Price and stock are for your reference: there is no online payment, and requests never change stock.
         </p>
 
         <form id="variantForm" class="admin-form-flex">
@@ -80,7 +81,6 @@ const centsToDollars = (c: number) => (Number(c || 0) / 100).toFixed(2);
                         <th>Enabled</th>
                         <th>Price ($)</th>
                         <th>Stock</th>
-                        <th>Stripe Price ID</th>
                     </tr>
                     </thead>
                     <tbody>
@@ -107,14 +107,6 @@ const centsToDollars = (c: number) => (Number(c || 0) / 100).toFixed(2);
                                     step="1"
                                     min="0"
                                     value={String(v.stock ?? 0)}
-                                />
-                            </td>
-                            <td data-label="Stripe Price ID">
-                                <input
-                                    type="text"
-                                    class="stripe admin-input"
-                                    value={v.stripePriceId ?? ""}
-                                    placeholder="price_..."
                                 />
                             </td>
                         </tr>
@@ -157,8 +149,7 @@ const centsToDollars = (c: number) => (Number(c || 0) / 100).toFixed(2);
                 const active = tr.querySelector(".active").checked;
                 const priceCents = dollarsToCents(tr.querySelector(".price").value);
                 const stock = Number(tr.querySelector(".stock").value);
-                const stripePriceId = tr.querySelector(".stripe").value.trim();
-                return { size, active, priceCents, stock, stripePriceId };
+                return { size, active, priceCents, stock };
             });
 
             try {
@@ -274,8 +265,7 @@ const centsToDollars = (c: number) => (Number(c || 0) / 100).toFixed(2);
                 grid-template-columns: 1fr 1fr;
                 grid-template-areas:
                   "size enabled"
-                  "price stock"
-                  "stripe stripe";
+                  "price stock";
                 gap: 10px 12px;
 
                 padding: 12px;
@@ -443,8 +433,7 @@ const centsToDollars = (c: number) => (Number(c || 0) / 100).toFixed(2);
               "size"
               "enabled"
               "price"
-              "stock"
-              "stripe";
+              "stock";
             }
 
             .apparel-admin .admin-table td:nth-child(2) {

@@ -33,7 +33,7 @@ export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
   ["object-src", "'none'"],
   ["base-uri", "'self'"],
   // The contact form posts to https://kilcon.work/api/contact (same origin).
-  // Stripe Checkout is a location.href navigation, which CSP does not govern.
+  // Apparel "Request This Item" is a same-origin GET navigation to /contact.
   ["form-action", "'self'"],
   ["frame-ancestors", "'none'"],
 ];

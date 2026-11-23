@@ -3,10 +3,11 @@ import MainLayout from "../layout/MainLayout.astro";
 import bizcard from "../assets/bizcard-front-new.jpg";
 import "../styles/global.css";
 import "../styles/contact.css";
+import { TURNSTILE_SITE_KEY, CONTACT_ENDPOINT } from "../config/publicConfig";
 
 const base = import.meta.env.BASE_URL;
-const SITEKEY = import.meta.env.PUBLIC_TURNSTILE_SITE_KEY;
-const ENDPOINT = import.meta.env.PUBLIC_CONTACT_ENDPOINT;
+const SITEKEY = TURNSTILE_SITE_KEY;
+const ENDPOINT = CONTACT_ENDPOINT;
 ---
 <MainLayout title="Contact | KIL Construction" description="Request an estimate or ask a question about your new construction, remodel, or custom cabinetry project in the Mondovi area.">
     <h1 class="contact-title">Request a Free Quote</h1>
@@ -34,8 +35,9 @@ const ENDPOINT = import.meta.env.PUBLIC_CONTACT_ENDPOINT;
                 Already worked with us before?{" "}
                 <a href="/reviews#leave-review" class="inline-link">Leave a review.</a>
             </p>
+            <p id="inquiryNote" class="contact-helper" hidden></p>
             <div id="result" class="status status--empty" aria-live="polite"></div>
-            <form class="contact-form" method="POST" action={import.meta.env.PUBLIC_CONTACT_ENDPOINT}>
+            <form class="contact-form" method="POST" action={ENDPOINT}>
 
                 <label for="name">Name</label>
                 <input id="name" name="name" required placeholder="John Doe" />
@@ -49,7 +51,7 @@ const ENDPOINT = import.meta.env.PUBLIC_CONTACT_ENDPOINT;
                 <label for="address">Job Address (optional)</label>
                 <input id="address" name="address" placeholder="123 Easy St."/>
 
-                <label for="message">Project Details</label>
+                <label for="message" id="messageLabel">Project Details</label>
                 <textarea id="message" name="message" rows="6" required minlength="10" placeholder="A brief description of your project."></textarea>
 
                 <!-- Honeypot -->
@@ -75,6 +77,28 @@ const ENDPOINT = import.meta.env.PUBLIC_CONTACT_ENDPOINT;
             <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
         </section>
     </div>
+    <script>
+        // Apparel "Request This Item" prefill (src/lib/apparel-inquiry.js). The form,
+        // Turnstile and the Contact Worker are unchanged; the customer reviews and sends.
+        import { parseInquiry, formatInquiryMessage, NOTES_STORAGE_KEY } from "../lib/apparel-inquiry.js";
+
+        const params = new URLSearchParams(window.location.search);
+        let notes = "";
+        try { notes = sessionStorage.getItem(NOTES_STORAGE_KEY) ?? ""; } catch { /* storage blocked */ }
+        const request = parseInquiry(params, notes);
+        if (request) {
+            const message = document.getElementById("message") as HTMLTextAreaElement | null;
+            if (message && !message.value.trim()) message.value = formatInquiryMessage(request);
+            const label = document.getElementById("messageLabel");
+            if (label) label.textContent = "Request Details";
+            const note = document.getElementById("inquiryNote");
+            if (note) {
+                note.textContent = `Apparel request: ${request.title}. Add your name and email, check the details, then press Send.`;
+                note.hidden = false;
+            }
+            try { sessionStorage.removeItem(NOTES_STORAGE_KEY); } catch { /* ignore */ }
+        }
+    </script>
     <script is:inline>
         (function () {
             const res = document.getElementById("result");

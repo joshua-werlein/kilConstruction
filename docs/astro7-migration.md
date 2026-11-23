@@ -1,6 +1,13 @@
 # Astro 5 → Astro 7 migration: Cloudflare Pages → Workers Static Assets
 
-Status: **implemented and tested locally; not deployed.**
+Status: **staging in progress (2026-11-23).**
+- `main` `6d07093` has the merge, and Pages automatic production builds are **paused**.
+- `kilcon-site` is uploaded without a route (`6a92d90d`). **That version is stale: it was built in a
+  checkout with a local `.env`** (see *Build only from a clean checkout*), and it will be replaced.
+- The apparel **Request This Item** change (Stripe retired) and the **ADMIN_SECRET rotation**
+  (docs/admin-secret-rotation.md) come before staging tests.
+
+Original status: implemented and tested locally.
 - **Branch:** `task/astro7-migration`, in worktree `C:\Users\Jwerl\dev\.worktrees\kil-construction\astro7-migration`.
 - **Base:** `main` `587eeba`.
 - **Production is unchanged:** Pages `449b7a41` (Astro 5) and Gallery Worker `0c251687`.
@@ -50,6 +57,22 @@ item.
 - the security-header middleware;
 - every URL.
 
+## Build only from a clean checkout (found 2026-11-23)
+
+Astro and the Cloudflare tooling read the repository `.env` at build time.
+- **What gets baked in:** every `PUBLIC_*` value goes into `dist/server/entry.mjs`, and `.env`
+  is copied to `dist/server/.dev.vars`. That copy is local-only and is never uploaded.
+- **What this caused:** the developer `.env` holds a local Contact Worker endpoint and
+  Cloudflare's test Turnstile key, so a build from the primary checkout ships those values. The
+  first staged `kilcon-site` version did. No secret value reached the bundle.
+- **The rule:** build production only from a **clean checkout** (CI, Workers Builds, or a fresh
+  `git worktree`), which has no `.env`. Use `npm run site:deploy` or `npm run site:dry-run`.
+  Both run `scripts/check-site-build.mjs`, which fails the deploy if the build contains a test
+  Turnstile key, a localhost URL or `dist/server/.dev.vars`.
+- **Pages builds** were never affected: they ran in CI with no `.env`.
+- **Pages** now read the Turnstile key and the contact endpoint from `src/config/publicConfig.ts`.
+  It uses the production values in production builds; `.env` applies only to `astro dev`.
+
 ## Hazard found: Wrangler's build redirect file
 
 After `astro build`, the adapter writes `.wrangler/deploy/config.json` at the repository root. It
@@ -71,8 +94,8 @@ Read with `wrangler pages download config kilconstruction` and `wrangler pages s
 | D1 | `DB` | `kilcon-db` (`095cfe7f…`), the same database as the Gallery Worker |
 | R2 | `GALLERY_BUCKET` | `kilcon-gallery` |
 | Service | `GALLERY_WORKER` | `kilcon-gallery-worker` |
-| Vars | `PAYMENTS_ENABLED`, `PUBLIC_CONTACT_ENDPOINT`, `PUBLIC_GALLERY_API`, `PUBLIC_TURNSTILE_SITE_KEY`, `SESSION_VERSION` | Same values as Pages production |
-| Secrets | `ADMIN_USER`, `ADMIN_PASS`, `ADMIN_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | **Values can't be read back from Pages.** The owner supplies them with `wrangler secret put … --config dist/server/wrangler.json`. Reuse, not rotation; `ADMIN_SECRET` must match, or admin sessions end. |
+| Vars | `PUBLIC_CONTACT_ENDPOINT`, `PUBLIC_GALLERY_API`, `PUBLIC_TURNSTILE_SITE_KEY`, `SESSION_VERSION` | Same values as Pages production. `PAYMENTS_ENABLED` is gone, because online payments are retired. |
+| Secrets | `ADMIN_USER`, `ADMIN_PASS`, `ADMIN_SECRET` (**3 only**; no Stripe secrets) | The owner sets them. `ADMIN_USER` and `ADMIN_PASS` keep their current values. `ADMIN_SECRET` is **rotated on all three verifiers** with `scripts/set-admin-secret.ps1` (docs/admin-secret-rotation.md), because its production value is unknown. |
 
 ## Validation (local)
 
@@ -120,8 +143,9 @@ auto-deploys are paused first.
 4. **Build and upload the unrouted site Worker:** `npm ci && npm run build`, then
    `npx wrangler deploy --config dist/server/wrangler.json`. No routes exist, so nothing changes for
    visitors.
-5. **Secrets:** the owner sets the 5 secrets on `kilcon-site` with `wrangler secret put <NAME>
-   --config dist/server/wrangler.json`, using the existing values.
+5. **Secrets:** the owner sets `ADMIN_USER` and `ADMIN_PASS` on `kilcon-site`
+   (`wrangler secret put <NAME> --name kilcon-site`). `ADMIN_SECRET` follows the rotation runbook
+   (docs/admin-secret-rotation.md). There are no Stripe secrets.
 6. **Smoke test before routing.** Choose one:
    - **(a)** briefly enable `workers_dev`, test the `*.workers.dev` URL, then disable it;
    - **(b)** add a route for a test hostname. That needs a DNS record and owner approval.
@@ -159,8 +183,10 @@ auto-deploys are paused first.
 ## Outstanding risks
 
 1. **Pages auto-deploy on merge** (above): pause it first.
-2. **Secret values must come from the owner.** A wrong `ADMIN_SECRET` signs everyone out, and the
-   Stripe keys matter only when payments are on.
+2. **Secret values must come from the owner.** `ADMIN_SECRET` is rotated on all three verifiers
+   together (docs/admin-secret-rotation.md); a mismatch breaks gallery administration.
+7. **Local `.env` in builds:** build only from a clean checkout. `site:deploy` refuses builds that
+   carry it.
 3. **CPU on Workers Free** is unmeasured for Astro 7 in production.
 4. **`www.kilcon.work`:** confirm whether Pages serves it, and route it the same way.
 5. **The Wrangler redirect hazard:** use `--config`, as above.
