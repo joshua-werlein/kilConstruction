@@ -108,7 +108,7 @@ test("the Contact Worker has one pipeline for both callers (behaviour is tested 
   assert.match(worker, /cf-turnstile-response/);
   assert.match(worker, /api\.resend\.com/);
   assert.match(worker, /reply_to: email/);
-  assert.match(worker, /if \(json\) return jsonResponse\(request, outcome\);/);
+  assert.match(worker, /if \(json\) return jsonResponse\(request, env, outcome\);/);
 });
 
 test("Stripe endpoints answer 410 and read nothing", async () => {

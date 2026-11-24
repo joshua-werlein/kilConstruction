@@ -2,7 +2,7 @@ name = "kilcon-contact"
 main = "src/index.js"
 compatibility_date = "2025-11-06"
 compatibility_flags = []
-workers_dev = true
+workers_dev = false # 2026-11-24: zone routes only, so the WAF rate-limit rule cannot be bypassed via *.workers.dev
 preview_urls = false
 
 [observability]

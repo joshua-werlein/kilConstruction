@@ -1,6 +1,6 @@
 // KIL Construction Contact Worker: kilcon.work/api/contact.
 //
-// Two callers, one pipeline (honeypot -> rate limit -> phone/input checks ->
+// Two callers, one pipeline (size/length caps -> honeypot -> rate limit -> phone/input checks ->
 // Turnstile -> Resend):
 //   - The /contact page's ordinary HTML form POST. Answered with 303 redirects
 //     back to /contact (?sent=1 or ?err=...), exactly as before 2026-11-23.
@@ -27,7 +27,7 @@ async function router(request, env) {
 
   if (request.method === "OPTIONS" && url.pathname === "/api/contact") {
     const origin = request.headers.get("Origin") || "";
-    const allow = ALLOWED_ORIGINS.includes(origin) ? origin : "https://kilcon.work";
+    const allow = allowedOrigins(env).includes(origin) ? origin : "https://kilcon.work";
 
     return new Response(null, {
       status: 204,
@@ -55,10 +55,30 @@ const SECURITY_HEADERS = {
   "X-Frame-Options": "DENY",
 };
 
-const ALLOWED_ORIGINS = [
-  "https://kilcon.work",
-  "http://localhost:4321",
-];
+const PROD_ORIGINS = ["https://kilcon.work"];
+// `astro dev` (localhost:4321) talks only to a local `wrangler dev` Worker
+// (npm run dev:contact-worker), which passes --var ALLOW_DEV_ORIGINS:true.
+// Production never sets that variable, so it never trusts a localhost origin.
+// (A hostname check can't tell them apart: wrangler dev rewrites request.url
+// to the route host, kilcon.work.)
+const DEV_ORIGINS = ["http://localhost:4321", "http://127.0.0.1:4321"];
+
+function allowedOrigins(env) {
+  return env?.ALLOW_DEV_ORIGINS === "true" ? [...PROD_ORIGINS, ...DEV_ORIGINS] : PROD_ORIGINS;
+}
+
+// Server-side input limits (characters, after trimming). The apparel page caps
+// name 100 / email 254 / notes 500, so its generated message stays well under
+// MAX.message. Anything larger is refused as "input" before Turnstile or Resend.
+export const MAX = {
+  body: 32 * 1024,     // bytes, from Content-Length, checked before parsing
+  name: 100,
+  email: 254,          // RFC 5321 path limit
+  phone: 40,           // raw text as typed; digits are checked separately
+  address: 300,
+  message: 5000,
+  token: 2048,         // Turnstile tokens are at most 2048 characters
+};
 
 // ====== Rate limiting (native binding) ==================================
 
@@ -105,14 +125,14 @@ const OUTCOMES = {
   error:      [500, () => textResponse("Something went wrong. Please try again later.", 500)],
 };
 
-function jsonResponse(request, outcome) {
+function jsonResponse(request, env, outcome) {
   const [status] = OUTCOMES[outcome] ?? OUTCOMES.error;
   const ok = outcome === "sent" || outcome === "honeypot";
   const origin = request.headers.get("Origin") || "";
   const headers = {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "access-control-allow-origin": ALLOWED_ORIGINS.includes(origin) ? origin : "https://kilcon.work",
+    "access-control-allow-origin": allowedOrigins(env).includes(origin) ? origin : "https://kilcon.work",
     vary: "Origin",
     ...SECURITY_HEADERS,
   };
@@ -126,7 +146,7 @@ async function handleContact(request, env) {
     return textResponse("Bad request", 400);
   }
   const json = wantsJson(request);
-  if (json && !ALLOWED_ORIGINS.includes(request.headers.get("Origin") || "")) {
+  if (json && !allowedOrigins(env).includes(request.headers.get("Origin") || "")) {
     // JSON answers are only for the site's own pages.
     return new Response(JSON.stringify({ ok: false, error: "origin" }), {
       status: 403,
@@ -134,7 +154,7 @@ async function handleContact(request, env) {
     });
   }
   const outcome = await processContact(request, env);
-  if (json) return jsonResponse(request, outcome);
+  if (json) return jsonResponse(request, env, outcome);
   return (OUTCOMES[outcome] ?? OUTCOMES.error)[1]();
 }
 
@@ -150,6 +170,11 @@ async function processContact(request, env) {
     }
   }
 
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX.body) {
+    return "input";
+  }
+
   try {
     const form = await request.formData();
 
@@ -161,6 +186,17 @@ async function processContact(request, env) {
     // honeypot
     const company = (form.get("company") || "").toString().trim();
     if (company) { return "honeypot"; }
+
+    // Length caps before any external call (rate limiter, Turnstile, Resend).
+    const rawPhoneText = (form.get("phone") || "").toString().trim();
+    const tokenText = (form.get("cf-turnstile-response") || "").toString();
+    if (
+      name.length > MAX.name || email.length > MAX.email ||
+      address.length > MAX.address || message.length > MAX.message ||
+      rawPhoneText.length > MAX.phone || tokenText.length > MAX.token
+    ) {
+      return "input";
+    }
 
     // Rate limiting (native binding)
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";

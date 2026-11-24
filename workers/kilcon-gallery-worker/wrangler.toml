@@ -4,7 +4,7 @@ main = "src/index.js"
 account_id = "8481dbc471ac3a4aa14cc26ea366f956"
 compatibility_date = "2025-11-13"
 compatibility_flags = []
-workers_dev = true
+workers_dev = false # 2026-11-24: zone routes only, so the WAF rate-limit rule cannot be bypassed via *.workers.dev
 preview_urls = false
 
 [observability]

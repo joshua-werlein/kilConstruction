@@ -198,3 +198,72 @@ test("a failing rate-limit binding fails open, as before", async () => {
   const res = await worker.fetch(post(), env({ WRITE_LIMITER: { limit: async () => { throw new Error("binding"); } } }));
   assert.equal(res.status, 200);
 });
+
+// ---------- input-length limits (2026-11-24) ----------
+
+import { MAX } from "../src/index.js";
+
+test("limits: each field at its cap is accepted", async () => {
+  const fields = {
+    ...FIELDS,
+    name: "N".repeat(MAX.name),
+    email: `${"e".repeat(MAX.email - "@example.com".length)}@example.com`,
+    phone: "(715) 867-5309".padEnd(MAX.phone, " ") + "", // trimmed back to 14 chars
+    address: "A".repeat(MAX.address),
+    message: "M".repeat(MAX.message),
+  };
+  const res = await worker.fetch(post({ fields }), env());
+  assert.deepEqual([res.status, await body(res)], [200, { ok: true }]);
+});
+
+test("limits: one character over any cap is 400 input, before the limiter, Turnstile or Resend", async () => {
+  const over = {
+    name: "N".repeat(MAX.name + 1),
+    email: `${"e".repeat(MAX.email + 1 - "@example.com".length)}@example.com`,
+    phone: "1".repeat(MAX.phone + 1),
+    address: "A".repeat(MAX.address + 1),
+    message: "M".repeat(MAX.message + 1),
+    "cf-turnstile-response": "t".repeat(MAX.token + 1),
+  };
+  for (const [field, value] of Object.entries(over)) {
+    let limited = 0;
+    const res = await worker.fetch(post({ fields: { ...FIELDS, [field]: value } }),
+      env({ WRITE_LIMITER: { limit: async () => { limited++; return { success: true }; } } }));
+    assert.deepEqual([res.status, await body(res)], [400, { ok: false, error: "input" }], field);
+    assert.equal(limited, 0, `${field}: limiter not consumed`);
+  }
+  assert.equal(calls.length, 0, "no Turnstile or Resend calls");
+});
+
+test("limits: the /contact form redirects oversized input to ?err=input", async () => {
+  const res = await worker.fetch(post({ json: false, fields: { ...FIELDS, message: "M".repeat(MAX.message + 1) } }), env());
+  assert.equal(res.headers.get("location"), "https://kilcon.work/contact?err=input");
+});
+
+test("limits: a declared body over 32 KB is refused without parsing", async () => {
+  const req = new Request(ENDPOINT, {
+    method: "POST",
+    headers: { Host: "kilcon.work", Origin: "https://kilcon.work", Accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded", "content-length": String(MAX.body + 1) },
+    body: "name=x",
+  });
+  const res = await worker.fetch(req, env());
+  assert.deepEqual([res.status, await body(res)], [400, { ok: false, error: "input" }]);
+  assert.equal(calls.length, 0);
+});
+
+// ---------- dev origins (2026-11-24) ----------
+
+test("origins: production never trusts localhost; only ALLOW_DEV_ORIGINS (wrangler dev) does", async () => {
+  for (const origin of ["http://localhost:4321", "http://127.0.0.1:4321"]) {
+    const prod = await worker.fetch(post({ origin }), env());
+    assert.equal(prod.status, 403, `prod refuses ${origin}`);
+    const pre = await worker.fetch(new Request(ENDPOINT, { method: "OPTIONS", headers: { Origin: origin } }), env());
+    assert.equal(pre.headers.get("access-control-allow-origin"), "https://kilcon.work");
+    const dev = await worker.fetch(post({ origin }), env({ ALLOW_DEV_ORIGINS: "true" }));
+    assert.equal(dev.status, 200, `dev accepts ${origin}`);
+    assert.equal(dev.headers.get("access-control-allow-origin"), origin);
+  }
+  // Only the exact string "true" opts in.
+  assert.equal((await worker.fetch(post({ origin: "http://localhost:4321" }), env({ ALLOW_DEV_ORIGINS: "1" }))).status, 403);
+});
