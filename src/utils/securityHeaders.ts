@@ -46,7 +46,7 @@ export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
 export const CSP = CSP_DIRECTIVES.map(([k, v]) => `${k} ${v}`).join("; ");
 
 /** true: Content-Security-Policy (blocks). false: Content-Security-Policy-Report-Only. */
-export const CSP_ENFORCE = true;
+export const CSP_ENFORCE = false;
 export const CSP_HEADER = CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only";
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
