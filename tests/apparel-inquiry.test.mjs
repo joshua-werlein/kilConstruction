@@ -236,11 +236,14 @@ test("item page: Full Name and Email Address are required, accessible, and never
   // Honeypot and Turnstile have no `name`, so neither can reach the no-JS GET URL.
   assert.doesNotMatch(tag("apparelCompany"), /\sname=/);
   const widget = page.match(/<div\s+id="apparelTurnstile"[\s\S]*?>/)?.[0] ?? "";
-  assert.match(widget, /class="cf-turnstile/);
+  assert.doesNotMatch(widget, /cf-turnstile/, "explicit render only (no implicit widget)");
   assert.match(widget, /data-sitekey=\{TURNSTILE_SITE_KEY\}/);
-  assert.match(widget, /data-response-field="false"/, "no hidden token input in the GET form");
-  assert.match(widget, /data-refresh-expired="auto"/);
-  assert.match(page, /<script src="https:\/\/challenges\.cloudflare\.com\/turnstile\/v0\/api\.js" async defer><\/script>/);
+  assert.match(page, /<script src="https:\/\/challenges\.cloudflare\.com\/turnstile\/v0\/api\.js\?render=explicit&onload=kilApparelTurnstileLoad" async defer><\/script>/);
+  assert.match(page, /"response-field": false,/, "no hidden token input in the GET form");
+  assert.match(page, /"refresh-expired": "auto",/);
+  assert.match(page, /size: widget\.clientWidth < 300 \? "compact" : "flexible",/, "narrow phones get the compact widget");
+  assert.match(page, /Object\.assign\(window, \{ kilApparelTurnstileLoad: renderTurnstile \}\);\s*renderTurnstile\(\);/, "renders whichever script loads first");
+  assert.match(page, /min-height: 44px; \/\* touch target \*\//);
   assert.match(page, /<noscript>[\s\S]*contact page[\s\S]*<\/noscript>/);
 });
 

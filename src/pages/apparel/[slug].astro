@@ -282,17 +282,12 @@ const metaDescription =
                 <input id="apparelCompany" type="text" tabindex="-1" autocomplete="off" />
             </div>
 
+            {/* Rendered explicitly by the script below: "flexible" needs 300px, so narrow
+                phones get the "compact" widget. No hidden token input (response-field off). */}
             <div
                 id="apparelTurnstile"
-                class="cf-turnstile apparel-turnstile"
+                class="apparel-turnstile"
                 data-sitekey={TURNSTILE_SITE_KEY}
-                data-theme="auto"
-                data-size="flexible"
-                data-response-field="false"
-                data-refresh-expired="auto"
-                data-callback="kilApparelTurnstileOk"
-                data-expired-callback="kilApparelTurnstileExpired"
-                data-error-callback="kilApparelTurnstileError"
                 aria-label="Verification step to prevent spam and automated submissions">
             </div>
 
@@ -305,14 +300,18 @@ const metaDescription =
                 <a class="btn cta btn-secondary" href="/apparel">Back to apparel</a>
             </div>
         </form>
-        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=kilApparelTurnstileLoad" async defer></script>
     </section>
     <script>
         import { OTHER_SIZE, validateRequestForm } from "../../lib/apparel-inquiry.js";
         import { buildSubmission, submitInquiry, messageFor } from "../../lib/apparel-submit.js";
 
-        // One widget on the page, so the Turnstile calls take no widget id.
-        type TurnstileApi = { getResponse(): string | undefined; reset(): void; isExpired?(): boolean };
+        type TurnstileApi = {
+            render(el: HTMLElement, opts: Record<string, unknown>): string | undefined;
+            getResponse(id?: string): string | undefined;
+            reset(id?: string): void;
+            isExpired?(id?: string): boolean;
+        };
         const ts = () => (window as unknown as { turnstile?: TurnstileApi }).turnstile;
 
         const form = document.getElementById("requestForm") as HTMLFormElement | null;
@@ -330,14 +329,28 @@ const metaDescription =
         const success = document.getElementById("requestSuccess");
         const another = document.getElementById("requestAnother");
 
-        // Turnstile callbacks (named in data-* attributes). Tokens are single use and
-        // expire after 5 minutes; data-refresh-expired="auto" renews them.
-        // The callbacks only clear or set the hint; the submit handler reads the token itself.
-        Object.assign(window, {
-            kilApparelTurnstileOk: () => { if (errorEl?.dataset.code === "verification") setError(""); },
-            kilApparelTurnstileExpired: () => setError(messageFor("verification"), "verification"),
-            kilApparelTurnstileError: () => setError(messageFor("verification"), "verification"),
-        });
+        // Turnstile, rendered explicitly. Tokens are single use and expire after 5 minutes;
+        // refresh-expired "auto" renews them. The callbacks only clear or set the hint; the
+        // submit handler reads the token itself.
+        let widgetId: string | undefined;
+        function renderTurnstile() {
+            const api = ts();
+            if (!api || !widget || widgetId !== undefined) return;
+            widgetId = api.render(widget, {
+                sitekey: widget.dataset.sitekey,
+                theme: "auto",
+                size: widget.clientWidth < 300 ? "compact" : "flexible",
+                "response-field": false,
+                "refresh-expired": "auto",
+                callback: () => { if (errorEl?.dataset.code === "verification") setError(""); },
+                "expired-callback": () => setError(messageFor("verification"), "verification"),
+                "error-callback": () => setError(messageFor("verification"), "verification"),
+            });
+        }
+        // api.js is async: it calls kilApparelTurnstileLoad when it loads after this
+        // script, and if it loaded first, window.turnstile already exists.
+        Object.assign(window, { kilApparelTurnstileLoad: renderTurnstile });
+        renderTurnstile();
 
         // error code -> [field id, its error element id, message]
         const FIELDS: Record<string, [string, string, string]> = {
@@ -394,7 +407,7 @@ const metaDescription =
         }
 
         function resetTurnstile() {
-            try { ts()?.reset(); } catch { /* widget not ready */ }
+            try { if (widgetId !== undefined) ts()?.reset(widgetId); } catch { /* widget not ready */ }
         }
 
         let inFlight = false;
@@ -422,9 +435,9 @@ const metaDescription =
                     return;
                 }
                 let token = "";
-                try { token = ts()?.getResponse() || ""; } catch { token = ""; }
+                try { token = (widgetId !== undefined && ts()?.getResponse(widgetId)) || ""; } catch { token = ""; }
                 let expired = false;
-                try { expired = !!ts()?.isExpired?.(); } catch { expired = false; }
+                try { expired = !!(widgetId !== undefined && ts()?.isExpired?.(widgetId)); } catch { expired = false; }
                 if (!token || expired) {
                     if (expired) resetTurnstile();
                     setError(messageFor("verification"), "verification");
@@ -572,6 +585,7 @@ const metaDescription =
 
         .apparel-buttons .btn{
             min-width: 180px;
+            min-height: 44px; /* touch target */
             text-align:center;
         }
 
