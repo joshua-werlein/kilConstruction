@@ -9,9 +9,9 @@
 // them would duplicate the header):
 //   Strict-Transport-Security, X-Content-Type-Options
 //
-// The CSP passed the 2026-11-23 audit (docs/security-headers.md) but ships
-// REPORT-ONLY first: set CSP_ENFORCE to true once browser tests on production
-// show no violations.
+// The CSP is ENFORCED since 2026-11-24, after a report-only period and production
+// browser checks (docs/security-headers.md). To fall back to report-only, set
+// CSP_ENFORCE to false.
 
 /** Third-party origins the browser legitimately loads from. */
 export const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
@@ -46,7 +46,7 @@ export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
 export const CSP = CSP_DIRECTIVES.map(([k, v]) => `${k} ${v}`).join("; ");
 
 /** true: Content-Security-Policy (blocks). false: Content-Security-Policy-Report-Only. */
-export const CSP_ENFORCE = false;
+export const CSP_ENFORCE = true;
 export const CSP_HEADER = CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only";
 
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({

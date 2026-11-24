@@ -1,17 +1,28 @@
 # Security headers (CSP)
 
-Status: **deployed 2026-11-21.** Pages deployment `ea36b012-fd57-4c84-b3aa-8bddacc299a8` from
-`main` `f33023e`. The CSP is report-only; enforcement is not enabled.
+Status: **CSP enforced from 2026-11-24** (`kilcon-site`; see "Enforcement" below). It was first
+deployed report-only on 2026-11-21 (Pages `ea36b012`, `main` `f33023e`).
 
 Rollback point: Pages `1cd87df8-3b6e-4530-99a4-5980f8f86d03` (`ff36da0`, a README-only change).
 It carries the same site code as `1030adad` (`b915243`), which remains available as a fallback.
 
-### Deployme## Enforcement (audited 2026-11-23)
+## Enforcement (audited 2026-11-23, enforced 2026-11-24)
 
-The policy is enforced by setting **`CSP_ENFORCE = true`** in `src/utils/securityHeaders.ts`.
-The header then becomes **`Content-Security-Policy`**, and no report-only copy is sent. The
-first deployment ships it report-only. Enforcement follows once browser tests on production
-show no violations.
+`CSP_ENFORCE = true` in `src/utils/securityHeaders.ts` sends **`Content-Security-Policy`**, with
+no report-only copy. `tests/security-headers.test.mjs` pins it.
+
+**History:**
+- **Report-only first:** shipped 2026-11-23 (`kilcon-site` `45bda3aa`, then `c87b2e4e`).
+- **Missing origin found:** the production browser check showed that Cloudflare edge-injects Web
+  Analytics (`static.cloudflareinsights.com`, which reports to `cloudflareinsights.com`). Both
+  were added before enforcing.
+- **Pre-enforcement check:** each production page's real HTML (including edge injections) was
+  rendered in a same-origin frame under the enforcing policy (as a `<meta>` CSP), and violations
+  were collected. That covered the public pages, a project page, the apparel page with Turnstile,
+  and the signed-in admin pages.
+
+**Rollback:** set `CSP_ENFORCE = false` (and update the pinning test), or roll `kilcon-site` back
+to the previous version.
 
 ### Why it's safe to enforce
 
@@ -38,7 +49,7 @@ the admin pages: login, upload, manage, Facebook review and reviews. Look for `R
 errors. **Rollback:** roll back to the previous `kilcon-site` version, or set
 `CSP_ENFORCE = false` and push.
 
-nt record (2026-11-21)
+### Deployment record (2026-11-21)
 
 - **Merge:** the branch was rebased onto `ff36da0` (a README edit pushed to `main` at 10:03, which
   had deployed as `1cd87df8`). Tests were rerun after the rebase: site 37/37, Worker 125/125, build OK.

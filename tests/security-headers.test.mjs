@@ -164,3 +164,11 @@ test("every absolute origin in src/ is covered by the enforced CSP or is navigat
   assert.ok(directive("img-src").includes(IMAGES_ORIGIN));
   assert.ok(directive("connect-src").includes(TURNSTILE_ORIGIN));
 });
+
+// Enforced since 2026-11-24 (production browser checks passed). Changing this back to
+// report-only must be a deliberate edit of this test, not a stray flag flip.
+test("production policy is enforced", () => {
+  assert.equal(CSP_ENFORCE, true);
+  assert.equal(SECURITY_HEADERS["Content-Security-Policy"], CSP);
+  assert.equal(SECURITY_HEADERS["Content-Security-Policy-Report-Only"], undefined);
+});
