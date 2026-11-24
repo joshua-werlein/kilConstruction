@@ -77,3 +77,6 @@
     }
     .contact-grid{ grid-template-columns: 1fr; }
 }
+/* Message character counter (src/lib/contact-limits.js) */
+.field-count { margin: -4px 0 4px; font-size: 0.85rem; color: var(--muted); text-align: right; }
+.field-count--over { color: #b91c1c; font-weight: 600; }

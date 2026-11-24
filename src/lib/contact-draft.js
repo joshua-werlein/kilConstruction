@@ -1,3 +1,5 @@
+import { CONTACT_LIMITS } from "./contact-limits.js";
+
 // Contact form draft: keeps what the customer typed if the Contact Worker sends
 // them back with an error (?err=captcha, rate, input…), which reloads /contact
 // with an empty form. Stored only in this tab's sessionStorage, never in a URL,
@@ -6,7 +8,8 @@
 export const DRAFT_STORAGE_KEY = "kil-contact-draft";
 export const DRAFT_MAX_AGE_MS = 30 * 60 * 1000;
 /** Field name -> maximum length kept. */
-export const DRAFT_FIELDS = { name: 100, email: 254, phone: 30, address: 200, message: 5000 };
+// Same caps as the form and the Contact Worker (src/lib/contact-limits.js).
+export const DRAFT_FIELDS = { ...CONTACT_LIMITS };
 
 /** @param {Record<string, unknown>} values */
 export function encodeDraft(values, now = Date.now()) {

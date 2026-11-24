@@ -4,6 +4,7 @@ import bizcard from "../assets/bizcard-front-new.jpg";
 import "../styles/global.css";
 import "../styles/contact.css";
 import { TURNSTILE_SITE_KEY, CONTACT_ENDPOINT } from "../config/publicConfig";
+import { CONTACT_LIMITS, MIN_NAME_LENGTH, MIN_MESSAGE_LENGTH, counterText } from "../lib/contact-limits.js";
 
 const base = import.meta.env.BASE_URL;
 const SITEKEY = TURNSTILE_SITE_KEY;
@@ -40,19 +41,20 @@ const ENDPOINT = CONTACT_ENDPOINT;
             <form class="contact-form" method="POST" action={ENDPOINT}>
 
                 <label for="name">Name</label>
-                <input id="name" name="name" required autocomplete="name" placeholder="John Doe" />
+                <input id="name" name="name" required minlength={MIN_NAME_LENGTH} maxlength={CONTACT_LIMITS.name} autocomplete="name" placeholder="John Doe" />
 
                 <label for="email">Email</label>
-                <input id="email" name="email" type="email" required autocomplete="email" placeholder="example@gmail.com"/>
+                <input id="email" name="email" type="email" required maxlength={CONTACT_LIMITS.email} autocomplete="email" placeholder="example@gmail.com"/>
 
                 <label for="phone">Phone (optional)</label>
-                <input id="phone" name="phone" type="tel" inputmode="tel" pattern="[0-9()+\-\s]{7,20}" autocomplete="tel" placeholder="(715) 867-5309"/>
+                <input id="phone" name="phone" type="tel" inputmode="tel" pattern="[0-9()+\-\s]{7,20}" maxlength={CONTACT_LIMITS.phone} autocomplete="tel" placeholder="(715) 867-5309"/>
 
                 <label for="address">Job Address (optional)</label>
-                <input id="address" name="address" placeholder="123 Easy St."/>
+                <input id="address" name="address" maxlength={CONTACT_LIMITS.address} placeholder="123 Easy St."/>
 
                 <label for="message" id="messageLabel">Project Details</label>
-                <textarea id="message" name="message" rows="6" required minlength="10" placeholder="A brief description of your project."></textarea>
+                <textarea id="message" name="message" rows="6" required minlength={MIN_MESSAGE_LENGTH} maxlength={CONTACT_LIMITS.message} aria-describedby="messageCount" placeholder="A brief description of your project."></textarea>
+                <p id="messageCount" class="field-count">{counterText("")}</p>
 
                 <!-- Honeypot -->
                 <label>
@@ -87,6 +89,7 @@ const ENDPOINT = CONTACT_ENDPOINT;
             NOTES_STORAGE_KEY, HANDOFF_STORAGE_KEY, INQUIRY_PARAM, INQUIRY_VALUE,
         } from "../lib/apparel-inquiry.js";
         import { encodeDraft, decodeDraft, DRAFT_STORAGE_KEY, DRAFT_FIELDS } from "../lib/contact-draft.js";
+        import { CONTACT_LIMITS, lengthProblem, counterText } from "../lib/contact-limits.js";
 
         const params = new URLSearchParams(window.location.search);
         if (params.get(INQUIRY_PARAM) === INQUIRY_VALUE) {
@@ -133,6 +136,36 @@ const ENDPOINT = CONTACT_ENDPOINT;
                 }
             }
         } catch { /* storage blocked */ }
+        // Length limits (src/lib/contact-limits.js, matching the Contact Worker).
+        // maxlength stops typing past a limit, but text filled in by script (an
+        // apparel prefill or a restored draft) is not checked by the browser, so
+        // every limited field is checked again with a clear message.
+        const limited = Object.keys(CONTACT_LIMITS)
+            .map((k) => contactForm?.elements.namedItem(k) as HTMLInputElement | HTMLTextAreaElement | null)
+            .filter((f): f is HTMLInputElement | HTMLTextAreaElement => !!f);
+        const counter = document.getElementById("messageCount");
+        const messageField = contactForm?.elements.namedItem("message") as HTMLTextAreaElement | null;
+        const updateCounter = () => {
+            if (!counter || !messageField) return;
+            counter.textContent = counterText(messageField.value);
+            counter.classList.toggle("field-count--over", messageField.value.trim().length > CONTACT_LIMITS.message);
+        };
+        const check = (field: HTMLInputElement | HTMLTextAreaElement) => {
+            field.setCustomValidity(lengthProblem(field.name, field.value));
+        };
+        for (const field of limited) {
+            check(field);
+            field.addEventListener("input", () => { check(field); if (field === messageField) updateCounter(); });
+        }
+        updateCounter();
+        contactForm?.addEventListener("submit", (event) => {
+            for (const field of limited) check(field);
+            if (!contactForm.checkValidity()) {
+                event.preventDefault();
+                event.stopImmediatePropagation(); // nothing is sent, so no draft is saved
+                contactForm.reportValidity();
+            }
+        });
         contactForm?.addEventListener("submit", () => {
             const values: Record<string, string> = {};
             for (const k of Object.keys(DRAFT_FIELDS)) {
@@ -173,7 +206,7 @@ const ENDPOINT = CONTACT_ENDPOINT;
                 } else if (err === "phone") {
                     setError("Please enter a valid phone number or leave it blank.");
                 } else if (err === "input") {
-                    setError("Please check your details and try again.");
+                    setError("Please check your details and try again. Names can be up to 100 characters and project details up to 5,000.");
                 } else {
                     setError("Sorry, something went wrong. Please try again.");
                 }
