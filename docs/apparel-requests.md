@@ -18,25 +18,87 @@ KIL Construction doesn't take payment online. Each apparel item page (`/apparel/
    - **Other sizes:** *Other size (not listed)* opens a text box for any size, such as 5XL, Tall L
      or Youth M.
    - **Stock and price never block a request.**
-2. **On submit,** the customer goes to `/contact?inquiry=apparel&item=…&title=…&size=…&qty=…`.
-   - **Only item, size and quantity are in the URL.** Name, email and notes travel in this tab's
-     `sessionStorage` under `kil-apparel-inquiry`, never in a URL, server log or Referer.
-   - **Safeguards:** `/contact` uses that data only for the item named in the URL, only within
-     30 minutes, and only if every field still validates. It removes the data as soon as it has
-     read it. The legacy notes-only key `kil-apparel-inquiry-notes` is cleared too.
-   - **Prefill:** the name, email and message boxes are prefilled, except any box that already
-     has text, and the page shows a short note. The customer doesn't retype anything.
-3. **The customer checks the details,** completes Turnstile, and presses **Send**. That's the
-   **unchanged** contact form and Contact Worker: Turnstile, the honeypot, the rate limit, Resend
-   delivery and `reply_to`. The owner receives an ordinary contact email starting with
-   "Apparel request".
-   - **If the Worker sends the customer back with an error** (CAPTCHA, rate limit or input), the
-     form is restored from a tab-only draft (`kil-contact-draft`, 30 minutes,
-     `src/lib/contact-draft.js`), so nothing has to be typed again. The draft is discarded after a
-     successful send. This applies to every contact message, not just apparel.
+2. **The customer completes Turnstile on the item page** and presses **Request This Item**. The
+   request is sent directly from the page (`src/lib/apparel-submit.js`). The customer isn't
+   redirected.
+   - **Transport:** a `fetch` POST of form data to the Contact Worker (`/api/contact`) with
+     `Accept: application/json`. Name, email and notes are only in the POST body, never in a URL.
+     Cookies are omitted, and redirects are treated as errors.
+   - **Same pipeline as `/contact`:** the honeypot (an off-screen field with no `name`), the
+     `WRITE_LIMITER` rate limit (3 per minute per IP, shared with `/contact`), the phone and
+     input checks, Turnstile siteverify, and Resend delivery with `reply_to` set to the customer.
+     The owner receives an ordinary contact email whose message starts with "Apparel request".
+   - **Success:** shown only when the Worker answers `{"ok":true}`, which it sends only after
+     Resend accepts the message. The form is replaced by a "Request sent" panel (`role="status"`,
+     focused). *Request another item* brings the form back.
+   - **Failure:** a clear message in the `role="alert"` area; every entry is kept and the
+     customer can press the button again.
 
-**Without JavaScript,** the form still opens `/contact` with a GET, but nothing is prefilled. The
-name, email and notes fields have no `name` attribute, so they're never sent in that URL.
+     | Code | Cause |
+     |---|---|
+     | `captcha` | Turnstile failed or the token expired |
+     | `rate` | Rate limited (429) |
+     | `input` | Name, email or message rejected |
+     | `delivery` | Resend rejected or unreachable (502) |
+     | `server` | Missing configuration |
+     | `network` | Offline, or a non-JSON answer |
+   - **Double submissions:** while a request is in flight, the button is disabled and reads
+     "Sending…", the form is `aria-busy`, and further submits are ignored.
+   - **Turnstile:** the token is read on submit. A missing or expired token stops the send and
+     asks the customer to complete the check (`data-refresh-expired="auto"` also renews tokens).
+     The widget is reset after every attempt, because a token is valid for one verification only.
+
+**Without JavaScript,** the form is a GET to `/contact`, which carries only item, title, size and
+quantity. Name, email, notes, the honeypot and the Turnstile token have no `name` attribute
+(Turnstile uses `data-response-field="false"`), so nothing personal can enter that URL. A
+`<noscript>` note explains that the button opens the contact page.
+
+**The `/contact` page is unchanged.** It still reads the older sessionStorage hand-off and restores
+its own draft after an error redirect. Nothing sends customers there with JavaScript on anymore.
+
+### Contact Worker responses
+
+`workers/kilcon-contact/src/index.js`:
+- **Ordinary form POSTs:** answered exactly as before, with 303 redirects to `/contact?sent=1`
+  or `?err=…`, a 502 text page for provider failures, and a 415 text page for JSON bodies.
+- **Requests with `Accept: application/json` from an allowed `Origin`:** answered with JSON:
+
+  | Status | Body |
+  |---|---|
+  | 200 | `{ok:true}` (also returned for a filled honeypot, and nothing is sent) |
+  | 400 | `input`, `phone` |
+  | 403 | `captcha` |
+  | 429 | `rate`, with `Retry-After: 60` |
+  | 500 | `server` |
+  | 502 | `delivery` |
+  | 415 | `media_type` |
+
+  Any other `Origin` gets 403 `origin` before any check or send.
+
+## Deployment and rollback (coordinated: Contact Worker first, site second)
+
+The Worker change is backward compatible: the `/contact` form gets identical responses. The new
+item page depends on the JSON responses, so the order matters.
+
+1. **Contact Worker:**
+   - Upload: `CLOUDFLARE_ACCOUNT_ID=8481dbc471ac3a4aa14cc26ea366f956 npm run contact-worker:upload`.
+   - Promote: `npx wrangler versions deploy <new-version>@100% --config workers/kilcon-contact/wrangler.toml`.
+   - Versions upload/deploy changes only code and the same vars. Routes, workers.dev, secrets
+     and the rate limit are untouched.
+   - Verify: `/contact` still redirects. A JSON POST without a token returns 403 `captcha`.
+     `Origin: https://evil.example` returns 403 `origin`.
+2. **Site:** merge to `main`; Workers Builds deploys `kilcon-site`. Verify in a browser:
+   - An invalid submission shows errors.
+   - A token-less retry is blocked.
+   - One real request shows "Request sent" and the email arrives with Reply-To.
+   - The ordinary `/contact` form still works.
+3. **Rollback, site first:**
+   - Site: `npx wrangler rollback <previous kilcon-site version> --name kilcon-site`, or revert
+     the merge on `main`.
+   - Contact Worker: `npx wrangler versions deploy 906fe661-232b-40c6-aacd-a466da549215@100% --config workers/kilcon-contact/wrangler.toml`.
+   - **Why this order:** rolling back only the Contact Worker would leave the new item page
+     getting redirects. It would show a "couldn't send" error and never a false success, but no
+     request would go through. A rolled-back site works with either Worker version.
 
 ## Admin
 
@@ -66,7 +128,14 @@ Admin → Apparel → item:
 
 ## Tests
 
-- `tests/apparel-inquiry.test.mjs`: the form logic, name and email validation, the sessionStorage handoff and contact draft, the no-JS field names, the 410 stubs,
-  no Stripe reads, admin auth on save, and no new migration.
+- `tests/apparel-inquiry.test.mjs`: the form logic, name and email validation, the no-JS field
+  names, the Turnstile widget settings, double-submit and success/failure handling on the page,
+  the 410 stubs, no Stripe reads, admin auth on save, and no new migration.
+- `tests/apparel-submit.test.mjs`: the page's submission run against the real Contact Worker
+  code (Turnstile and Resend mocked). It covers success with Reply-To, privacy (POST body only),
+  validation, rate limit, Turnstile failure and expiry, delivery failure, network and non-JSON
+  answers, and the honeypot.
+- `workers/kilcon-contact/test/contact.test.mjs` (`npm run test:contact-worker`): every JSON
+  outcome, the origin check, and the unchanged form-mode redirects.
 - `tests/legal-pages.test.mjs`
 - `scripts/check-site-build.mjs`

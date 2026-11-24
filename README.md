@@ -31,7 +31,7 @@ The Astro 7 website runs as a Cloudflare Worker with Static Assets (`kilcon-site
 | ⭐ **Customer reviews** | Review submission, moderation, featured reviews, and private review-photo storage |
 | ☁️ **Cloud media** | R2 image files, private Facebook masters, protected review attachments, and visibility-gated image delivery |
 | 📩 **Contact workflow** | Cloudflare Turnstile checks and Resend delivery through a separate Worker |
-| 🧢 **Apparel requests** | Item pages with sizes managed in admin; **Request This Item** collects name, email, size (or another size), quantity and notes, then prefills the contact form. No online payment ([workflow](docs/apparel-requests.md)) |
+| 🧢 **Apparel requests** | Item pages with sizes managed in admin; **Request This Item** sends name, email, size (or another size), quantity and notes straight from the item page through Turnstile and Resend. No online payment ([workflow](docs/apparel-requests.md)) |
 | 📘 **Facebook integration** | Signed Meta Page webhooks, automatic new-post imports, per-photo duplicate comparison and review, and guarded historical imports |
 | 🛡️ **Security controls** | Enforced Content Security Policy, signed admin sessions, rate limits, input and upload validation, scoped media access, and regression tests |
 
@@ -60,11 +60,17 @@ flowchart TB
 ## 🧢 Apparel requests
 
 Online payment is retired; the Stripe endpoints answer `410 Gone`.
-1. On `/apparel/<item>`, the customer enters **Full Name**, **Email Address**, **size** (or *Other size*), **quantity** and optional **notes**. Each field is validated, and errors are announced and focus the first invalid field.
-2. The browser opens `/contact` with only the item, size and quantity in the URL. Name, email and notes travel in this tab's `sessionStorage`, so they stay out of URLs, logs and Referer headers. They're read once, only for the same item, and expire after 30 minutes.
-3. The contact form arrives prefilled, so nothing is typed twice. The customer completes Turnstile and presses **Send**, and the unchanged Contact Worker applies its honeypot and rate limit, then delivers through Resend.
+1. **The form:** on `/apparel/<item>`, the customer enters **Full Name**, **Email Address**,
+   **size** (or *Other size*), **quantity** and optional **notes**, completes Turnstile, and
+   presses **Request This Item**.
+2. **Sending:** the page sends the request directly to the Contact Worker with the same honeypot,
+   rate limit, Turnstile check and Resend delivery as the contact form, with Reply-To set to the
+   customer. Personal details travel only in the POST body, never in a URL.
+3. **The result:** a confirmation appears on the page only after Resend accepts the message. On
+   any failure the customer's entries stay in place for a retry.
 
-Nothing is stored in a database. See [docs/apparel-requests.md](docs/apparel-requests.md).
+Without JavaScript, the button opens the contact page and passes only the item, size and
+quantity. Nothing is stored in a database. See [docs/apparel-requests.md](docs/apparel-requests.md).
 
 ## 🔎 Media and Facebook integration
 
@@ -140,6 +146,7 @@ npm run site:dry-run             # build + build check + package the site Worker
 npm run site:deploy              # same, then upload (clean checkout only; normally Workers Builds deploys main)
 npm run gallery-worker:dry-run   # always explicit --config
 npm run contact-worker:dry-run
+npm run test:contact-worker
 ```
 
 **Build production only from a clean checkout** (CI or a fresh `git worktree`). A local `.env` is baked into the build, and `site:deploy` refuses such builds (`scripts/check-site-build.mjs`).

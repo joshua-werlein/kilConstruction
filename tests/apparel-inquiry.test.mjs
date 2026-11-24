@@ -80,8 +80,9 @@ test("item page: Request This Item replaces checkout, no Stripe, no inline data"
   assert.match(page, /id="notesInput"[^>]*maxlength=\{MAX_NOTES_LENGTH\}/);
   assert.match(page, /sizeOptions\(variantRows\)/);
   assert.match(page, /ORDER BY CASE size WHEN 'S' THEN 1 WHEN 'M' THEN 2/, "size values are quoted SQL literals");
-  assert.match(page, /sessionStorage\.setItem\(HANDOFF_STORAGE_KEY, encodeHandoff\(/);
   assert.match(page, /validateRequestForm\(/);
+  assert.match(page, /submitInquiry\(/, "sent directly from the item page");
+  assert.doesNotMatch(page, /location\.(assign|href\s*=)|sessionStorage/, "no redirect to /contact and no hand-off with JavaScript on");
   assert.doesNotMatch(page, /stripe|checkout|Checkout|define:vars/i);
 });
 
@@ -101,11 +102,13 @@ test("contact page: prefill only, same form, endpoint and Turnstile", async () =
   assert.equal(NOTES_STORAGE_KEY, "kil-apparel-inquiry-notes");
 });
 
-test("the Contact Worker is untouched by this change", async () => {
+test("the Contact Worker has one pipeline for both callers (behaviour is tested in workers/kilcon-contact/test)", async () => {
   const worker = await read("workers/kilcon-contact/src/index.js");
-  assert.doesNotMatch(worker, /apparel/i, "no apparel-specific handling: requests are ordinary messages");
+  assert.doesNotMatch(worker, /form\.get\("(item|size|qty|slug)"\)/, "no apparel-specific fields: requests are ordinary messages");
   assert.match(worker, /cf-turnstile-response/);
   assert.match(worker, /api\.resend\.com/);
+  assert.match(worker, /reply_to: email/);
+  assert.match(worker, /if \(json\) return jsonResponse\(request, outcome\);/);
 });
 
 test("Stripe endpoints answer 410 and read nothing", async () => {
@@ -230,6 +233,31 @@ test("item page: Full Name and Email Address are required, accessible, and never
   assert.match(page, /value=\{o\.value\}/, "size options kept");
   assert.match(page, /id="customSize"/, "Other size kept");
   assert.doesNotMatch(page, /innerHTML/);
+  // Honeypot and Turnstile have no `name`, so neither can reach the no-JS GET URL.
+  assert.doesNotMatch(tag("apparelCompany"), /\sname=/);
+  const widget = page.match(/<div\s+id="apparelTurnstile"[\s\S]*?>/)?.[0] ?? "";
+  assert.match(widget, /class="cf-turnstile/);
+  assert.match(widget, /data-sitekey=\{TURNSTILE_SITE_KEY\}/);
+  assert.match(widget, /data-response-field="false"/, "no hidden token input in the GET form");
+  assert.match(widget, /data-refresh-expired="auto"/);
+  assert.match(page, /<script src="https:\/\/challenges\.cloudflare\.com\/turnstile\/v0\/api\.js" async defer><\/script>/);
+  assert.match(page, /<noscript>[\s\S]*contact page[\s\S]*<\/noscript>/);
+});
+
+test("item page: one request at a time, success only on {ok:true}, entries kept on failure", async () => {
+  const page = await read("src/pages/apparel/[slug].astro");
+  const handler = page.slice(page.indexOf('form.addEventListener("submit"'));
+  assert.ok(handler.indexOf("if (inFlight) return;") < handler.indexOf("submitInquiry("), "double submissions are ignored");
+  assert.ok(handler.indexOf("setBusy(true)") < handler.indexOf("submitInquiry("), "button disabled while sending");
+  assert.match(handler, /if \(!token \|\| expired\)/, "missing or expired Turnstile token blocks sending");
+  assert.match(handler, /resetTurnstile\(\); \/\/ a token is valid for one verification only/);
+  const okAt = handler.indexOf("if (outcome.ok)");
+  assert.ok(okAt > 0 && handler.indexOf("form.reset()") > okAt, "fields are cleared only after success");
+  assert.ok(handler.indexOf("success.focus()") > okAt);
+  assert.match(handler, /setError\(messageFor\(outcome\.code\), outcome\.code\);/);
+  assert.match(page, /id="requestSuccess" class="apparel-success" role="status" tabindex="-1" hidden/);
+  assert.match(page, /\.apparel-form\[hidden\],/, "global form{display:grid} can't defeat hidden");
+  assert.match(page, /data-endpoint=\{CONTACT_ENDPOINT\}/);
 });
 
 test("contact draft: kept in sessionStorage only to survive an error redirect, capped and expiring", async () => {

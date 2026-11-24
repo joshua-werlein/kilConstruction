@@ -1,18 +1,18 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run "npm run dev" in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run "npm run deploy" to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
-
+// KIL Construction Contact Worker: kilcon.work/api/contact.
+//
+// Two callers, one pipeline (honeypot -> rate limit -> phone/input checks ->
+// Turnstile -> Resend):
+//   - The /contact page's ordinary HTML form POST. Answered with 303 redirects
+//     back to /contact (?sent=1 or ?err=...), exactly as before 2026-11-23.
+//   - The apparel page's asynchronous request (fetch with Accept: application/json
+//     from an allowed Origin). Answered with JSON: {ok:true} only after Resend
+//     accepts the message, otherwise {ok:false, error:<code>} with a matching status.
+//
 // Bindings expected:
 //  - RESEND_API_KEY  (Secret)
 //  - FROM_EMAIL      (Text, a verified Resend sender, e.g. "KilCon <contact@kilcon.work>")
 //  - TO_EMAIL        (Text, contractor inbox)
-//  - TURNSTILE_SECRET (Text, optional)
+//  - TURNSTILE_SECRET (Secret; required on kilcon.work)
 //  - WRITE_LIMITER   (Rate limit binding — namespace 1002, shared with
 //                      kilcon-gallery-worker's /api/reviews/submit limiter)
 
@@ -72,7 +72,7 @@ async function checkRateLimit(limiter, key) {
   }
 }
 
-// ====== Small helper ====================================================
+// ====== Small helpers ===================================================
 
 function textResponse(body, status = 200) {
   return new Response(body, {
@@ -85,18 +85,68 @@ function textResponse(body, status = 200) {
   });
 }
 
+/** An asynchronous caller asked for JSON (the apparel page's fetch). */
+function wantsJson(request) {
+  return (request.headers.get("Accept") || "").toLowerCase().includes("application/json");
+}
+
+// Outcome -> [JSON status, form-mode response]. Form mode is unchanged from the
+// original handler: redirects for everything except provider and unexpected errors.
+const OUTCOMES = {
+  sent:       [200, () => redirectBack("")],
+  honeypot:   [200, () => redirectBack("")], // bots see success; nothing is sent
+  rate:       [429, () => redirectBack("?err=rate")],
+  phone:      [400, () => redirectBack("?err=phone")],
+  input:      [400, () => redirectBack("?err=input")],
+  captcha:    [403, () => redirectBack("?err=captcha")],
+  server:     [500, () => redirectBack("?err=server")],
+  delivery:   [502, () => textResponse("Email provider error", 502)],
+  media_type: [415, () => textResponse("Send as form-urlencoded", 415)],
+  error:      [500, () => textResponse("Something went wrong. Please try again later.", 500)],
+};
+
+function jsonResponse(request, outcome) {
+  const [status] = OUTCOMES[outcome] ?? OUTCOMES.error;
+  const ok = outcome === "sent" || outcome === "honeypot";
+  const origin = request.headers.get("Origin") || "";
+  const headers = {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "access-control-allow-origin": ALLOWED_ORIGINS.includes(origin) ? origin : "https://kilcon.work",
+    vary: "Origin",
+    ...SECURITY_HEADERS,
+  };
+  if (outcome === "rate") headers["retry-after"] = "60";
+  return new Response(JSON.stringify(ok ? { ok: true } : { ok: false, error: outcome }), { status, headers });
+}
+
 // --- Contact handler ---
 async function handleContact(request, env) {
   if (!request || !request.headers) {
     return textResponse("Bad request", 400);
   }
+  const json = wantsJson(request);
+  if (json && !ALLOWED_ORIGINS.includes(request.headers.get("Origin") || "")) {
+    // JSON answers are only for the site's own pages.
+    return new Response(JSON.stringify({ ok: false, error: "origin" }), {
+      status: 403,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS },
+    });
+  }
+  const outcome = await processContact(request, env);
+  if (json) return jsonResponse(request, outcome);
+  return (OUTCOMES[outcome] ?? OUTCOMES.error)[1]();
+}
+
+/** Runs the checks and delivery. Returns an outcome key of OUTCOMES. */
+async function processContact(request, env) {
   const ct = request.headers.get("content-type") || "";
   if (
     !ct.includes("application/x-www-form-urlencoded") &&
     !ct.includes("multipart/form-data")
   ) {
     if (ct.includes("application/json")) {
-      return textResponse("Send as form-urlencoded", 415);
+      return "media_type";
     }
   }
 
@@ -110,13 +160,13 @@ async function handleContact(request, env) {
 
     // honeypot
     const company = (form.get("company") || "").toString().trim();
-    if (company) { return redirectBack(request, ""); }
+    if (company) { return "honeypot"; }
 
     // Rate limiting (native binding)
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
     const allowed = await checkRateLimit(env.WRITE_LIMITER, `contact:${ip}`);
     if (!allowed) {
-      return redirectBack(request, "?err=rate");
+      return "rate";
     }
 
     const cfToken = (form.get("cf-turnstile-response") || "").toString();
@@ -124,13 +174,13 @@ async function handleContact(request, env) {
     const rawPhone = (form.get("phone") || "").toString().trim();
     const digits = rawPhone.replace(/\D/g, "");
     if (digits && (digits.length < 7 || digits.length > 15)) {
-      return redirectBack(request, "?err=phone");
+      return "phone";
     }
     const phone = digits;
 
     const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
     if (name.length < 2 || !emailOk || message.length < 10) {
-      return redirectBack(request, "?err=input");
+      return "input";
     }
 
     const host = request.headers.get("Host") || "";
@@ -140,7 +190,7 @@ async function handleContact(request, env) {
     if (requireCaptcha) {
       if (!cfToken) {
         console.warn("No Turnstile token submitted");
-        return redirectBack(request, "?err=captcha");
+        return "captcha";
       }
 
       if (typeof env.TURNSTILE_SECRET === "string" && env.TURNSTILE_SECRET) {
@@ -158,16 +208,16 @@ async function handleContact(request, env) {
           verify = await vr.json();
         } catch (ve) {
           console.warn("Turnstile verification fetch error:", ve);
-          return redirectBack(request, "?err=captcha");
+          return "captcha";
         }
 
         if (!verify || !verify.success) {
           console.warn("Turnstile failed:", verify?.["error-codes"]);
-          return redirectBack(request, "?err=captcha");
+          return "captcha";
         }
       } else if (isProd) {
         console.warn("TURNSTILE_SECRET missing");
-        return redirectBack(request, "?err=captcha");
+        return "captcha";
       }
     }
 
@@ -189,7 +239,7 @@ async function handleContact(request, env) {
       typeof env.TO_EMAIL !== "string"       || !env.TO_EMAIL
     ) {
       console.error("Contact worker misconfigured: missing email env");
-      return redirectBack(request, "?err=server");
+      return "server";
     }
 
     let r;
@@ -211,24 +261,24 @@ async function handleContact(request, env) {
       });
     } catch (eSend) {
       console.error("Email send error:", eSend);
-      return textResponse("Email provider error", 502);
+      return "delivery";
     }
 
     if (!r.ok) {
       const text = await r.text();
       console.error("Email provider responded not OK:", text);
-      return textResponse("Email provider error", 502);
+      return "delivery";
     }
 
-    return redirectBack(request, "");
+    return "sent";
 
   } catch (e) {
     console.error("handleContact unexpected error:", e);
-    return textResponse("Something went wrong. Please try again later.", 500);
+    return "error";
   }
 }
 
-function redirectBack(request, suffix = "") {
+function redirectBack(suffix = "") {
   return Response.redirect(
     "https://kilcon.work/contact" + (suffix || "?sent=1"),
     303
