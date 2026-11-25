@@ -27,6 +27,18 @@ namespace_id = "1002"
   limit = 3
   period = 60
 
+# Durable Object rate limiter (src/rate-limiter.js). The migration is applied
+# only by `wrangler deploy`; versions created before it (ec34f316 and older)
+# can no longer be rolled back to. Never set RATE_LIMIT_WINDOW_MS here: it is a
+# test-only override.
+[[durable_objects.bindings]]
+name = "CONTACT_LIMITER"
+class_name = "ContactRateLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ContactRateLimiter"]
+
 [[routes]]
 pattern = "kilcon.work/api/contact*"
 zone_name = "kilcon.work"

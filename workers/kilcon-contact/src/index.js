@@ -15,6 +15,12 @@
 //  - TURNSTILE_SECRET (Secret; required on kilcon.work)
 //  - WRITE_LIMITER   (Rate limit binding — namespace 1002, shared with
 //                      kilcon-gallery-worker's /api/reviews/submit limiter)
+//  - CONTACT_LIMITER (Durable Object, class ContactRateLimiter). Stage A
+//                      (migration-compatible rollback target): the class is
+//                      exported and migrated but NOT used; WRITE_LIMITER still
+//                      decides, exactly as in ec34f316.
+
+export { ContactRateLimiter } from "./rate-limiter.js";
 
 export default {
   async fetch(request, env) {
