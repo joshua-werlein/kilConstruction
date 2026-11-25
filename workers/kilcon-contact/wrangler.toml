@@ -19,18 +19,12 @@ TO_EMAIL   = "kil.con.contact@gmail.com"
 #   RESEND_API_KEY
 #   TURNSTILE_SECRET
 
-[[ratelimits]]
-name = "WRITE_LIMITER"
-namespace_id = "1002"
-
-  [ratelimits.simple]
-  limit = 3
-  period = 60
-
-# Durable Object rate limiter (src/rate-limiter.js). The migration is applied
-# only by `wrangler deploy`; versions created before it (ec34f316 and older)
-# can no longer be rolled back to. Never set RATE_LIMIT_WINDOW_MS here: it is a
-# test-only override.
+# Authoritative rate limiter (src/rate-limiter.js): 3 accepted requests per
+# rolling 60 s per client, one SQLite-backed Durable Object per IP (IPv6: /64),
+# exact across locations. Replaces the per-location WRITE_LIMITER binding.
+# The migration is applied only by `wrangler deploy`; versions created before it
+# (ec34f316 and older) can no longer be rolled back to.
+# Never set RATE_LIMIT_WINDOW_MS here: it is a test-only override.
 [[durable_objects.bindings]]
 name = "CONTACT_LIMITER"
 class_name = "ContactRateLimiter"

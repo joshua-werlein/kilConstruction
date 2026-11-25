@@ -13,14 +13,15 @@
 //  - FROM_EMAIL      (Text, a verified Resend sender, e.g. "KilCon <contact@kilcon.work>")
 //  - TO_EMAIL        (Text, contractor inbox)
 //  - TURNSTILE_SECRET (Secret; required on kilcon.work)
-//  - WRITE_LIMITER   (Rate limit binding — namespace 1002, shared with
-//                      kilcon-gallery-worker's /api/reviews/submit limiter)
-//  - CONTACT_LIMITER (Durable Object, class ContactRateLimiter). Stage A
-//                      (migration-compatible rollback target): the class is
-//                      exported and migrated but NOT used; WRITE_LIMITER still
-//                      decides, exactly as in ec34f316.
+//  - CONTACT_LIMITER (Durable Object namespace, class ContactRateLimiter in
+//                      src/rate-limiter.js): the authoritative limiter, 3 accepted
+//                      requests per rolling 60 s per client. Fails closed (503).
 
+import { limiterKey } from "./rate-limiter.js";
 export { ContactRateLimiter } from "./rate-limiter.js";
+
+// How long to wait for the limiter before failing closed.
+const LIMITER_TIMEOUT_MS = 3000;
 
 export default {
   async fetch(request, env) {
@@ -86,15 +87,34 @@ export const MAX = {
   token: 2048,         // Turnstile tokens are at most 2048 characters
 };
 
-// ====== Rate limiting (native binding) ==================================
+// ====== Rate limiting (Durable Object, authoritative) ====================
 
-async function checkRateLimit(limiter, key) {
+/**
+ * {ok:true} | {ok:false, retryAfter} | {unavailable:true}. Never fails open: a
+ * missing binding, an error or a timeout is "unavailable", and nothing is sent.
+ */
+async function checkRateLimit(env, ip) {
+  const ns = env.CONTACT_LIMITER;
+  if (!ns) {
+    console.error("[rateLimit] CONTACT_LIMITER binding missing");
+    return { unavailable: true };
+  }
+  let timer;
   try {
-    const { success } = await limiter.limit({ key });
-    return success;
+    const stub = ns.get(ns.idFromName(limiterKey(ip)));
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("limiter timeout")), LIMITER_TIMEOUT_MS);
+    });
+    const r = await Promise.race([stub.hit(), timeout]);
+    if (r && r.ok === true) return { ok: true };
+    if (r && r.ok === false) return { ok: false, retryAfter: r.retryAfter };
+    console.error("[rateLimit] unexpected limiter answer");
+    return { unavailable: true };
   } catch (e) {
-    console.error("[rateLimit] binding error:", e);
-    return true; // fail open
+    console.error("[rateLimit] limiter unavailable:", e?.message || e);
+    return { unavailable: true };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -126,12 +146,14 @@ const OUTCOMES = {
   input:      [400, () => redirectBack("?err=input")],
   captcha:    [403, () => redirectBack("?err=captcha")],
   server:     [500, () => redirectBack("?err=server")],
+  // The rate limiter could not be reached: fail closed and ask the customer to retry.
+  unavailable: [503, () => redirectBack("?err=server")],
   delivery:   [502, () => textResponse("Email provider error", 502)],
   media_type: [415, () => textResponse("Send as form-urlencoded", 415)],
   error:      [500, () => textResponse("Something went wrong. Please try again later.", 500)],
 };
 
-function jsonResponse(request, env, outcome) {
+function jsonResponse(request, env, outcome, retryAfter) {
   const [status] = OUTCOMES[outcome] ?? OUTCOMES.error;
   const ok = outcome === "sent" || outcome === "honeypot";
   const origin = request.headers.get("Origin") || "";
@@ -142,7 +164,8 @@ function jsonResponse(request, env, outcome) {
     vary: "Origin",
     ...SECURITY_HEADERS,
   };
-  if (outcome === "rate") headers["retry-after"] = "60";
+  if (outcome === "rate") headers["retry-after"] = String(retryAfter || 60);
+  if (outcome === "unavailable") headers["retry-after"] = "30";
   return new Response(JSON.stringify(ok ? { ok: true } : { ok: false, error: outcome }), { status, headers });
 }
 
@@ -159,13 +182,14 @@ async function handleContact(request, env) {
       headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...SECURITY_HEADERS },
     });
   }
-  const outcome = await processContact(request, env);
-  if (json) return jsonResponse(request, env, outcome);
+  const ctx = {};
+  const outcome = await processContact(request, env, ctx);
+  if (json) return jsonResponse(request, env, outcome, ctx.retryAfter);
   return (OUTCOMES[outcome] ?? OUTCOMES.error)[1]();
 }
 
 /** Runs the checks and delivery. Returns an outcome key of OUTCOMES. */
-async function processContact(request, env) {
+async function processContact(request, env, ctx = {}) {
   const ct = request.headers.get("content-type") || "";
   if (
     !ct.includes("application/x-www-form-urlencoded") &&
@@ -204,10 +228,12 @@ async function processContact(request, env) {
       return "input";
     }
 
-    // Rate limiting (native binding)
+    // Rate limiting (Durable Object). Before Turnstile, so unverified floods count too.
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-    const allowed = await checkRateLimit(env.WRITE_LIMITER, `contact:${ip}`);
-    if (!allowed) {
+    const limit = await checkRateLimit(env, ip);
+    if (limit.unavailable) return "unavailable";
+    if (!limit.ok) {
+      ctx.retryAfter = limit.retryAfter;
       return "rate";
     }
 

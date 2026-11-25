@@ -11,7 +11,9 @@ Update it whenever we change architecture, security, or APIs.
 
 **Overall system stack**
 
-- **Frontend:** Astro, static pages rendered on **Cloudflare Pages**.
+- **Frontend:** Astro 7, server-rendered by the Cloudflare Worker **`kilcon-site`** (Workers Static Assets).
+  Cloudflare Pages served the Astro 5 site until 2026-11-23 and was retired on 2026-11-25.
+  Deploys and rollback: [production-deploy.md](production-deploy.md).
 - **Backend (system-wide):**
     - A **Cloudflare Worker** (`kilcon-gallery-worker`, defined and deployed directly in Cloudflare)  
       that handles `/api/gallery-api*` and `/api/reviews*` for gallery, reviews, and admin operations.
@@ -24,11 +26,11 @@ Update it whenever we change architecture, security, or APIs.
 - **Admin auth:** Cookie-based (`admin_auth`), backed by an `ADMIN_SECRET` in the external Worker
   and an Astro admin auth helper (`adminAuth.ts`) used by the admin frontend.
 
-The public site is served from Cloudflare Pages at `https://kilcon.work`.
+The public site is served by the `kilcon-site` Worker (route `kilcon.work/*`) at `https://kilcon.work`.
 
 **This repository contains:**
 
-- The **Astro frontend** deployed on Cloudflare Pages.
+- The **Astro frontend**, deployed to the `kilcon-site` Worker by Workers Builds on every push to `main`.
 
 The gallery and review APIs used by the frontend:
 
@@ -47,7 +49,7 @@ Browser (public)
   |
   |  HTML/CSS/JS + POST /api/contact
   v
-Cloudflare Pages (this repo)
+kilcon-site Worker (this repo)
   |
   |  forwards request to /api/contact (Cloudflare Worker)
   v

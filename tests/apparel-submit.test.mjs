@@ -26,7 +26,7 @@ afterEach(() => { globalThis.fetch = realFetch; });
 
 const env = () => ({
   RESEND_API_KEY: "re_test", FROM_EMAIL: "KilCon <contact@kilcon.work>", TO_EMAIL: "owner@example.com", TURNSTILE_SECRET: "ts",
-  WRITE_LIMITER: { limit: async () => ({ success: !limited }) },
+  CONTACT_LIMITER: { idFromName: (k) => k, get: () => ({ hit: async () => (limited ? { ok: false, retryAfter: 60 } : { ok: true }) }) },
 });
 
 /** What the browser does: a same-origin POST, answered by the Worker. */

@@ -32,12 +32,19 @@ beforeEach(() => {
 });
 afterEach(() => { globalThis.fetch = realFetch; });
 
+
+/** A CONTACT_LIMITER namespace stub: hit(key) decides the answer. */
+const limiterNs = (hit) => ({
+  idFromName: (key) => ({ key }),
+  get: (id) => ({ hit: () => hit(id.key) }),
+});
+
 const env = (over = {}) => ({
   RESEND_API_KEY: "re_test",
   FROM_EMAIL: "KilCon <contact@kilcon.work>",
   TO_EMAIL: "owner@example.com",
   TURNSTILE_SECRET: "ts_test",
-  WRITE_LIMITER: { limit: async () => ({ success: true }) },
+  CONTACT_LIMITER: limiterNs(async () => ({ ok: true, remaining: 2 })),
   ...over,
 });
 
@@ -93,13 +100,13 @@ test("json: validation errors are 400 input/phone and send nothing", async () =>
   assert.equal(resendCalls().length, 0);
 });
 
-test("json: rate limit is 429 with Retry-After, checked before Turnstile", async () => {
+test("json: rate limit is 429 with the limiter's Retry-After, checked before Turnstile", async () => {
   let key;
-  const res = await worker.fetch(post(), env({ WRITE_LIMITER: { limit: async (o) => { key = o.key; return { success: false }; } } }));
+  const res = await worker.fetch(post(), env({ CONTACT_LIMITER: limiterNs(async (k) => { key = k; return { ok: false, retryAfter: 42 }; }) }));
   assert.equal(res.status, 429);
-  assert.equal(res.headers.get("retry-after"), "60");
+  assert.equal(res.headers.get("retry-after"), "42");
   assert.deepEqual(await body(res), { ok: false, error: "rate" });
-  assert.equal(key, "contact:203.0.113.9", "same limiter key as the contact form");
+  assert.equal(key, "v4:203.0.113.9", "one limiter object per client IP");
   assert.equal(calls.length, 0, "no Turnstile or Resend call");
 });
 
@@ -171,7 +178,7 @@ test("form: errors redirect with ?err= exactly as before; provider failure stays
   const cases = [
     [{ fields: { ...FIELDS, name: "P" } }, {}, "?err=input"],
     [{ fields: { ...FIELDS, phone: "12" } }, {}, "?err=phone"],
-    [{}, { WRITE_LIMITER: { limit: async () => ({ success: false }) } }, "?err=rate"],
+    [{}, { CONTACT_LIMITER: limiterNs(async () => ({ ok: false, retryAfter: 60 })) }, "?err=rate"],
     [{}, { RESEND_API_KEY: "" }, "?err=server"],
   ];
   for (const [opts, over, suffix] of cases) {
@@ -194,9 +201,39 @@ test("form: a cross-origin form post still works as before (no origin check on t
   assert.equal(res.headers.get("location"), "https://kilcon.work/contact?sent=1");
 });
 
-test("a failing rate-limit binding fails open, as before", async () => {
-  const res = await worker.fetch(post(), env({ WRITE_LIMITER: { limit: async () => { throw new Error("binding"); } } }));
-  assert.equal(res.status, 200);
+test("limiter failures fail closed: 503, nothing verified or sent", async () => {
+  const failing = {
+    "throws": limiterNs(async () => { throw new Error("Durable Object reset"); }),
+    "odd answer": limiterNs(async () => ({})),
+    "missing binding": undefined,
+  };
+  for (const [label, ns] of Object.entries(failing)) {
+    const res = await worker.fetch(post(), env({ CONTACT_LIMITER: ns }));
+    assert.equal(res.status, 503, label);
+    assert.equal(res.headers.get("retry-after"), "30", label);
+    assert.deepEqual(await body(res), { ok: false, error: "unavailable" }, label);
+    const form = await worker.fetch(post({ json: false }), env({ CONTACT_LIMITER: ns }));
+    assert.equal(form.headers.get("location"), "https://kilcon.work/contact?err=server", label);
+  }
+  assert.equal(calls.length, 0, "no Turnstile or Resend call");
+});
+
+test("a limiter that never answers fails closed after the timeout", async () => {
+  const started = Date.now();
+  const res = await worker.fetch(post(), env({ CONTACT_LIMITER: limiterNs(() => new Promise(() => {})) }));
+  assert.equal(res.status, 503);
+  assert.ok(Date.now() - started >= 2900, "waited for the 3 s timeout");
+  assert.equal(calls.length, 0);
+});
+
+test("limiter key: IPv4 as is, IPv6 by /64, no raw address beyond that", async () => {
+  const { limiterKey } = await import("../src/rate-limiter.js");
+  assert.equal(limiterKey("203.0.113.9"), "v4:203.0.113.9");
+  assert.equal(limiterKey("2001:db8:abcd:12:1:2:3:4"), "v6:2001:db8:abcd:12::/64");
+  assert.equal(limiterKey("2001:DB8:abcd:0012::99"), "v6:2001:db8:abcd:12::/64", "same /64, other host");
+  assert.equal(limiterKey("2001:db8::1"), "v6:2001:db8:0:0::/64");
+  assert.notEqual(limiterKey("2001:db8:abcd:13::1"), limiterKey("2001:db8:abcd:12::1"));
+  assert.equal(limiterKey(""), "v4:unknown");
 });
 
 // ---------- input-length limits (2026-11-24) ----------
@@ -228,7 +265,7 @@ test("limits: one character over any cap is 400 input, before the limiter, Turns
   for (const [field, value] of Object.entries(over)) {
     let limited = 0;
     const res = await worker.fetch(post({ fields: { ...FIELDS, [field]: value } }),
-      env({ WRITE_LIMITER: { limit: async () => { limited++; return { success: true }; } } }));
+      env({ CONTACT_LIMITER: limiterNs(async () => { limited++; return { ok: true }; }) }));
     assert.deepEqual([res.status, await body(res)], [400, { ok: false, error: "input" }], field);
     assert.equal(limited, 0, `${field}: limiter not consumed`);
   }
@@ -266,4 +303,18 @@ test("origins: production never trusts localhost; only ALLOW_DEV_ORIGINS (wrangl
   }
   // Only the exact string "true" opts in.
   assert.equal((await worker.fetch(post({ origin: "http://localhost:4321" }), env({ ALLOW_DEV_ORIGINS: "1" }))).status, 403);
+});
+
+test("config: the Durable Object limiter is bound and migrated; no test-only window in production", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const toml = await readFile(new URL("../wrangler.toml", import.meta.url), "utf8");
+  assert.match(toml, /\[\[durable_objects\.bindings\]\]\s*name = "CONTACT_LIMITER"\s*class_name = "ContactRateLimiter"/);
+  assert.match(toml, /\[\[migrations\]\]\s*tag = "v1"\s*new_sqlite_classes = \["ContactRateLimiter"\]/);
+  assert.doesNotMatch(toml, /^\s*RATE_LIMIT_WINDOW_MS\s*=/m, "the window override is test-only");
+  assert.doesNotMatch(toml, /^\s*name = "WRITE_LIMITER"/m, "the approximate binding is gone");
+  assert.match(toml, /^workers_dev = false/m);
+  const { LIMIT, WINDOW_MS, windowMs } = await import("../src/rate-limiter.js");
+  assert.deepEqual([LIMIT, WINDOW_MS, windowMs({})], [3, 60_000, 60_000]);
+  assert.equal(windowMs({ RATE_LIMIT_WINDOW_MS: "999999" }), 60_000, "can never lengthen or disable the window");
+  assert.equal(windowMs({ RATE_LIMIT_WINDOW_MS: "0" }), 60_000);
 });
