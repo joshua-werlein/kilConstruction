@@ -1,7 +1,25 @@
 ---
-const cookies = Astro.cookies;
+import { isSameOriginRequest } from "../../utils/adminAuth";
 
-cookies.set("admin_auth", "", {
+// Logout is POST-only (the footer form in AdminLayout), so a cross-site link,
+// image or prefetch can't sign the admin out. A GET (old bookmark) just goes
+// to the dashboard, which sends signed-out visitors to the login page.
+const request = Astro.request;
+const noStore = { "Cache-Control": "no-store" };
+
+if (request.method === "GET" || request.method === "HEAD") {
+    return new Response(null, { status: 303, headers: { Location: "/admin/dashboard", ...noStore } });
+}
+if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST", ...noStore } });
+}
+// Astro's checkOrigin covers form posts; this also refuses body-less
+// cross-site POSTs, which checkOrigin does not inspect.
+if (!isSameOriginRequest(request)) {
+    return new Response("Forbidden", { status: 403, headers: noStore });
+}
+
+Astro.cookies.set("admin_auth", "", {
     path: "/",
     httpOnly: true,
     secure: import.meta.env.PROD,
@@ -10,7 +28,7 @@ cookies.set("admin_auth", "", {
 });
 
 return new Response(null, {
-    status: 302,
-    headers: { Location: "/admin" },
+    status: 303,
+    headers: { Location: "/admin", ...noStore },
 });
 ---

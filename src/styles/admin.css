@@ -83,6 +83,27 @@ body {
     transform: translateY(-1px);
 }
 
+/* Logout is a POST form: make its button look like the header links. */
+.admin-logout-button {
+    background: transparent;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 500;
+    line-height: inherit;
+    cursor: pointer;
+}
+
+/* The form scales on hover (below), so the button doesn't also jump. */
+.admin-logout-button:hover {
+    transform: none;
+}
+
+.admin-logout-button:focus-visible {
+    outline: 2px solid #f9fafb;
+    outline-offset: 2px;
+    opacity: 1;
+}
+
 /* Keep Logout vertically centered, but give it a subtle hover effect */
 .admin-footer-logout,
 .admin-footer-logout:hover {

@@ -61,8 +61,11 @@ if (Astro.request.method === "POST") {
     const userStr = typeof username === "string" ? username : "";
     const passStr = typeof password === "string" ? password : "";
 
-    const userOk = safeEquals(userStr, ADMIN_USER);
-    const passOk = safeEquals(passStr, ADMIN_PASS);
+    // Both are always evaluated, so timing doesn't reveal which one failed.
+    const [userOk, passOk] = await Promise.all([
+        safeEquals(userStr, ADMIN_USER),
+        safeEquals(passStr, ADMIN_PASS),
+    ]);
     const valid = userOk && passOk;
 
     recordLoginAttempt(ip, valid);

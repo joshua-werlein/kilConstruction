@@ -95,7 +95,10 @@ const absoluteImage = image.startsWith("http")
                 <p class="admin-footer-text">Keep this page private.</p>
             </div>
 
-            <a href="/admin/logout" class="admin-header-link admin-footer-logout">Logout</a>
+            <!-- POST-only: a GET link would let any page sign the admin out. -->
+            <form method="POST" action="/admin/logout" class="admin-footer-logout">
+                <button type="submit" class="admin-header-link admin-logout-button">Logout</button>
+            </form>
         </div>
     </footer>
 </div>

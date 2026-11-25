@@ -2,6 +2,8 @@
 // It uses Web Crypto (crypto.subtle) for HMAC and a small base64url helper
 // that works in both environments.
 
+import { safeEquals } from "./adminAuth.ts";
+
 const TOKEN_TTL_SECONDS = 6 * 60 * 60; // 6 hours
 
 declare const Buffer: any; // for Node; Cloudflare will use the btoa/atob path
@@ -116,13 +118,8 @@ export async function verifyAdminToken(
         return false;
     }
 
-    // Constant-time-ish compare
-    if (expectedSigB64.length !== sigB64.length) return false;
-    let diff = 0;
-    for (let i = 0; i < expectedSigB64.length; i++) {
-        diff |= expectedSigB64.charCodeAt(i) ^ sigB64.charCodeAt(i);
-    }
-    if (diff !== 0) return false;
+    // Constant-time compare of digests: neither content nor length leaks.
+    if (!(await safeEquals(expectedSigB64, sigB64))) return false;
 
     // Decode payload and check exp / iat / ver
     try {
