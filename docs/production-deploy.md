@@ -2,8 +2,9 @@
 
 **Supported production architecture since 2026-11-23:** the site is the Worker `kilcon-site` (Astro 7 +
 `@astrojs/cloudflare` 14, Workers Static Assets). It serves `kilcon.work/*` through a Worker route.
-Astro 5 / Cloudflare Pages is **not** developed any further. It's kept only as an emergency rollback
-until it is retired (below).
+**Recovery is a Worker version rollback** (below). Astro 5 / Cloudflare Pages is retired: its Git
+integration was disconnected and its custom domains detached on 2026-11-25, so it is **no longer a
+rollback path**. Its source is tag `astro5-pages-final` (`8403269`).
 
 ## What serves what
 
@@ -54,43 +55,76 @@ separate, and they are still deployed by hand with `--config`.
 **Manual deploy (fallback):** from a **fresh `git worktree`** of `main` (never the primary checkout,
 which has a local `.env`), run `npm ci && npm run site:deploy`.
 
-**Rolling back the code only:**
-1. `npx wrangler versions list --name kilcon-site` to find the version to return to;
-2. `npx wrangler versions deploy <previous-version-id>@100% --name kilcon-site -y`.
+**Commit tags:** `[CF-Pages-Skip]` no longer matters. Every push to `main` deploys `kilcon-site`,
+including docs-only commits, which is a harmless rebuild.
 
-**Commit tags:** `[CF-Pages-Skip]` no longer matters for the site. Every push to `main` deploys
-`kilcon-site`, including docs-only commits, which is a harmless rebuild.
+## Recovery: Worker version rollback (the supported procedure)
 
-## Emergency rollback to Astro 5 (Pages)
+Every deploy keeps the previous versions (the last 100 can be reactivated). A rollback switches
+traffic in seconds and changes no data, secrets, routes or bindings.
 
-1. Delete the zone route `kilcon.work/*` → `kilcon-site` (dashboard: Websites → kilcon.work →
-   Workers Routes, or the API). Traffic returns at once to the Pages custom domain, served by
-   deployment **`08d48cf3`**: Astro 5 plus the apparel save auth hotfix, built 2026-11-23 with the
-   current `ADMIN_SECRET`.
-2. Data, secrets, the Gallery and Contact Workers, and Facebook settings need no change. All three
-   sites share D1, R2 and the same `ADMIN_SECRET`.
-3. Astro 5 doesn't have Request This Item: the apparel pages show the old Checkout, which answers
-   503 because payments are off.
-4. To return to Astro 7, re-add the route.
+| Worker | Command (from the repo root) | Notes |
+|---|---|---|
+| `kilcon-site` | `npx wrangler versions list --config wrangler.jsonc`, then `npx wrangler versions deploy <id>@100% --config wrangler.jsonc -y` | Workers Builds redeploys on the next push to `main`; revert the bad commit too. |
+| `kilcon-contact` | `npx wrangler versions deploy <id>@100% --config workers/kilcon-contact/wrangler.toml -y` | Only to versions **at or after `ac8cc59c`** (see below). |
+| `kilcon-gallery-worker` | `npx wrangler versions deploy <id>@100% --config workers/kilcon-gallery-worker/wrangler.toml -y` | The cron and routes are not versioned and stay as they are. |
 
-Pages automatic production builds stay **off**, and its production branch is `main` (Astro 7, which
-Pages can't build). Don't re-enable them.
+**After a rollback:** check `wrangler deployments status --config …`, the zone routes, and the
+production checks (pages 200, admin 302/401, webhook 401 unsigned, contact `captcha` for a bad token).
+
+**Durable Object limit:** Cloudflare can't roll a Worker back across a Durable Object migration.
+The Contact Worker's migration `v1` (2026-11-25) makes **`ac8cc59c`** the oldest usable target: it
+has the migrated class but still uses the old `WRITE_LIMITER` binding. `ec34f316` and older can no
+longer be reactivated.
+
+## Contact rate limiting
+
+- **Authoritative:** the SQLite-backed Durable Object `ContactRateLimiter`
+  (`workers/kilcon-contact/src/rate-limiter.js`): 3 accepted requests per rolling 60 s per client
+  (IPv4 address; IPv6 /64), one object per client, so it is exact across locations and atomic under
+  concurrency. It stores only the accepted timestamps of the current window, and an alarm deletes
+  them afterwards.
+- **Fails closed:** if the limiter is unavailable, the Worker answers 503 (form: `?err=server`) and
+  sends nothing.
+- **Also in place:** the zone WAF rule "KilCon API Abuse Protection" (`/api/*`, 50 requests per 10 s
+  per IP), Turnstile, the honeypot and the input limits.
+- **Free plan:** about 1–2 Durable Object requests and a few row writes per inquiry, against 100,000
+  requests and 100,000 rows written per day.
+- **Production check without sending email:** POST valid fields with **no** Turnstile token. Requests
+  1–3 answer 403 `captcha`, 4–8 answer 429 `rate`. Wait 60 s between runs.
+- **Tests:** `npm run test:contact-worker` includes real-runtime tests (`limiter.workerd.test.mjs`).
 
 ## Secrets
 
-| Secret | kilcon-site | Pages (rollback) | Gallery Worker |
-|---|---|---|---|
-| `ADMIN_USER`, `ADMIN_PASS` | ✓ | ✓ | – |
-| `ADMIN_SECRET` | ✓ same value | ✓ same value | ✓ same value |
-| `SESSION_VERSION` (var) | `3` | `3` | `3` |
+| Secret | kilcon-site | Gallery Worker |
+|---|---|---|
+| `ADMIN_USER`, `ADMIN_PASS` | ✓ | – |
+| `ADMIN_SECRET` | ✓ same value | ✓ same value |
+| `SESSION_VERSION` (var) | `3` | `3` |
 
 - **Rotation:** `ADMIN_SECRET` was rotated 2026-11-23 with `scripts/rotate-admin-secret.ps1`. The
   value was generated in memory and never displayed or stored, so nobody knows it. To change it,
-  run the script again; it covers all three and pauses for the Pages rebuild.
-- **After Pages is retired:** the script's Pages step goes away.
+  run the script again.
+- **Until the Pages project is deleted**, the script still also sets the secret on Pages and pauses
+  for a Pages rebuild. Pages no longer serves anything, so at that pause just type CONTINUE. When the
+  project is deleted, the script drops that step (a two-Worker version is ready).
 - **The repo `.env`** is a local development file. Never use its values in production.
 
-## Retiring the old Pages project (separate approval required)
+## Retiring the old Pages project
+
+**Status (2026-11-25, owner-approved):**
+
+| Step | Status |
+|---|---|
+| Watch period and automatic deploys | Done. Over 48 h: 2,090 requests, 0 errors, CPU p99 19.9 ms. Workers Builds green. |
+| Astro 5 source preserved | Done: tag `astro5-pages-final` → `8403269` (the source of Pages deployment `08d48cf3`). |
+| 1. Disconnect Pages from GitHub | Done. Only the project's link was removed; the GitHub app is still installed, and Workers Builds is unaffected. |
+| 2. Detach custom domains (`kilcon.work`, `www.kilcon.work`) | Done. Site, redirects and TLS verified afterwards; the Universal SSL certificate covers `kilcon.work, *.kilcon.work`. |
+| DNS placeholders | **Pending the owner's approval.** `kilcon.work` and `www.kilcon.work` are still proxied CNAMEs to `kilconstruction.pages.dev`. Traffic never reaches that origin: the Worker route and the www redirect rule answer first. Before deleting the project, change each record in place to proxied `AAAA 100::`. Otherwise they point at a `pages.dev` name anyone could claim. |
+| 3–4. Delete the Pages project (and with it its Stripe and admin secrets) | **Waiting on the DNS step.** |
+| 5. Branch `hotfix/astro5-apparel-auth` | Done: deleted locally and on GitHub. Its fix is on `main`, and its commits are kept by the tag. |
+
+**Original checklist:**
 
 **Before retiring:**
 - **Watch period:** several days on Astro 7 with no rollback needed. Check daily: the production
