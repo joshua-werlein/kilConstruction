@@ -24,9 +24,10 @@ export const CF_INSIGHTS_REPORT_ORIGIN = "https://cloudflareinsights.com";
 
 export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
   ["default-src", "'self'"],
-  // 'unsafe-inline': the is:inline status scripts (contact, reviews), small
-  // hoisted scripts Astro may inline, and Cloudflare's injected challenge-platform
-  // bootstrap. Replacing it with hashes or nonces is a separate follow-up.
+  // 'unsafe-inline': only Cloudflare's injected challenge-platform bootstrap
+  // (per-request content, so no hash). Our own pages have no inline scripts since
+  // 2026-11-25 (tests/csp-inline-scripts.test.mjs). It stays until a nonce-based
+  // report-only policy has passed its observation window (docs/security-headers.md).
   ["script-src", `'self' 'unsafe-inline' ${TURNSTILE_ORIGIN} ${CF_INSIGHTS_SCRIPT_ORIGIN}`],
   ["style-src", "'self' 'unsafe-inline'"],
   // data:/blob: cover inline SVG and admin upload previews.

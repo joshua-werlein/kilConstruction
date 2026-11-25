@@ -345,7 +345,9 @@ const hasReviews = !!summary && summary.totalReviews > 0;
             <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
         </aside>
     </section>
-    <script is:inline>
+    <!-- Bundled (not is:inline), so the CSP needs no 'unsafe-inline' for it. The
+         ?sent / ?err messages are server-rendered; this only tidies the URL. -->
+    <script>
         (function () {
             const url = new URL(window.location.href);
             let changed = false;

@@ -90,6 +90,11 @@ const ENDPOINT = CONTACT_ENDPOINT;
         } from "../lib/apparel-inquiry.js";
         import { encodeDraft, decodeDraft, DRAFT_STORAGE_KEY, DRAFT_FIELDS } from "../lib/contact-draft.js";
         import { CONTACT_LIMITS, lengthProblem, counterText } from "../lib/contact-limits.js";
+        import { applyContactStatus } from "../lib/contact-status.js";
+
+        // ?sent / ?err status line first (src/lib/contact-status.js): it removes its
+        // parameter from the URL, and the draft restore below reads what it shows.
+        applyContactStatus(document.getElementById("result"));
 
         const params = new URLSearchParams(window.location.search);
         if (params.get(INQUIRY_PARAM) === INQUIRY_VALUE) {
@@ -121,7 +126,7 @@ const ENDPOINT = CONTACT_ENDPOINT;
             } catch { /* ignore */ }
         }
 
-        // Draft restore (src/lib/contact-draft.js). The inline script below has
+        // Draft restore (src/lib/contact-draft.js). applyContactStatus() above has
         // already shown ?sent / ?err and removed them from the URL, so read the
         // status it set: restore only after an error, otherwise discard.
         const contactForm = document.querySelector("form.contact-form") as HTMLFormElement | null;
@@ -174,46 +179,5 @@ const ENDPOINT = CONTACT_ENDPOINT;
             }
             try { sessionStorage.setItem(DRAFT_STORAGE_KEY, encodeDraft(values)); } catch { /* storage blocked */ }
         });
-    </script>
-    <script is:inline>
-        (function () {
-            const res = document.getElementById("result");
-            if (!res) return;
-
-            const url = new URL(window.location.href);
-            const sent = url.searchParams.get("sent");
-            const err  = url.searchParams.get("err");
-
-            function setOk(message) {
-                res.textContent = message;
-                res.classList.remove("status--error", "status--empty");
-                res.classList.add("status--success");
-            }
-
-            function setError(message) {
-                res.textContent = message;
-                res.classList.remove("status--ok", "status--empty");
-                res.classList.add("status--error");
-            }
-
-            if (sent === "1") {
-                setOk("Thanks! We’ll be in touch shortly.");
-                url.searchParams.delete("sent");
-                window.history.replaceState({}, "", url.pathname + url.search);
-            } else if (err) {
-                if (err === "captcha") {
-                    setError("Please complete the CAPTCHA and try again.");
-                } else if (err === "phone") {
-                    setError("Please enter a valid phone number or leave it blank.");
-                } else if (err === "input") {
-                    setError("Please check your details and try again. Names can be up to 100 characters and project details up to 5,000.");
-                } else {
-                    setError("Sorry, something went wrong. Please try again.");
-                }
-
-                url.searchParams.delete("err");
-                window.history.replaceState({}, "", url.pathname + url.search);
-            }
-        })();
     </script>
 </MainLayout>

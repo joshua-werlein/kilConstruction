@@ -30,9 +30,11 @@ to the previous version.
   `/projects`, `/admin` and `/privacy` were fetched on 2026-11-23. Every external `src`,
   `srcset` and `action` is `kilcon.work`, `images.kilcon.work` or `challenges.cloudflare.com`.
   `www.facebook.com` appears only in links, which are navigation and not governed by CSP.
-- **Inline scripts:** the only inline scripts are the `is:inline` status scripts and Cloudflare's
-  challenge-platform bootstrap. That bootstrap loads `/cdn-cgi/challenge-platform/…`, which is
-  same-origin. `'unsafe-inline'` stays, and no `define:vars` remain.
+- **Inline scripts:** at enforcement time the only inline scripts were the `is:inline` status
+  scripts and Cloudflare's challenge-platform bootstrap. Since 2026-11-25 our own pages have none
+  (see [Inline scripts](#inline-scripts-and-unsafe-inline)). The bootstrap loads
+  `/cdn-cgi/challenge-platform/…`, which is same-origin. `'unsafe-inline'` stays, and no
+  `define:vars` remain.
 - **Admin pages:** every image, preview and `fetch` is same-origin
   (`/api/gallery-api/facebook/admin/photo-file`, `review-site-image` and the other
   `/api/gallery-api/*` and `/api/reviews/*` paths), or `blob:` for upload previews. Images come
@@ -97,12 +99,15 @@ These are not set here, because the Cloudflare zone already sends them:
 A header a route already set is never overwritten. Responses with immutable headers,
 such as `Response.redirect`, are re-wrapped so the headers can be added.
 
-### CSP (report-only)
+### CSP (enforced since 2026-11-24)
+
+The source of truth is `CSP_DIRECTIVES` in `src/utils/securityHeaders.ts`. As of 2026-11-25:
 
 ```
-default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com;
-style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://images.kilcon.work;
-font-src 'self'; connect-src 'self' https://challenges.cloudflare.com;
+default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com
+https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline';
+img-src 'self' data: blob: https://images.kilcon.work; font-src 'self';
+connect-src 'self' https://challenges.cloudflare.com https://cloudflareinsights.com;
 frame-src https://challenges.cloudflare.com; manifest-src 'self'; object-src 'none';
 base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 ```
@@ -115,7 +120,7 @@ What each source is for:
 | `images.kilcon.work` | R2 gallery images and their `/cdn-cgi/image/` variants. |
 | `'self'` | Same-origin APIs: `/api/stripe/checkout`, `/api/item`, `/api/reviews/*`, `/api/gallery-api/*`, `/api/admin/*`. |
 | `form-action 'self'` | The contact form (`https://kilcon.work/api/contact` in production) and the admin login (a POST to `/admin`). |
-| `'unsafe-inline'` in `script-src` | The `define:vars` scripts Astro inlines (contact, reviews, apparel) and Cloudflare's inline bootstrap scripts. |
+| `'unsafe-inline'` in `script-src` | Only Cloudflare's injected challenge-platform bootstrap (Bot Fight Mode / JavaScript Detections), on every page. Our own scripts are same-origin `/_astro/*.js` files since 2026-11-25. |
 | `'unsafe-inline'` in `style-src` | Inline `style=""` attributes (projects, apparel). |
 
 Two cases fall outside CSP:
@@ -139,6 +144,36 @@ Two cases fall outside CSP:
 - **Admin login:** a same-origin POST with wrong credentials re-renders with the headers, and `Set-Cookie` passes through unchanged (unit test). A cross-origin POST is still refused with 403 by Astro's own origin check, which is unchanged.
 - **Unaffected:** gallery uploads, review submission and the Facebook webhook are served by the Gallery Worker (`/api/gallery-api*`, `/api/reviews*` routes), not Pages. The contact form goes to the `kilcon-contact` Worker. The middleware doesn't touch them.
 
+## Inline scripts and 'unsafe-inline'
+
+Since 2026-11-25 (Release D of the maintenance backlog) the site ships **no inline scripts of its own**:
+
+- The contact status line (`?sent` / `?err`) moved from an `is:inline` script into
+  `src/lib/contact-status.js`. The page's bundled module calls it first, before the draft restore
+  that reads the `status--error` class it sets.
+- The reviews URL tidy-up is a normal bundled `<script>` (its messages are server-rendered).
+- `astro.config.mjs` sets `vite.build.assetsInlineLimit` to a function that never inlines
+  scripts. Astro otherwise inlines any processed script under 4 KB that imports nothing; that had
+  inlined the reviews script and the admin apparel variant editor. CSS inlining is unchanged.
+- `tests/csp-inline-scripts.test.mjs` fails if an `is:inline` or `define:vars` script returns,
+  or if the inline-limit setting is lost.
+
+The one inline script left is **Cloudflare's challenge-platform bootstrap** (`window.__CF$cv$params`).
+It is injected at the edge on every HTML page and its content changes per request, so it cannot
+be hashed. Cloudflare documents that it adds the page's CSP **nonce** to the scripts it injects
+when the `Content-Security-Policy` header carries one
+([JavaScript detections](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/javascript-detections/)).
+Bot protection stays on; turning it off is an owner decision and not planned.
+
+**Plan for removing `'unsafe-inline'` from `script-src`:**
+
+1. Done: our own inline scripts are removed (the enforced policy is unchanged).
+2. Next: send a nonce-based `Content-Security-Policy-Report-Only` header **alongside** the enforced
+   policy, and confirm Cloudflare nonces its bootstrap.
+3. Only after 24–48 hours with no unexplained violations: move the nonce into the enforced
+   header and drop `'unsafe-inline'` from `script-src`. `style-src 'unsafe-inline'` is separate
+   and stays.
+
 ## Known gaps
 
 - If a page throws before returning a response, Astro's bare 500 is produced outside middleware and has no headers. The same goes for Astro's CSRF 403. Both are empty or plain-text bodies.
@@ -158,5 +193,5 @@ Two cases fall outside CSP:
 ## Before enforcing
 
 1. Collect violations for about a week. A report endpoint is an optional follow-up.
-2. Replace `'unsafe-inline'` in `script-src` with hashes or nonces, which means removing `define:vars`.
+2. Replace `'unsafe-inline'` in `script-src` with hashes or nonces, which means removing `define:vars`. (Superseded: see [Inline scripts and 'unsafe-inline'](#inline-scripts-and-unsafe-inline).)
 3. Rename the header to `Content-Security-Policy`.

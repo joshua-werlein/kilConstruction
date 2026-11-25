@@ -24,4 +24,14 @@ export default defineConfig({
         service: passthroughImageService(),
         endpoint: { route: '/_image', entrypoint: './src/image-endpoint-disabled.js' },
     },
+    vite: {
+        build: {
+            // Never inline processed <script>s into the HTML. Astro inlines any
+            // script under this limit that imports nothing, and an inline script
+            // needs 'unsafe-inline' (or a nonce) in the CSP. Scripts stay
+            // same-origin /_astro/*.js files instead. Returning undefined keeps
+            // Vite's default 4 KB limit for CSS and other assets.
+            assetsInlineLimit: (filePath) => (/\.(m?js|ts)$/.test(filePath) ? false : undefined),
+        },
+    },
 });

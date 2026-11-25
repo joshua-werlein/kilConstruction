@@ -49,8 +49,13 @@ test("contact page: every field carries the shared limits, and limits are re-che
   assert.match(page, /contactForm\.reportValidity\(\)/);
   // The validation listener is registered before the draft-saving listener.
   assert.ok(page.indexOf("contactForm.checkValidity()") < page.indexOf("encodeDraft(values)"));
-  assert.match(page, /project details up to 5,000/, "the ?err=input message states the limit");
+  // The ?err=input message lives in src/lib/contact-status.js since the inline
+  // status script was bundled (2026-11-25).
+  const status = await read("src/lib/contact-status.js");
+  assert.match(status, /project details up to 5,000/, "the ?err=input message states the limit");
+  assert.ok(status.includes(`up to ${CONTACT_LIMITS.message.toLocaleString("en-US")}`), "message matches the shared limit");
   assert.doesNotMatch(page, /innerHTML/);
+  assert.doesNotMatch(status, /innerHTML/);
 });
 
 test("the error-redirect draft keeps exactly what the form allows", () => {
