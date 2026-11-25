@@ -25,6 +25,7 @@ import { classifyAlbum, albumCollectionKind } from './facebook-album-matching.js
 import { reviewGate, handleReviewAdmin, webhookReviewMode } from './facebook-review.js';
 import { initialDiscovery, validateDiscovery, discoveryBatch, DISCOVERY_POST_FIELDS } from './facebook-discovery.js';
 import { parseControlTags, stripControlTags } from './facebook-hashtags.js';
+import { timingSafeEqualBytes, timingSafeEqualStrings } from './timing-safe.js';
 
 export const FACEBOOK_PREFIX = "Facebook/";
 export const RECENT_SLUG = "recent-project-updates";
@@ -114,13 +115,6 @@ function hexToBytes(hex) {
   return out;
 }
 
-function timingSafeEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
-}
-
 async function sha256Hex(input) {
   const data = typeof input === "string" ? encoder.encode(input) : input;
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", data)));
@@ -136,15 +130,6 @@ async function hmacSha256(secret, data) {
   );
   const bytes = typeof data === "string" ? encoder.encode(data) : data;
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, bytes));
-}
-
-// Compare digests so string length doesn't leak through timing.
-async function safeEqualStrings(a, b) {
-  const [da, db] = await Promise.all([
-    crypto.subtle.digest("SHA-256", encoder.encode(String(a ?? ""))),
-    crypto.subtle.digest("SHA-256", encoder.encode(String(b ?? ""))),
-  ]);
-  return timingSafeEqual(new Uint8Array(da), new Uint8Array(db));
 }
 
 // Deterministic JSON so retried deliveries hash identically.
@@ -261,7 +246,7 @@ export async function verifyMetaSignature(rawBytes, header, appSecret) {
   const m = /^sha256=([0-9a-f]{64})$/i.exec(String(header || "").trim());
   if (!m) return false;
   const expected = await hmacSha256(appSecret, rawBytes);
-  return timingSafeEqual(expected, hexToBytes(m[1].toLowerCase()));
+  return timingSafeEqualBytes(expected, hexToBytes(m[1].toLowerCase()));
 }
 
 // --- webhook entry point ----------------------------------------------
@@ -283,7 +268,7 @@ async function handleVerification(request, env) {
   const token = params.get("hub.verify_token");
   const challenge = params.get("hub.challenge") || "";
 
-  const tokenOk = await safeEqualStrings(token, env.FB_VERIFY_TOKEN);
+  const tokenOk = await timingSafeEqualStrings(token, env.FB_VERIFY_TOKEN);
   if (mode === "subscribe" && tokenOk && /^[A-Za-z0-9_.-]{1,512}$/.test(challenge)) {
     return text(challenge, 200);
   }

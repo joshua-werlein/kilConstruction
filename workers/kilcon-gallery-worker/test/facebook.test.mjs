@@ -454,7 +454,58 @@ test("SECURITY: review submit redirect only targets our own origins", async () =
     }), env, makeCtx());
   };
   assert.match((await mk("https://evil.example/")).headers.get("Location"), /^https:\/\/kilcon\.work\/reviews/);
-  assert.match((await mk("http://localhost:4321/reviews")).headers.get("Location"), /^http:\/\/localhost:4321\/reviews/);
+  // Production (no ALLOW_DEV_ORIGINS) never redirects to localhost.
+  assert.match((await mk("http://localhost:4321/reviews")).headers.get("Location"), /^https:\/\/kilcon\.work\/reviews/);
+  // Local `wrangler dev --var ALLOW_DEV_ORIGINS:true` keeps the dev round-trip.
+  const devEnv = makeEnv({ ALLOW_DEV_ORIGINS: "true" });
+  const mkDev = (referer) => {
+    const form = new FormData();
+    form.set("name", "x");
+    return worker.fetch(new Request(`${SITE}/api/reviews/submit`, {
+      method: "POST", body: form, headers: { Accept: "text/html", Referer: referer },
+    }), devEnv, makeCtx());
+  };
+  assert.match((await mkDev("http://localhost:4321/reviews")).headers.get("Location"), /^http:\/\/localhost:4321\/reviews/);
+  assert.match((await mkDev("https://evil.example/")).headers.get("Location"), /^https:\/\/kilcon\.work\/reviews/);
+});
+
+test("SECURITY: CORS trusts localhost only when ALLOW_DEV_ORIGINS is \"true\"", async () => {
+  const acao = async (origin, env, method = "GET") => (await call("/api/reviews/summary", {
+    method, env, headers: { Origin: origin },
+  })).headers.get("Access-Control-Allow-Origin");
+  for (const method of ["GET", "OPTIONS"]) {
+    for (const value of [undefined, "false", "1", "TRUE"]) {
+      const env = makeEnv(value === undefined ? {} : { ALLOW_DEV_ORIGINS: value });
+      assert.equal(await acao("http://localhost:4321", env, method), SITE, `${method} ${value}`);
+      assert.equal(await acao("http://127.0.0.1:4321", env, method), SITE, `${method} ${value}`);
+      assert.equal(await acao(SITE, env, method), SITE);
+    }
+    const dev = makeEnv({ ALLOW_DEV_ORIGINS: "true" });
+    assert.equal(await acao("http://localhost:4321", dev, method), "http://localhost:4321");
+    assert.equal(await acao("http://127.0.0.1:4321", dev, method), "http://127.0.0.1:4321");
+    assert.equal(await acao("https://evil.example", dev, method), SITE);
+    assert.equal(await acao(SITE, dev, method), SITE);
+  }
+  // The flag is per request: a dev-mode request doesn't leak into the next one.
+  assert.equal(await acao("http://localhost:4321", makeEnv()), SITE);
+});
+
+test("SECURITY: admin token signature is checked in constant time and rejects tampering", async () => {
+  const good = (await adminCookie()).slice("admin_auth=".length);
+  const [payload, sig] = good.split(".");
+  const status = async (token) => (await call("/api/reviews/admin/list", {
+    headers: { Cookie: `admin_auth=${token}` },
+  })).status;
+  assert.equal(await status(good), 200);
+  const flipped = sig.slice(0, -1) + (sig.endsWith("A") ? "B" : "A");
+  for (const bad of [
+    `${payload}.${flipped}`,           // same length, wrong signature
+    `${payload}.${sig.slice(0, -2)}`,  // truncated
+    `${payload}.${sig}AA`,             // extended
+    `${payload}.`,                     // empty signature
+    `${payload}`,                      // no signature
+    "",
+  ]) assert.equal(await status(bad), 401, bad);
 });
 
 test("SECURITY: inherited object keys can't be used as categories", async () => {

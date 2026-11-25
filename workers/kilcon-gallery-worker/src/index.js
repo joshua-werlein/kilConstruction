@@ -33,6 +33,7 @@ import {
 } from "./reviewPrivacy.js";
 import { validateImageFile, readBoundedFormData, isSafeUploadKey } from "./imageValidation.js";
 import { serveFacebookImage, facebookThumbUrl } from "./facebook-image.js";
+import { timingSafeEqualStrings } from "./timing-safe.js";
 
 // Facebook sync ships disabled. Until FB_INTEGRATION_ENABLED = "true", every
 // Facebook route 404s, public galleries never query D1, and cron only runs
@@ -110,14 +111,8 @@ async function verifyAdminToken(token, secret, sessionVersion) {
     return false;
   }
 
-  // constant-time-ish compare
-  if (expectedSigB64.length !== sigB64.length) return false;
-
-  let diff = 0;
-  for (let i = 0; i < expectedSigB64.length; i++) {
-    diff |= expectedSigB64.charCodeAt(i) ^ sigB64.charCodeAt(i);
-  }
-  if (diff !== 0) return false;
+  // Constant-time compare of digests: neither content nor length leaks.
+  if (!(await timingSafeEqualStrings(expectedSigB64, sigB64))) return false;
 
   // validate payload
   try {
@@ -146,10 +141,20 @@ async function verifyAdminToken(token, secret, sessionVersion) {
   }
 }
 
-const ALLOWED_ORIGINS = [
-  "https://kilcon.work",
-  "http://localhost:4321"
-];
+const PROD_ORIGINS = ["https://kilcon.work"];
+// `astro dev` (localhost:4321) is trusted only by a local `wrangler dev` Worker
+// (npm run dev:gallery-worker), which passes --var ALLOW_DEV_ORIGINS:true.
+// Production never sets that variable, so it never trusts a localhost origin.
+// (A hostname check can't tell them apart: wrangler dev rewrites request.url
+// to the route host, kilcon.work.)
+const DEV_ORIGINS = ["http://localhost:4321", "http://127.0.0.1:4321"];
+// Requests that arrived while ALLOW_DEV_ORIGINS was "true", marked once in
+// fetch() so json() and redirectReviews() need no env parameter.
+const DEV_ORIGIN_REQUESTS = new WeakSet();
+
+function allowedOrigins(request) {
+  return request && DEV_ORIGIN_REQUESTS.has(request) ? [...PROD_ORIGINS, ...DEV_ORIGINS] : PROD_ORIGINS;
+}
 
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
@@ -161,7 +166,7 @@ const SECURITY_HEADERS = {
 
 function json(obj, status = 200, request) {
   const origin = request?.headers.get("Origin") || "";
-  const allow = ALLOWED_ORIGINS.includes(origin) ? origin : "https://kilcon.work";
+  const allow = allowedOrigins(request).includes(origin) ? origin : "https://kilcon.work";
 
   return new Response(JSON.stringify(obj), {
     status,
@@ -314,6 +319,7 @@ function sanitizeKey(raw) {
 // --- main worker --------------------------------------------------------
 export default {
   async fetch(request, env, ctx) {
+    if (env?.ALLOW_DEV_ORIGINS === "true") DEV_ORIGIN_REQUESTS.add(request);
     try {
       const url = new URL(request.url);
       const pathname = url.pathname;
@@ -330,7 +336,7 @@ export default {
       // --- Handle OPTIONS (CORS preflight) ---
       if (request.method === "OPTIONS") {
         const origin = request.headers.get("Origin") || "";
-        const allow = ALLOWED_ORIGINS.includes(origin)
+        const allow = allowedOrigins(request).includes(origin)
           ? origin
           : "https://kilcon.work";
 
@@ -1520,7 +1526,7 @@ function redirectReviews(request, suffix) {
   if (ref) {
     try {
       const u = new URL(ref);
-      if (ALLOWED_ORIGINS.includes(u.origin)) origin = u.origin;
+      if (allowedOrigins(request).includes(u.origin)) origin = u.origin;
     } catch {
       // keep default origin
     }

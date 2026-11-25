@@ -19,7 +19,8 @@
     "site:deploy": "astro build && node scripts/check-site-build.mjs && wrangler deploy --config dist/server/wrangler.json",
     "site:ci-build": "astro build && node scripts/check-site-build.mjs",
     "test:contact-worker": "node --import ./tests/support/cloudflare-workers-shim.mjs --test workers/kilcon-contact/test/*.test.mjs",
-    "dev:contact-worker": "wrangler dev --config workers/kilcon-contact/wrangler.toml --var ALLOW_DEV_ORIGINS:true"
+    "dev:contact-worker": "wrangler dev --config workers/kilcon-contact/wrangler.toml --var ALLOW_DEV_ORIGINS:true",
+    "dev:gallery-worker": "wrangler dev --config workers/kilcon-gallery-worker/wrangler.toml --var ALLOW_DEV_ORIGINS:true"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.4.9",

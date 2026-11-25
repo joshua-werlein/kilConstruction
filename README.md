@@ -149,6 +149,8 @@ npm run contact-worker:dry-run
 npm run test:contact-worker
 ```
 
+**Local Gallery and Contact APIs:** production Workers trust only `https://kilcon.work` as a CORS origin. For local admin or review work, run `npm run dev:gallery-worker` (port 8787) and set `PUBLIC_GALLERY_API=http://localhost:8787/api/gallery-api` in `.env`; for the contact form, run `npm run dev:contact-worker`. Both pass `--var ALLOW_DEV_ORIGINS:true`, which lets `http://localhost:4321` and `http://127.0.0.1:4321` call them. Never set that variable in a `wrangler.toml`. `wrangler dev` uses local D1 and R2 storage, never production data.
+
 **Build production only from a clean checkout** (CI or a fresh `git worktree`). A local `.env` is baked into the build, and `site:deploy` refuses such builds (`scripts/check-site-build.mjs`).
 
 **Always pass `--config workers/<worker>/wrangler.toml` to Wrangler for the Gallery and Contact Workers.** After `astro build`, `.wrangler/deploy/config.json` redirects config-less Wrangler commands to the site Worker.
