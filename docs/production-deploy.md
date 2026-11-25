@@ -2,8 +2,7 @@
 
 **Supported production architecture since 2026-11-23:** the site is the Worker `kilcon-site` (Astro 7 +
 `@astrojs/cloudflare` 14, Workers Static Assets). It serves `kilcon.work/*` through a Worker route.
-**Recovery is a Worker version rollback** (below). Astro 5 / Cloudflare Pages is retired: its Git
-integration was disconnected and its custom domains detached on 2026-11-25, so it is **no longer a
+**Recovery is a Worker version rollback** (below). Astro 5 / Cloudflare Pages was retired on 2026-11-25 (project deleted), so it is **no longer a
 rollback path**. Its source is tag `astro5-pages-final` (`8403269`).
 
 ## What serves what
@@ -104,47 +103,26 @@ longer be reactivated.
 
 - **Rotation:** `ADMIN_SECRET` was rotated 2026-11-23 with `scripts/rotate-admin-secret.ps1`. The
   value was generated in memory and never displayed or stored, so nobody knows it. To change it,
-  run the script again.
-- **Until the Pages project is deleted**, the script still also sets the secret on Pages and pauses
-  for a Pages rebuild. Pages no longer serves anything, so at that pause just type CONTINUE. When the
-  project is deleted, the script drops that step (a two-Worker version is ready).
+  run the script again. It sets both Workers, the site first; there is no pause.
 - **The repo `.env`** is a local development file. Never use its values in production.
 
-## Retiring the old Pages project
+## Pages retirement (completed 2026-11-25)
 
-**Status (2026-11-25, owner-approved):**
+The Astro 5 Cloudflare Pages project `kilconstruction` was retired with the owner's approval. There
+is no Pages fallback any more: recovery is the Worker version rollback above.
 
-| Step | Status |
+| Step | Result |
 |---|---|
-| Watch period and automatic deploys | Done. Over 48 h: 2,090 requests, 0 errors, CPU p99 19.9 ms. Workers Builds green. |
-| Astro 5 source preserved | Done: tag `astro5-pages-final` → `8403269` (the source of Pages deployment `08d48cf3`). |
-| 1. Disconnect Pages from GitHub | Done. Only the project's link was removed; the GitHub app is still installed, and Workers Builds is unaffected. |
-| 2. Detach custom domains (`kilcon.work`, `www.kilcon.work`) | Done. Site, redirects and TLS verified afterwards; the Universal SSL certificate covers `kilcon.work, *.kilcon.work`. |
-| DNS placeholders | **Pending the owner's approval.** `kilcon.work` and `www.kilcon.work` are still proxied CNAMEs to `kilconstruction.pages.dev`. Traffic never reaches that origin: the Worker route and the www redirect rule answer first. Before deleting the project, change each record in place to proxied `AAAA 100::`. Otherwise they point at a `pages.dev` name anyone could claim. |
-| 3–4. Delete the Pages project (and with it its Stripe and admin secrets) | **Waiting on the DNS step.** |
-| 5. Branch `hotfix/astro5-apparel-auth` | Done: deleted locally and on GitHub. Its fix is on `main`, and its commits are kept by the tag. |
+| Stability before retiring | 48 h on Astro 7: 2,090 requests, 0 errors, CPU p99 19.9 ms; Workers Builds green. |
+| Astro 5 source | Tag `astro5-pages-final` → `8403269` (the source of the last Pages deployment, `08d48cf3`). |
+| Git integration | The project's link was disconnected. The shared Cloudflare GitHub app stays installed; Workers Builds for `kilcon-site` is unaffected. |
+| Custom domains | `kilcon.work` and `www.kilcon.work` detached from Pages. |
+| DNS | `kilcon.work` and `www.kilcon.work` changed **in place** from proxied CNAMEs (`kilconstruction.pages.dev`) to proxied `AAAA 100::` placeholders. No other record changed. Afterwards DNS resolution, TLS (Universal SSL, `kilcon.work, *.kilcon.work`), redirects, pages, the Contact and Gallery Workers, the Facebook webhook and all 7 Worker routes were verified. |
+| Project | Its 493 old deployments were deleted, then the project itself (with its Stripe and admin secrets). `kilconstruction.pages.dev` no longer resolves. |
+| Rotation script | `scripts/rotate-admin-secret.ps1` now sets only `kilcon-site` and `kilcon-gallery-worker`. |
+| Branch | `hotfix/astro5-apparel-auth` deleted locally and on GitHub. Its fix is on `main`, and its commits are kept by the tag. |
 
-**Original checklist:**
-
-**Before retiring:**
-- **Watch period:** several days on Astro 7 with no rollback needed. Check daily: the production
-  checks, `kilcon-site` errors and CPU (Workers observability), the admin flows, Facebook webhooks
-  and the 12:00 and 18:00 discovery runs.
-- **Automatic deploys:** Workers Builds is connected and has deployed at least once successfully.
-
-**Steps (each needs the owner's approval; deleting the project or its history needs a separate,
-explicit approval):**
-1. **Disconnect Pages from GitHub** (Pages → kilconstruction → Settings → Builds → Disconnect), so
-   branch pushes stop creating Pages preview builds. The production deployment `08d48cf3` keeps
-   serving as the fallback origin.
-2. **Detach the `kilcon.work` custom domain** from Pages, once the Worker route alone serves the
-   site. First confirm that DNS for `kilcon.work` stays proxied: a Worker route needs a proxied
-   record, and Pages created the record. Replace it with a proxied placeholder record if needed,
-   and check that `kilcon.work` still serves Astro 7. This removes the instant rollback, so it
-   comes last.
-3. **Remove the Pages-only secrets** (`STRIPE_*`, `ADMIN_*`), and drop the Pages step from
-   `scripts/rotate-admin-secret.ps1`.
-4. **Delete the Pages project** `kilconstruction`, which deletes its deployment history: **only
-   with the owner's separate approval.**
-5. **Branches:** delete `hotfix/astro5-apparel-auth`, local and remote; remote deletion needs
-   separate approval.
+**Why the DNS placeholders matter:** a Worker route only runs on a proxied hostname, so
+`kilcon.work` and `www.kilcon.work` must stay proxied records. `100::` is a discard address that is
+never contacted: the `kilcon.work/*` route and the zone's www→apex redirect rule answer every request.
+Don't delete these records, and don't make them DNS-only.
