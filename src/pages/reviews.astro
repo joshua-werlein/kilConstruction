@@ -146,7 +146,7 @@ const hasReviews = !!summary && summary.totalReviews > 0;
                     <form method="get" class="reviews-filter-form">
                         <label>
                             Project type:
-                            <select name="type" onchange="this.form.submit()">
+                            <select name="type" id="review-type-filter">
                                 <option value="all" selected={filterType === "all"}>All</option>
                                 <option value="new-construction" selected={filterType === "new-construction"}>New construction</option>
                                 <option value="remodel" selected={filterType === "remodel"}>Remodels</option>
@@ -346,8 +346,12 @@ const hasReviews = !!summary && summary.totalReviews > 0;
         </aside>
     </section>
     <!-- Bundled (not is:inline), so the CSP needs no 'unsafe-inline' for it. The
-         ?sent / ?err messages are server-rendered; this only tidies the URL. -->
+         ?sent / ?err messages are server-rendered; this tidies the URL and wires
+         the project-type filter (no inline onchange= handler). -->
     <script>
+        const typeFilter = document.getElementById("review-type-filter") as HTMLSelectElement | null;
+        typeFilter?.addEventListener("change", () => typeFilter.form?.submit());
+
         (function () {
             const url = new URL(window.location.href);
             let changed = false;

@@ -168,16 +168,54 @@ Bot protection stays on; turning it off is an owner decision and not planned.
 **Plan for removing `'unsafe-inline'` from `script-src`:**
 
 1. Done: our own inline scripts are removed (the enforced policy is unchanged).
-2. Next: send a nonce-based `Content-Security-Policy-Report-Only` header **alongside** the enforced
-   policy, and confirm Cloudflare nonces its bootstrap.
+2. In progress: send a nonce-based `Content-Security-Policy-Report-Only` header **alongside** the
+   enforced policy, and confirm Cloudflare nonces its bootstrap (see
+   [Nonce report-only observation](#nonce-report-only-observation)).
 3. Only after 24–48 hours with no unexplained violations: move the nonce into the enforced
    header and drop `'unsafe-inline'` from `script-src`. `style-src 'unsafe-inline'` is separate
    and stays.
 
+## Nonce report-only observation
+
+`CSP_NONCE_REPORT_ONLY` in `src/utils/securityHeaders.ts` adds a second header to **HTML responses only**:
+
+```
+Content-Security-Policy-Report-Only: <the enforced policy, with script-src
+  'self' 'nonce-<fresh 128-bit value per response>' https://challenges.cloudflare.com
+  https://static.cloudflareinsights.com  (no 'unsafe-inline')>; report-uri /api/csp-report
+```
+
+- It **blocks nothing**. The enforced `Content-Security-Policy` header is unchanged and keeps `'unsafe-inline'`.
+- Browsers POST violations to `/api/csp-report` (`src/pages/api/csp-report.ts`). The endpoint always
+  answers 204, reads at most 8 KB, and logs one line per violation to Workers Logs:
+  `[csp-report] {"directive":…,"blocked":…,"page":…,"source":…,"line":…,"sample":…}`. URLs keep
+  origin and path only (no query or fragment). Nothing is stored. It shares the `LOGIN_LIMITER`
+  binding under its own `csp-report:<ip>` key (5 per minute per IP).
+- Before deployment, a headless-browser check against a local production build found one more
+  inline script of our own: the reviews filter's `<select onchange=…>`. It is now a listener in
+  the bundled script, and `tests/csp-inline-scripts.test.mjs` rejects `on*=` handlers and
+  `javascript:` URLs.
+
+**What the window must show (24–48 h after deployment):**
+
+1. Workers Logs for `kilcon-site`, filtered by `[csp-report]`. Expected: none from our pages. A
+   report with `blocked":"inline"` and a `window.__CF$cv$params`-style sample means Cloudflare did
+   **not** nonce its bootstrap based on the report-only header.
+2. In a browser on `/`, `/contact`, `/reviews` and `/admin`: the injected bootstrap `<script>`
+   carries the response's nonce (`document.scripts` → `nonce`), and the console shows no
+   `[Report Only]` violations.
+3. Reports from browser extensions (`chrome-extension:`, `moz-extension:` sources) are noise.
+
+**Then:** if the bootstrap is nonced and no unexplained reports appear, a separate approved
+release moves the nonce into the enforced header and removes `'unsafe-inline'` from `script-src`.
+If Cloudflare only nonces scripts for the enforced header, the alternatives are an owner decision:
+keep `'unsafe-inline'`, or turn off JavaScript Detections / Bot Fight Mode. Turn the observation
+off by setting `CSP_NONCE_REPORT_ONLY = false`, or roll back the site version.
+
 ## Known gaps
 
 - If a page throws before returning a response, Astro's bare 500 is produced outside middleware and has no headers. The same goes for Astro's CSRF 403. Both are empty or plain-text bodies.
-- There is no CSP report endpoint yet. Violations appear only in the browser console.
+- Violations of the **enforced** policy are not reported (no `report-uri` there); only the nonce report-only policy reports to `/api/csp-report`.
 
 ## Deploy (needs approval)
 

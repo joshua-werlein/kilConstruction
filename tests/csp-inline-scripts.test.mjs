@@ -20,6 +20,25 @@ test("no is:inline or define:vars scripts in src/", async () => {
   }
 });
 
+test("no inline event-handler attributes (on*=) or javascript: URLs in src/ or public/", async () => {
+  // A nonce policy blocks these (script-src-attr); found by the report-only check on /reviews.
+  for (const base of ["../src/", "../public/"]) {
+    const dir = new URL(base, import.meta.url);
+    const files = (await readdir(dir, { recursive: true })).filter((f) => /\.(astro|html|js|ts)$/.test(f));
+    for (const f of files) {
+      const src = (await readFile(new URL(f.replace(/\\/g, "/"), dir), "utf8")).replace(/<!--[\s\S]*?-->/g, "");
+      assert.doesNotMatch(src, /<[a-z][^>]*\son[a-z]+\s*=\s*["'{]/i, `${base}${f}`);
+      assert.doesNotMatch(src, /\bhref\s*=\s*["']javascript:/i, `${base}${f}`);
+    }
+  }
+});
+
+test("the reviews filter submits from the bundled script", async () => {
+  const page = await readFile(new URL("pages/reviews.astro", srcDir), "utf8");
+  assert.match(page, /<select name="type" id="review-type-filter">/);
+  assert.match(page, /getElementById\("review-type-filter"\)[\s\S]*typeFilter\?\.addEventListener\("change", \(\) => typeFilter\.form\?\.submit\(\)\)/);
+});
+
 test("Astro never inlines processed scripts; CSS keeps the default limit", () => {
   const limit = config.vite?.build?.assetsInlineLimit;
   assert.equal(typeof limit, "function");
