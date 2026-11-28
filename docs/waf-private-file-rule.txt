@@ -1,0 +1,36 @@
+lower(http.host) in {"kilcon.work" "www.kilcon.work" "images.kilcon.work"}
+and not starts_with(lower(http.request.uri.path), "/.well-known/")
+and (
+  lower(http.request.uri.path) in {
+    "/.npmrc" "/.netrc" "/.htaccess" "/.htpasswd" "/.ds_store" "/.gitignore" "/.assetsignore"
+    "/astro.config.mjs" "/vite.config.ts" "/vite.config.js" "/tsconfig.json"
+    "/package.json" "/package-lock.json" "/.nvmrc"
+    "/wrangler.toml" "/wrangler.json" "/wrangler.jsonc" "/wrangler.contact.toml"
+    "/migration-014-baseline.json" "/fbvt.tmp" "/nul" "/cname"
+    "/www.bak" "/backup.sql" "/database.sql" "/dump.sql"
+    "/database.sqlite" "/database.sqlite3" "/database.db"
+    "/error.log" "/debug.log" "/npm-debug.log"
+  }
+  or http.request.uri.path wildcard "*/.git"
+  or http.request.uri.path wildcard "*/.git/*"
+  or http.request.uri.path wildcard "*/.svn"
+  or http.request.uri.path wildcard "*/.svn/*"
+  or http.request.uri.path wildcard "*/.env"
+  or http.request.uri.path wildcard "*/.env.*"
+  or http.request.uri.path wildcard "*/.dev.vars"
+  or http.request.uri.path wildcard "*/.dev.vars.*"
+  or http.request.uri.path wildcard "/.wrangler/*"
+  or http.request.uri.path wildcard "/.astro/*"
+  or http.request.uri.path wildcard "/.vscode/*"
+  or http.request.uri.path wildcard "/.idea/*"
+  or http.request.uri.path wildcard "/node_modules/*"
+  or http.request.uri.path wildcard "/dist/*"
+  or http.request.uri.path wildcard "/migrations/*"
+  or http.request.uri.path wildcard "/_astro/*.map"
+  or http.request.uri.path wildcard "/backups/*"
+  or http.request.uri.path wildcard "*.sql"
+  or http.request.uri.path wildcard "*.sql.gz"
+  or http.request.uri.path wildcard "*.sqlite"
+  or http.request.uri.path wildcard "*.sqlite3"
+  or http.request.uri.path wildcard "*.bak"
+)
