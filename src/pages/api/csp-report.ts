@@ -2,8 +2,8 @@ import type { APIRoute } from "astro";
 import { runtimeEnv } from "../../utils/runtimeEnv";
 import { parseCspReports, MAX_REPORT_BYTES } from "../../lib/csp-report.js";
 
-// Receives violation reports from the nonce report-only policy
-// (CSP_NONCE_REPORT_ONLY in src/utils/securityHeaders.ts) and logs a short,
+// Receives violation reports from the enforced CSP on HTML responses
+// (htmlCsp in src/utils/securityHeaders.ts, report-uri) and logs a short,
 // privacy-safe summary to Workers Logs ("[csp-report]"). Nothing is stored.
 // Always answers 204, so it reveals nothing and browsers never retry.
 //

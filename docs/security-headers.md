@@ -89,7 +89,7 @@ CSP and frame protection only matter for documents. They already get `nosniff` f
 | `Referrer-Policy` | `strict-origin-when-cross-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), usb=()` |
 | `Cross-Origin-Opener-Policy` | `same-origin-allow-popups` |
-| `Content-Security-Policy-Report-Only` | see `src/utils/securityHeaders.ts` |
+| `Content-Security-Policy` | see `src/utils/securityHeaders.ts`; HTML responses add a per-response nonce and `report-uri` |
 
 These are not set here, because the Cloudflare zone already sends them:
 
@@ -101,15 +101,16 @@ such as `Response.redirect`, are re-wrapped so the headers can be added.
 
 ### CSP (enforced since 2026-11-24)
 
-The source of truth is `CSP_DIRECTIVES` in `src/utils/securityHeaders.ts`. As of 2026-11-25:
+The source of truth is `CSP_DIRECTIVES` in `src/utils/securityHeaders.ts`. As of 2026-11-28 (HTML responses;
+non-HTML responses send the same policy without the nonce and `report-uri`):
 
 ```
-default-src 'self'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com
+default-src 'self'; script-src 'self' 'nonce-<fresh 128-bit per response>' https://challenges.cloudflare.com
 https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline';
 img-src 'self' data: blob: https://images.kilcon.work; font-src 'self';
 connect-src 'self' https://challenges.cloudflare.com https://cloudflareinsights.com;
 frame-src https://challenges.cloudflare.com; manifest-src 'self'; object-src 'none';
-base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+base-uri 'self'; form-action 'self'; frame-ancestors 'none'; report-uri /api/csp-report
 ```
 
 What each source is for:
@@ -120,7 +121,7 @@ What each source is for:
 | `images.kilcon.work` | R2 gallery images and their `/cdn-cgi/image/` variants. |
 | `'self'` | Same-origin APIs: `/api/stripe/checkout`, `/api/item`, `/api/reviews/*`, `/api/gallery-api/*`, `/api/admin/*`. |
 | `form-action 'self'` | The contact form (`https://kilcon.work/api/contact` in production) and the admin login (a POST to `/admin`). |
-| `'unsafe-inline'` in `script-src` | Only Cloudflare's injected challenge-platform bootstrap (Bot Fight Mode / JavaScript Detections), on every page. Our own scripts are same-origin `/_astro/*.js` files since 2026-11-25. |
+| `'nonce-…'` in `script-src` | Cloudflare's injected challenge-platform bootstrap (Bot Fight Mode / JavaScript Detections) on every page; Cloudflare copies the header's nonce onto it. Our own scripts are same-origin `/_astro/*.js` files. No `'unsafe-inline'` since 2026-11-28. |
 | `'unsafe-inline'` in `style-src` | Inline `style=""` attributes (projects, apparel). |
 
 Two cases fall outside CSP:
@@ -168,16 +169,24 @@ Bot protection stays on; turning it off is an owner decision and not planned.
 **Plan for removing `'unsafe-inline'` from `script-src`:**
 
 1. Done: our own inline scripts are removed (the enforced policy is unchanged).
-2. In progress: send a nonce-based `Content-Security-Policy-Report-Only` header **alongside** the
+2. Done (2026-11-26 to 2026-11-28): send a nonce-based `Content-Security-Policy-Report-Only` header **alongside** the
    enforced policy, and confirm Cloudflare nonces its bootstrap (see
    [Nonce report-only observation](#nonce-report-only-observation)).
-3. Only after 24–48 hours with no unexplained violations: move the nonce into the enforced
-   header and drop `'unsafe-inline'` from `script-src`. `style-src 'unsafe-inline'` is separate
-   and stays.
+3. Done 2026-11-28: the nonce moved into the enforced header and `'unsafe-inline'` left
+   `script-src`; the report-only header is retired. `style-src 'unsafe-inline'` is separate and stays.
+   See [Nonce enforcement](#nonce-enforcement-2026-11-28).
 
-## Nonce report-only observation
+## Nonce enforcement (2026-11-28)
 
-`CSP_NONCE_REPORT_ONLY` in `src/utils/securityHeaders.ts` adds a second header to **HTML responses only**:
+- `htmlCsp(nonce)` in `src/utils/securityHeaders.ts` builds the enforced policy for **HTML responses**: `script-src 'self' 'nonce-<n>' https://challenges.cloudflare.com https://static.cloudflareinsights.com`, plus `report-uri /api/csp-report`. Every other directive is unchanged. Non-HTML responses get `CSP` without a nonce.
+- **Why it was ready:** the 48-hour report-only window (2026-11-26 00:17 UTC to 2026-11-28) logged 0 reports from real pages; the only 3 `[csp-report]` lines were the synthetic `MAINTENANCE-SYNTHETIC-REPORT` check. On `/`, `/contact`, `/reviews`, `/projects`, `/apparel` and `/admin`, the injected bootstrap carried the header's nonce. The admin apparel variant editor saved under the report-only policy with no report; the owner confirmed it works.
+- Enforced violations now reach `/api/csp-report` and Workers Logs (`[csp-report]`, `"disposition":"enforce"`).
+- HTML must not be cached at the edge (the nonce would repeat). No cache rule caches HTML today.
+- **Rollback:** redeploy the previous kilcon-site version (enforced `'unsafe-inline'` plus the nonce report-only header), then revert the commit.
+
+## Nonce report-only observation (2026-11-26 to 2026-11-28, retired)
+
+`CSP_NONCE_REPORT_ONLY` in `src/utils/securityHeaders.ts` added a second header to **HTML responses only**:
 
 ```
 Content-Security-Policy-Report-Only: <the enforced policy, with script-src
@@ -215,7 +224,7 @@ off by setting `CSP_NONCE_REPORT_ONLY = false`, or roll back the site version.
 ## Known gaps
 
 - If a page throws before returning a response, Astro's bare 500 is produced outside middleware and has no headers. The same goes for Astro's CSRF 403. Both are empty or plain-text bodies.
-- Violations of the **enforced** policy are not reported (no `report-uri` there); only the nonce report-only policy reports to `/api/csp-report`.
+- Only HTML responses carry `report-uri`; non-HTML responses run no scripts.
 
 ## Deploy (needs approval)
 

@@ -27,7 +27,7 @@ test("adds every security header with its exact value", () => {
   assert.equal(res.headers.get("Referrer-Policy"), "strict-origin-when-cross-origin");
   assert.equal(res.headers.get("Permissions-Policy"), "camera=(), microphone=(), geolocation=(), usb=()");
   assert.equal(res.headers.get("Cross-Origin-Opener-Policy"), "same-origin-allow-popups");
-  assert.equal(res.headers.get(CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only"), CSP);
+  assert.match(res.headers.get(CSP_ENFORCE ? "Content-Security-Policy" : "Content-Security-Policy-Report-Only"), /^default-src 'self'; script-src 'self' 'nonce-/);
   assert.equal(res.headers.get("Content-Type"), "text/html");
 });
 
@@ -91,7 +91,7 @@ test("streamed (SSR) bodies pass through unread", async () => {
 test("CSP allows exactly what the site loads: Turnstile, gallery images, same-origin APIs", () => {
   assert.deepEqual(directive("default-src"), ["'self'"]);
   assert.ok(directive("script-src").includes(TURNSTILE_ORIGIN), "Turnstile api.js");
-  assert.ok(directive("script-src").includes("'unsafe-inline'"), "define:vars inline scripts");
+  assert.ok(!directive("script-src").includes("'unsafe-inline'"), "no inline scripts allowed; HTML gets a nonce");
   assert.deepEqual(directive("frame-src"), [TURNSTILE_ORIGIN], "Turnstile widget iframe only");
   assert.ok(directive("img-src").includes(IMAGES_ORIGIN), "R2 gallery images");
   assert.ok(directive("img-src").includes("blob:"), "admin upload previews");
@@ -173,36 +173,28 @@ test("production policy is enforced", () => {
   assert.equal(SECURITY_HEADERS["Content-Security-Policy-Report-Only"], undefined);
 });
 
-// --- Nonce report-only observation policy (2026-11-26) ---------------------
-import {
-  CSP_NONCE_REPORT_ONLY,
-  CSP_REPORT_PATH,
-  NONCE_REPORT_ONLY_HEADER,
-  nonceReportOnlyCsp,
-  generateNonce,
-} from "../src/utils/securityHeaders.ts";
+// --- Enforced per-response nonce (2026-11-28) ---------------------------------
+import { CSP_REPORT_PATH, htmlCsp, generateNonce } from "../src/utils/securityHeaders.ts";
 import { parseCspReports, MAX_REPORT_BYTES } from "../src/lib/csp-report.js";
 
 const html = () => new Response("<h1>ok</h1>", { headers: { "Content-Type": "text/html; charset=utf-8" } });
 const parse = (policy) => new Map(policy.split(/;\s*/).map((d) => { const [k, ...v] = d.split(/\s+/); return [k, v]; }));
+const enforcedOn = (r) => applySecurityHeaders(r).headers.get("Content-Security-Policy");
 
-test("the enforced policy is unchanged and still allows 'unsafe-inline' during observation", () => {
-  assert.equal(CSP_ENFORCE, true);
-  assert.ok(directive("script-src").includes("'unsafe-inline'"), "unsafe-inline stays until the window passes");
-  assert.ok(!CSP.includes("nonce-"), "no nonce in the enforced header yet");
-  assert.equal(applySecurityHeaders(html()).headers.get("Content-Security-Policy"), CSP);
+test("script-src has no 'unsafe-inline' anywhere; style-src keeps it", () => {
+  assert.ok(!directive("script-src").includes("'unsafe-inline'"));
+  assert.ok(directive("style-src").includes("'unsafe-inline'"), "style-src unchanged");
+  assert.deepEqual(directive("script-src"), ["'self'", TURNSTILE_ORIGIN, CF_INSIGHTS_SCRIPT_ORIGIN]);
+  assert.ok(!CSP.includes("nonce-"), "the static policy carries no nonce");
 });
 
-test("HTML responses get a nonce report-only policy: enforced policy minus 'unsafe-inline', plus nonce and report-uri", () => {
-  assert.equal(CSP_NONCE_REPORT_ONLY, true);
-  const ro = applySecurityHeaders(html()).headers.get(NONCE_REPORT_ONLY_HEADER);
-  assert.ok(ro, "present on HTML");
-  const p = parse(ro);
+test("HTML responses get the enforced policy with a nonce and report-uri; every other directive unchanged", () => {
+  const p = parse(enforcedOn(html()));
   const script = p.get("script-src");
   assert.equal(script[0], "'self'");
   assert.match(script[1], /^'nonce-[A-Za-z0-9+/]{22}=='$/);
+  assert.deepEqual(script.filter((x) => !x.startsWith("'nonce-")), directive("script-src"));
   assert.ok(!script.includes("'unsafe-inline'"));
-  assert.deepEqual(script.filter((s) => !s.startsWith("'nonce-")), directive("script-src").filter((s) => s !== "'unsafe-inline'"));
   for (const [k] of CSP_DIRECTIVES) if (k !== "script-src") assert.deepEqual(p.get(k), directive(k), k);
   assert.deepEqual(p.get("report-uri"), [CSP_REPORT_PATH]);
 });
@@ -213,23 +205,27 @@ test("the nonce is fresh per response and 128-bit", () => {
     const n = generateNonce();
     assert.equal(atob(n).length, 16);
     seen.add(n);
-    seen.add(parse(applySecurityHeaders(html()).headers.get(NONCE_REPORT_ONLY_HEADER)).get("script-src")[1]);
+    seen.add(parse(enforcedOn(html())).get("script-src")[1]);
   }
   assert.equal(seen.size, 100);
-  assert.match(nonceReportOnlyCsp("abc"), /script-src 'self' 'nonce-abc' /);
+  assert.match(htmlCsp("abc"), /script-src 'self' 'nonce-abc' https:\/\/challenges\.cloudflare\.com /);
 });
 
-test("non-HTML responses (JSON, redirects, plain text, assets) get no report-only header", () => {
+test("non-HTML responses (JSON, redirects, plain text, 204) get the plain enforced policy, no nonce", () => {
   const json = new Response("{}", { headers: { "Content-Type": "application/json" } });
-  assert.equal(applySecurityHeaders(json).headers.get(NONCE_REPORT_ONLY_HEADER), null);
-  assert.equal(applySecurityHeaders(Response.redirect("https://kilcon.work/", 302)).headers.get(NONCE_REPORT_ONLY_HEADER), null);
-  assert.equal(applySecurityHeaders(new Response("x")).headers.get(NONCE_REPORT_ONLY_HEADER), null);
-  assert.equal(applySecurityHeaders(new Response(null, { status: 204 })).headers.get(NONCE_REPORT_ONLY_HEADER), null);
+  for (const r of [json, Response.redirect("https://kilcon.work/", 302), new Response("x"), new Response(null, { status: 204 })]) {
+    assert.equal(enforcedOn(r), CSP);
+  }
 });
 
-test("a report-only header a route set is not overwritten", () => {
-  const r = new Response("<p>", { headers: { "Content-Type": "text/html", [NONCE_REPORT_ONLY_HEADER]: "default-src 'none'" } });
-  assert.equal(applySecurityHeaders(r).headers.get(NONCE_REPORT_ONLY_HEADER), "default-src 'none'");
+test("the report-only observation header is retired", () => {
+  assert.equal(applySecurityHeaders(html()).headers.get("Content-Security-Policy-Report-Only"), null);
+  assert.equal(applySecurityHeaders(new Response("x")).headers.get("Content-Security-Policy-Report-Only"), null);
+});
+
+test("a CSP header a route set is not overwritten, even on HTML", () => {
+  const r = new Response("<p>", { headers: { "Content-Type": "text/html", "Content-Security-Policy": "default-src 'none'" } });
+  assert.equal(applySecurityHeaders(r).headers.get("Content-Security-Policy"), "default-src 'none'");
 });
 
 test("CSP reports: both formats parsed; query strings and fragments dropped; bounded", () => {

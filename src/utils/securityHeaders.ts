@@ -12,6 +12,11 @@
 // The CSP is ENFORCED since 2026-11-24, after a report-only period and production
 // browser checks (docs/security-headers.md). To fall back to report-only, set
 // CSP_ENFORCE to false.
+//
+// Since 2026-11-28 script-src has no 'unsafe-inline': HTML responses carry a fresh
+// per-response nonce instead (htmlCsp). Cloudflare adds that nonce to the
+// challenge-platform bootstrap it injects (bot protection), verified during the
+// 2026-11-26..28 report-only observation window with 0 real violations.
 
 /** Third-party origins the browser legitimately loads from. */
 export const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
@@ -24,11 +29,9 @@ export const CF_INSIGHTS_REPORT_ORIGIN = "https://cloudflareinsights.com";
 
 export const CSP_DIRECTIVES: ReadonlyArray<readonly [string, string]> = [
   ["default-src", "'self'"],
-  // 'unsafe-inline': only Cloudflare's injected challenge-platform bootstrap
-  // (per-request content, so no hash). Our own pages have no inline scripts since
-  // 2026-11-25 (tests/csp-inline-scripts.test.mjs). It stays until a nonce-based
-  // report-only policy has passed its observation window (docs/security-headers.md).
-  ["script-src", `'self' 'unsafe-inline' ${TURNSTILE_ORIGIN} ${CF_INSIGHTS_SCRIPT_ORIGIN}`],
+  // No 'unsafe-inline'. Our own pages have no inline scripts (tests/csp-inline-scripts.test.mjs);
+  // HTML responses add 'nonce-<n>' (htmlCsp) for Cloudflare's injected bootstrap.
+  ["script-src", `'self' ${TURNSTILE_ORIGIN} ${CF_INSIGHTS_SCRIPT_ORIGIN}`],
   ["style-src", "'self' 'unsafe-inline'"],
   // data:/blob: cover inline SVG and admin upload previews.
   ["img-src", `'self' data: blob: ${IMAGES_ORIGIN}`],
@@ -59,20 +62,13 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze(
   [CSP_HEADER]: CSP,
 });
 
-// --- Nonce-based report-only policy (observation stage) --------------------
+// --- Per-response script nonce (enforced since 2026-11-28) ------------------
 //
-// Goal: drop 'unsafe-inline' from the enforced script-src. The last inline
-// script is Cloudflare's injected challenge-platform bootstrap, which Cloudflare
-// documents it will nonce when the CSP header carries a nonce. This sends, on
-// HTML responses only, a second header, Content-Security-Policy-Report-Only,
-// with the enforced policy minus 'unsafe-inline' plus a fresh per-request
-// nonce. It blocks nothing. Violations are POSTed to CSP_REPORT_PATH and logged.
-// The enforced header above is unchanged. Only after 24–48 h without
-// unexplained reports may the nonce move into the enforced policy
-// (docs/security-headers.md). Set to false to stop the observation.
-export const CSP_NONCE_REPORT_ONLY = true;
+// HTML responses get the policy above with 'nonce-<n>' added to script-src and a
+// report-uri, so real violations are logged by CSP_REPORT_PATH ("[csp-report]").
+// Non-HTML responses (JSON, redirects, plain text) get CSP unchanged: they run no
+// scripts. HTML must never be shared-cached, or the nonce would repeat.
 export const CSP_REPORT_PATH = "/api/csp-report";
-export const NONCE_REPORT_ONLY_HEADER = "Content-Security-Policy-Report-Only";
 
 /** 128-bit random nonce, base64 (CSP nonce-source syntax). */
 export function generateNonce(): string {
@@ -83,12 +79,12 @@ export function generateNonce(): string {
   return btoa(bin);
 }
 
-/** The enforced policy with script-src 'unsafe-inline' replaced by the nonce, plus report-uri. */
-export function nonceReportOnlyCsp(nonce: string): string {
+/** The enforced policy for an HTML response: script-src gains the nonce; report-uri added. */
+export function htmlCsp(nonce: string): string {
   return CSP_DIRECTIVES.map(([k, v]) => {
     if (k !== "script-src") return `${k} ${v}`;
-    const sources = v.split(/\s+/).filter((s) => s && s !== "'unsafe-inline'");
-    return `${k} ${[sources[0], `'nonce-${nonce}'`, ...sources.slice(1)].join(" ")}`;
+    const [first, ...rest] = v.split(/\s+/).filter(Boolean);
+    return `${k} ${[first, `'nonce-${nonce}'`, ...rest].join(" ")}`;
   }).join("; ") + `; report-uri ${CSP_REPORT_PATH}`;
 }
 
@@ -100,14 +96,13 @@ function isHtml(response: Response): boolean {
  * Adds SECURITY_HEADERS to a response. A header the route already set is left
  * alone. Responses with immutable headers (e.g. Response.redirect, or a
  * fetch() passed straight through) are re-wrapped so the headers can be set.
- * HTML responses also get the nonce report-only policy while it is switched on
- * (only when the main policy is enforced, so the two never share a header name).
+ * HTML responses get the nonce policy (htmlCsp) in place of the plain CSP.
  */
 export function applySecurityHeaders(response: Response): Response {
-  const missing = Object.entries(SECURITY_HEADERS).filter(([k]) => !response.headers.has(k));
-  if (CSP_NONCE_REPORT_ONLY && CSP_ENFORCE && isHtml(response) && !response.headers.has(NONCE_REPORT_ONLY_HEADER)) {
-    missing.push([NONCE_REPORT_ONLY_HEADER, nonceReportOnlyCsp(generateNonce())]);
-  }
+  const html = isHtml(response);
+  const missing = Object.entries(SECURITY_HEADERS)
+    .filter(([k]) => !response.headers.has(k))
+    .map(([k, v]): [string, string] => [k, html && k === CSP_HEADER ? htmlCsp(generateNonce()) : v]);
   if (missing.length === 0) return response;
   try {
     for (const [k, v] of missing) response.headers.set(k, v);
